@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';">
+  <title>Multi-Hoster-Upload</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <nav class="menu-bar" id="menuBar">
+    <div class="menu-bar-item" data-menu="datei">
+      <button class="menu-bar-trigger" data-menu-trigger="datei">Datei</button>
+      <div class="menu-dropdown" data-menu-dropdown="datei" style="display:none">
+        <button class="menu-dropdown-item" data-menu-action="add-files"><span>Dateien hinzufügen</span></button>
+        <button class="menu-dropdown-item" data-menu-action="add-folder"><span>Ordner hinzufügen</span></button>
+        <div class="menu-separator"></div>
+        <div class="menu-submenu" data-submenu="sicherung">
+          <button class="menu-submenu-trigger">Sicherung</button>
+          <div class="menu-submenu-dropdown" style="display:none">
+            <button class="menu-dropdown-item" data-menu-action="backup-export"><span>Exportieren</span></button>
+            <button class="menu-dropdown-item" data-menu-action="backup-import"><span>Importieren</span></button>
+          </div>
+        </div>
+        <div class="menu-separator"></div>
+        <button class="menu-dropdown-item" data-menu-action="restart"><span>Neustart</span></button>
+        <button class="menu-dropdown-item" data-menu-action="quit"><span>Beenden</span></button>
+      </div>
+    </div>
+    <div class="menu-bar-item" data-menu="einstellungen">
+      <button class="menu-bar-trigger" data-menu-trigger="einstellungen">Einstellungen</button>
+      <div class="menu-dropdown" data-menu-dropdown="einstellungen" style="display:none">
+        <button class="menu-dropdown-item" data-menu-action="open-settings"><span>Einstellungen öffnen</span></button>
+        <div class="menu-separator"></div>
+        <div class="menu-settings-grid" id="menuSettingsGrid">
+          <span>Max. parallele Uploads</span>
+          <span></span>
+          <div class="menu-spinner">
+            <input type="text" inputmode="numeric" id="menuParallelInput">
+            <div class="menu-spinner-arrows">
+              <button data-spin="parallel-up">&#9650;</button>
+              <button data-spin="parallel-down">&#9660;</button>
+            </div>
+          </div>
+          <span></span>
+          <span>Geschwindigkeitslimit</span>
+          <input type="checkbox" id="menuSpeedLimitCheck">
+          <div class="menu-spinner" id="menuSpeedSpinner">
+            <input type="text" inputmode="decimal" id="menuSpeedInput">
+            <div class="menu-spinner-arrows">
+              <button data-spin="speed-up">&#9650;</button>
+              <button data-spin="speed-down">&#9660;</button>
+            </div>
+          </div>
+          <span class="menu-speed-unit">MB/s</span>
+        </div>
+      </div>
+    </div>
+    <div class="menu-bar-item" data-menu="hilfe">
+      <button class="menu-bar-trigger" data-menu-trigger="hilfe">Hilfe</button>
+      <div class="menu-dropdown" data-menu-dropdown="hilfe" style="display:none">
+        <button class="menu-dropdown-item" data-menu-action="open-log-folder"><span>Log-Ordner öffnen</span></button>
+        <button class="menu-dropdown-item" data-menu-action="support-bundle"><span>Diagnose-Paket exportieren</span></button>
+        <div class="menu-separator"></div>
+        <button class="menu-dropdown-item" data-menu-action="check-updates"><span>Suche Aktualisierungen</span></button>
+      </div>
+    </div>
+  </nav>
+
+  <nav class="tab-bar">
+    <button class="tab active" data-view="upload">Upload</button>
+    <button class="tab" data-view="accounts">Accounts</button>
+    <button class="tab" data-view="settings">Einstellungen</button>
+    <button class="tab" data-view="history">Verlauf</button>
+    <span class="version-label" id="versionLabel"></span>
+  </nav>
+
+  <div id="updateBanner" class="update-banner" style="display:none">
+    <span id="updateMessage"></span>
+    <button class="btn btn-sm btn-primary" id="installUpdateBtn">Update installieren</button>
+    <button class="btn btn-sm btn-secondary" id="dismissUpdateBtn">&times;</button>
+  </div>
+
+  <div id="upload-view" class="view active">
+    <div class="upload-toolbar">
+      <div class="toolbar-left">
+        <span class="hoster-summary" id="hosterSummary" style="display:none"></span>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn btn-xs btn-primary" id="addFilesBtn">+ Dateien</button>
+        <button class="btn btn-xs btn-secondary" id="addFolderBtn">+ Ordner</button>
+      </div>
+    </div>
+
+    <div class="upload-workspace">
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-icon">&#128193;</div>
+        <p>Dateien hierher ziehen oder klicken</p>
+      </div>
+
+      <div class="queue-shell" id="queueShell" style="display:none">
+        <div class="queue-command-bar" id="queueCommandBar">
+          <button class="toolbar-btn" id="startUploadBtn" title="Start all" disabled>
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="startSelectedBtn" title="Start selected" disabled>
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M6 3l8 5-8 5z" fill="#4caf50"/><rect x="1" y="3" width="3" height="10" rx="0.5" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="reuploadSelectedBtn" title="Reupload selected file">
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-5 2.1V1H2v4h4V4H3.7A5.5 5.5 0 1 1 2.5 8H1a7 7 0 1 0 7-7z" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="abortSelectedBtn" title="Abort selected file">
+            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1" fill="#e53935"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+          <button class="toolbar-btn" id="finishStopBtn" title="Finish Uploads in Progress and Stop">
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M2 8l4 4 8-8" stroke="#4caf50" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="9" width="5" height="5" rx="1" fill="#e53935"/></svg>
+          </button>
+          <button class="toolbar-btn toolbar-btn-danger" id="abortAllBtn" title="Abort all Downloads">
+            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#e53935"/><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+          </button>
+          <span class="toolbar-sep"></span>
+          <button class="toolbar-btn" id="moveTopBtn" title="Move to the top">
+            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="2" rx="0.5" fill="#4caf50"/><path d="M8 5l-4 5h8z" fill="#4caf50"/><path d="M8 9l-4 5h8z" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="moveUpBtn" title="Move up">
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 2l-5 6h10z" fill="#4caf50"/><rect x="6" y="8" width="4" height="6" rx="0.5" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="moveDownBtn" title="Move down">
+            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="6" rx="0.5" fill="#4caf50"/><path d="M8 14l-5-6h10z" fill="#4caf50"/></svg>
+          </button>
+          <button class="toolbar-btn" id="moveBottomBtn" title="Move to the bottom">
+            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 7l-4-5h8z" fill="#4caf50"/><path d="M8 11l-4-5h8z" fill="#4caf50"/><rect x="4" y="13" width="8" height="2" rx="0.5" fill="#4caf50"/></svg>
+          </button>
+        </div>
+
+        <div class="queue-container" id="queueContainer">
+          <table class="queue-table" id="queueTable">
+            <thead>
+              <tr>
+                <th class="col-filename sortable" data-col="filename" data-sort="filename">Filename<span class="col-resizer"></span></th>
+                <th class="col-size sortable" data-col="size" data-sort="size">Uploaded / Size<span class="col-resizer"></span></th>
+                <th class="col-host sortable" data-col="host" data-sort="host">Host<span class="col-resizer"></span></th>
+                <th class="col-status sortable" data-col="status" data-sort="status">Status<span class="col-resizer"></span></th>
+                <th class="col-elapsed" data-col="elapsed">Zeit<span class="col-resizer"></span></th>
+                <th class="col-remaining" data-col="remaining">Rest<span class="col-resizer"></span></th>
+                <th class="col-speed sortable" data-col="speed" data-sort="speed">Speed<span class="col-resizer"></span></th>
+                <th class="col-progress sortable" data-col="progress" data-sort="progress">Progress</th>
+              </tr>
+            </thead>
+            <tbody id="queueBody"></tbody>
+          </table>
+        </div>
+
+        <div class="queue-actions" id="queueActions" style="display:none">
+          <button class="btn btn-xs btn-primary" id="copyAllLinksBtn">Alle Links kopieren</button>
+          <select class="hs-input" id="linkExportFormat" title="Ausgabe-Format der kopierten Links" style="max-width:none;width:auto;min-width:130px">
+            <option value="plain">Plaintext</option>
+            <option value="bbcode">BBCode</option>
+            <option value="markdown">Markdown</option>
+            <option value="html">HTML</option>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+          <button class="btn btn-xs btn-secondary" id="retryFailedBtn" style="display:none">Fehlgeschlagene erneut</button>
+          <button class="btn btn-xs btn-secondary" id="importLogBtn" title="Log importieren — bereits hochgeladene aus Queue entfernen">Log importieren</button>
+        </div>
+
+        <div class="resize-handle" id="recentFilesResizer"></div>
+        <div class="recent-files-panel" id="recentFilesPanel">
+          <div class="recent-files-header">
+            <div class="recent-tabs">
+              <button class="recent-tab active" data-panel="filesTab">Files</button>
+              <button class="recent-tab" data-panel="statsTab">Stats</button>
+            </div>
+            <span class="recent-files-hint" id="recentFilesHint">Zuletzt erzeugte Upload-Links</span>
+            <button class="btn btn-xs btn-secondary" id="exportRecentFilesBtn" title="Alle Zeilen als Datei exportieren (Zeit, Hoster, Link, Dateiname)">Exportieren</button>
+            <button class="btn btn-xs btn-danger" id="clearRecentFilesBtn" title="Alle Links aus diesem Panel entfernen">Alle entfernen</button>
+          </div>
+          <div class="recent-tab-body active" id="filesTab">
+            <div class="recent-files-table-wrap">
+              <table class="recent-files-table">
+                <thead id="recentFilesHead">
+                  <tr>
+                    <th class="col-date sortable" data-recent-sort="date">Datum<span class="sort-indicator">▼</span></th>
+                    <th class="col-filename sortable" data-recent-sort="filename">Filename<span class="sort-indicator">↕</span></th>
+                    <th class="col-host sortable" data-recent-sort="host">Host<span class="sort-indicator">↕</span></th>
+                    <th class="col-link sortable" data-recent-sort="link">Link<span class="sort-indicator">↕</span></th>
+                  </tr>
+                </thead>
+                <tbody id="recentFilesBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="recent-tab-body" id="statsTab">
+            <div class="stats-grid">
+              <div class="stats-col">
+                <h4>Files in queue (count)</h4>
+                <div class="stats-row"><span>total:</span><span id="statQueueTotal">0</span></div>
+                <div class="stats-row"><span>done:</span><span id="statQueueDone">0</span></div>
+                <div class="stats-row"><span>remaining:</span><span id="statQueueRemaining">0</span></div>
+                <div class="stats-row"><span>in progress:</span><span id="statQueueInProgress">0</span></div>
+                <div class="stats-row"><span>error:</span><span id="statQueueError">0</span></div>
+              </div>
+              <div class="stats-col">
+                <h4>File size in queue</h4>
+                <div class="stats-row"><span>total:</span><span id="statSizeTotal">0 B</span></div>
+                <div class="stats-row"><span>remaining:</span><span id="statSizeRemaining">0 B</span></div>
+              </div>
+              <div class="stats-col">
+                <h4>Session</h4>
+                <div class="stats-row"><span>Upload speed:</span><span id="statSpeed">0 B/s</span></div>
+                <div class="stats-row"><span>Remaining time:</span><span id="statEta">--:--</span></div>
+                <div class="stats-row"><span>Run time:</span><span id="statRunTime">00:00:00</span></div>
+                <div class="stats-row"><span>Uploaded (this run):</span><span id="statSessionBytes">0 B</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="accounts-view" class="view">
+    <div class="accounts-container">
+      <div class="accounts-header">
+        <div>
+          <h2>Accounts</h2>
+          <p class="settings-hint">Hoster-Zugangsdaten verwalten und prüfen</p>
+        </div>
+        <div class="accounts-header-actions">
+          <button class="btn btn-secondary" id="accountsRunHealthCheckBtn">Accounts prüfen</button>
+          <label class="auto-check-label accounts-auto-check" title="Automatischer Check vor dem Upload">
+            <input type="checkbox" id="autoHealthCheckToggle" checked>
+            <span>Auto-Check vor Upload</span>
+          </label>
+          <button class="btn btn-primary" id="addAccountBtn">+ Account hinzufügen</button>
+        </div>
+      </div>
+      <div class="health-check-results account-health-results" id="healthCheckResults"></div>
+      <div class="accounts-list" id="accountsList"></div>
+      <div class="accounts-list-footer" id="accountsListFooter" style="display:none">
+        <button class="btn btn-secondary" id="toggleAllAccountsBtn">Alle ausklappen</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="accountModal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3 id="accountModalTitle">Account hinzufügen</h3>
+          <p id="accountModalSubtitle">Wähle einen Hoster und gib deine Zugangsdaten ein.</p>
+        </div>
+        <button class="icon-btn" id="closeAccountModalBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-row" id="accountHosterRow">
+          <label>Hoster</label>
+          <select class="key-input" id="accountHosterSelect" style="max-width:300px"></select>
+        </div>
+        <div class="settings-row">
+          <label>Label (optional)</label>
+          <input type="text" class="key-input" id="accField_label" placeholder="z.B. Hauptaccount, Premium, Kunde XY" maxlength="60">
+        </div>
+        <div id="accountCredsFields"></div>
+        <div class="account-modal-status" id="accountModalStatus"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="cancelAccountModalBtn">Abbrechen</button>
+        <button class="btn btn-primary" id="saveAccountBtn">Anlegen &amp; prüfen</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="jobLogModal" style="display:none">
+    <div class="modal-card" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
+      <div class="modal-header">
+        <div><h3 id="jobLogTitle">Upload-Log</h3></div>
+        <button class="icon-btn" id="closeJobLogBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body" style="flex:1 1 auto;overflow:auto">
+        <pre id="jobLogBody" style="white-space:pre-wrap;font-family:ui-monospace,Consolas,Menlo,monospace;font-size:12px;line-height:1.4;margin:0">Keine Einträge.</pre>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="copyJobLogBtn">In Zwischenablage</button>
+        <button class="btn btn-primary" id="closeJobLogBtn2">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="deleteAccountModal" style="display:none">
+    <div class="modal-card" style="width:min(400px,100%)">
+      <div class="modal-header">
+        <div><h3>Account löschen?</h3></div>
+        <button class="icon-btn" id="closeDeleteModalBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="deleteAccountMessage">Account wirklich löschen?</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="cancelDeleteBtn">Abbrechen</button>
+        <button class="btn btn-danger" id="confirmDeleteBtn">Löschen</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-view" class="view">
+    <div class="settings-container">
+      <h2>Upload-Einstellungen</h2>
+      <p class="settings-hint">Hoster-Einstellungen erscheinen erst, sobald ein Account hinterlegt ist. Änderungen werden automatisch gespeichert.</p>
+      <div class="settings-hosters" id="settingsHosters"></div>
+      <div class="settings-save-row">
+        <span class="save-feedback" id="saveFeedback">Änderungen werden automatisch gespeichert.</span>
+        <button class="btn btn-secondary" id="saveSettingsBtn">Jetzt speichern</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="history-view" class="view">
+    <div class="history-container">
+      <div class="history-header">
+        <h2>Upload-Verlauf</h2>
+        <div style="display:flex; gap:8px; align-items:center">
+          <label for="historyRetentionSelect" class="history-retention-label">Aufbewahrung</label>
+          <select id="historyRetentionSelect" class="key-input history-retention-select">
+            <option value="all">Alles behalten</option>
+            <option value="7d">Letzte 7 Tage</option>
+            <option value="30d">Letzte 30 Tage</option>
+            <option value="90d">Letzte 90 Tage</option>
+            <option value="1000">Letzte 1000 Uploads</option>
+            <option value="100">Letzte 100 Uploads</option>
+          </select>
+          <button class="btn btn-secondary" id="exportHistoryBtn">Verlauf exportieren</button>
+          <button class="btn btn-secondary" id="clearHistoryBtn">Verlauf löschen</button>
+        </div>
+      </div>
+      <div id="historyCapNotice" class="history-cap-notice" style="display:none"></div>
+      <div id="historyContainer"></div>
+    </div>
+  </div>
+
+  <div class="context-menu" id="contextMenu" style="display:none">
+    <div class="ctx-item" data-action="start-selected">Ausgewählte starten</div>
+    <div class="ctx-item" data-action="retry-selected">Erneut versuchen</div>
+    <div class="ctx-item" data-action="show-log">Log anzeigen</div>
+    <div class="ctx-separator"></div>
+	<div class="ctx-item" data-action="copy-links">Links kopieren</div>
+    <div class="ctx-item" data-action="copy-all-links">Alle Links kopieren</div>
+    <div class="ctx-separator"></div>
+    <div class="ctx-item" data-action="delete-selected">Entfernen</div>
+    <div class="ctx-item" data-action="delete-all">Alle entfernen</div>
+    <div class="ctx-submenu ctx-hoster-delete-submenu" style="display:none">
+      <div class="ctx-item ctx-item-danger">Hoster entfernen &#9656;</div>
+      <div class="ctx-submenu-items ctx-hoster-delete-items"></div>
+    </div>
+  </div>
+
+  <div class="context-menu" id="recentContextMenu" style="display:none">
+    <div class="ctx-item" data-action="recent-copy-links">Links kopieren</div>
+    <div class="ctx-item" data-action="recent-delete">Entfernen</div>
+  </div>
+
+  <div class="statusbar" id="statusbar">
+    <span class="sb-state" id="sbState">Bereit</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-speed" id="sbSpeed">0 kB/s</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-total" id="sbTotal">0 B</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-eta" id="sbEta">ETA --:--</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-connections" id="sbConnections">Aktive Verbindungen 0</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-queue-count" id="sbQueueCount">Gesamt 0</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-remaining-count" id="sbRemainingCount">Remaining 0</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-progress-count" id="sbInProgressCount">In Progress 0</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-done-count" id="sbDoneCount">Done 0</span>
+    <span class="sb-separator">|</span>
+    <span class="sb-error-count" id="sbErrorCount">Error 0</span>
+  </div>
+
+  <div class="copy-toast" id="copyToast"></div>
+
+  <div class="shutdown-overlay" id="shutdownOverlay" style="display:none">
+    <div class="shutdown-box">
+      <p id="shutdownMessage">System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...</p>
+      <button class="btn btn-danger" id="cancelShutdownBtn">Abbrechen</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="hosterModal" style="display:none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>Upload-Ziele auswählen</h3>
+          <p>Dateien wurden hinzugefügt. Wähle jetzt die Hoster für den Upload.</p>
+        </div>
+        <button class="icon-btn" id="closeHosterModalBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-actions-inline">
+          <button class="btn btn-xs btn-secondary" id="selectAllHostersBtn">Alle</button>
+          <button class="btn btn-xs btn-secondary" id="clearHostersBtn">Keine</button>
+        </div>
+        <div class="hoster-modal-list" id="hosterModalList"></div>
+        <p class="modal-hint" id="hosterModalHint"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="cancelHosterModalBtn">Abbrechen</button>
+        <button class="btn btn-primary" id="confirmHosterModalBtn">Übernehmen</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../lib/queue-prune.js"></script>
+  <script src="../lib/queue-dedup.js"></script>
+  <script src="../lib/log-mode.js"></script>
+  <script src="../lib/stats.js"></script>
+  <script src="../lib/throttled-cache.js"></script>
+  <script src="../lib/coalesced-set.js"></script>
+  <script src="../lib/throttle-timer.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

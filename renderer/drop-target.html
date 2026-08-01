@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    .target {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px dashed rgba(126, 220, 255, 0.5);
+      border-radius: 10px;
+      background: rgba(22, 24, 28, 0.85);
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .target.drag-over {
+      border-color: rgba(126, 220, 255, 0.9);
+      background: rgba(62, 167, 255, 0.15);
+    }
+    .icon {
+      font-size: 64px;
+      font-weight: 200;
+      color: rgba(126, 220, 255, 0.7);
+      line-height: 1;
+      -webkit-app-region: no-drag;
+    }
+  </style>
+</head>
+<body>
+  <div class="target" id="target">
+    <div class="icon">+</div>
+  </div>
+  <script>
+    const target = document.getElementById('target');
+    target.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      target.classList.add('drag-over');
+    });
+    target.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      target.classList.remove('drag-over');
+    });
+    target.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      target.classList.remove('drag-over');
+      const paths = [];
+      for (const file of e.dataTransfer.files) {
+        if (file.path) paths.push(file.path);
+      }
+      if (paths.length > 0) {
+        window.dropTargetApi.sendFiles(paths);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,3158 @@
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
+const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
+const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
+nativeTheme.themeSource = 'dark';
+const path = require('path');
+const fs = require('fs');
+const ConfigStore = require('./lib/config-store');
+const UploadManager = require('./lib/upload-manager');
+const { HOSTER_CONFIGS } = require('./lib/hosters');
+const VidmolyUploader = require('./lib/vidmoly-upload');
+const VoeUploader = require('./lib/voe-upload');
+const DoodstreamUploader = require('./lib/doodstream-upload');
+const { selectUploadAuth } = require('./lib/account-auth');
+const { createAccountPicker } = require('./lib/account-rotation');
+const ClouddropUploader = require('./lib/clouddrop-upload');
+const { checkForUpdate, installUpdate, abortUpdate } = require('./lib/updater');
+const backupCrypto = require('./lib/backup-crypto');
+const FolderMonitor = require('./lib/folder-monitor');
+const RemoteServer = require('./lib/remote-server');
+const { maybeRotateLogFile } = require('./lib/log-rotation');
+const { hosterLogToFileEnabled } = require('./lib/log-policy');
+const { formatUploadLogLine, parseUploadLogLine } = require('./lib/upload-log');
+const { selectOrphanTmps } = require('./lib/orphan-tmp');
+const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
+const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
+const stats = require('./lib/stats');
+const { createCollectors } = require('./lib/diagnostics-collectors');
+const { createAgent } = require('./lib/diagnostics-agent');
+
+function _gpuDisableFlagPath() {
+  try { return path.join(app.getPath('userData'), 'gpu-disabled.flag'); } catch { return null; }
+}
+(function maybeDisableHardwareAcceleration() {
+  let disable = false;
+  try { if (/^RDP/i.test(process.env.SESSIONNAME || '')) disable = true; } catch {}
+  if (!disable) { try { const f = _gpuDisableFlagPath(); if (f && fs.existsSync(f)) disable = true; } catch {} }
+  if (disable) { try { app.disableHardwareAcceleration(); } catch {} }
+})();
+
+const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
+_eventLoopDelay.enable();
+let _eldLastLog = 0;
+let _lastCpu = process.cpuUsage();
+let _lastCpuT = Date.now();
+let _gcCount = 0;
+let _gcTotalMs = 0;
+let _gcMaxMs = 0;
+try {
+  const _gcObserver = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      _gcCount++;
+      _gcTotalMs += entry.duration;
+      if (entry.duration > _gcMaxMs) _gcMaxMs = entry.duration;
+    }
+  });
+  _gcObserver.observe({ entryTypes: ['gc'] });
+} catch {}
+
+const _perfOn = process.env.MHU_PERF !== '0';
+let _lastIpcChannel = '';
+if (_perfOn) {
+  let _driftTick = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const drift = now - _driftTick - 100;
+    _driftTick = now;
+    if (drift >= 100) {
+      try { logInfo(`main-longtask blocked=${drift}ms lastIpc=${_lastIpcChannel || '-'} gc=${_gcCount} gcMax=${_gcMaxMs.toFixed(0)}ms`); } catch {}
+    }
+  }, 100).unref();
+
+  const IPC_SLOW_MS = 50;
+  const _ipcLog = (m) => { try { logInfo(m); } catch {} };
+  const _rawHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, fn) => _rawHandle(channel, function (evt, ...args) {
+    _lastIpcChannel = channel;
+    const t0 = performance.now();
+    let p;
+    try { p = fn.call(this, evt, ...args); }
+    catch (e) { _ipcLog(`ipc ${channel} sync-throw wall=${(performance.now() - t0).toFixed(0)}ms`); throw e; }
+    const sync = performance.now() - t0;
+    if (p && typeof p.then === 'function') {
+      return Promise.resolve(p).finally(() => {
+        const total = performance.now() - t0;
+        if (total >= IPC_SLOW_MS) _ipcLog(`ipc ${channel} wall=${total.toFixed(0)}ms sync=${sync.toFixed(0)}ms`);
+      });
+    }
+    if (sync >= IPC_SLOW_MS) _ipcLog(`ipc ${channel} wall=${sync.toFixed(0)}ms sync`);
+    return p;
+  });
+  const _rawOn = ipcMain.on.bind(ipcMain);
+  ipcMain.on = (channel, fn) => _rawOn(channel, function (evt, ...args) {
+    _lastIpcChannel = channel;
+    const t0 = performance.now();
+    try { return fn.call(this, evt, ...args); }
+    finally { const dt = performance.now() - t0; if (dt >= IPC_SLOW_MS) _ipcLog(`ipc ${channel} wall=${dt.toFixed(0)}ms sync-on`); }
+  });
+}
+
+let mainWindow;
+let _lastImportPath = null;
+let dropTargetWindow = null;
+let tray = null;
+const configStore = new ConfigStore(app);
+configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
+let uploadManager = null;
+let diagnosticAgent = null;
+let _diagHandler = null;
+
+const _hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!_hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+// Rotation memory that survives batch-done → new UploadManager within the
+// same app session. Without this, clicking "Retry failed" after a batch
+// ended would burn the full retry budget on accounts we already know are
+// dead. Cleared on app restart (which is the user's signal for "try fresh").
+const _sessionFailedAccounts = new Map(); // "hoster:accountId" -> true
+const _sessionAccountOverrides = new Map(); // hoster -> account object
+
+// Per-job log collector: backs the right-click "Log anzeigen" modal so the
+// user can see the full rot-log + status trail for a single file without
+// grepping account-rotation.log. Ring buffer per job keeps memory bounded.
+const _jobLogCollector = new Map(); // jobId -> Array<entry>
+const _MAX_LOG_ENTRIES_PER_JOB = 200;
+// Cap the total number of jobs we keep history for — without this the Map
+// keeps growing across batch-done boundaries (only start-upload clears it).
+// 1000 jobs × 200 entries × ~100 bytes ≈ 20 MB worst case, bounded.
+const _MAX_TRACKED_JOBS = 1000;
+function _appendJobLog(jobId, entry) {
+  if (!jobId) return;
+  let arr = _jobLogCollector.get(jobId);
+  if (!arr) {
+    arr = [];
+    _jobLogCollector.set(jobId, arr);
+    // Evict oldest tracked job (insertion order) once we're past the cap.
+    // Map iteration is insertion-ordered in spec, so .keys().next() is FIFO.
+    if (_jobLogCollector.size > _MAX_TRACKED_JOBS) {
+      const oldestId = _jobLogCollector.keys().next().value;
+      if (oldestId !== undefined) _jobLogCollector.delete(oldestId);
+    }
+  }
+  if (arr.length >= _MAX_LOG_ENTRIES_PER_JOB) arr.shift();
+  arr.push(entry);
+}
+const folderMonitor = new FolderMonitor();
+let remoteServer = null;
+let captureWindow = null;
+let captureWindowReady = false;
+let signalingQueue = [];
+const HEALTH_CHECK_TIMEOUT = 25000;
+
+// --- Debug logging (writes to upload-debug.log next to the app) ---
+function getDebugLogPath() {
+  const baseDir = app.isPackaged
+    ? path.dirname(process.execPath)
+    : __dirname;
+  return path.join(baseDir, 'upload-debug.log');
+}
+
+// Buffered async writer: debugLog is called hundreds of times per second during
+// busy uploads (unhandledRejection traces, progress transitions, folder-monitor
+// events). Sync appendFileSync per call blocked the main event loop. We now
+// queue lines in memory and flush on a short interval / on process exit.
+const _debugLogBuffer = [];
+let _debugLogFlushTimer = null;
+let _debugLogWriting = false;
+
+// 25 MB cap for upload-debug.log + 10 MB for account-rotation.log. Each
+// keeps 2 numbered backups, so the on-disk worst case is bounded:
+// upload-debug ~75 MB, account-rotation ~30 MB. Reuses the same
+// lib/log-rotation.js helper that fileuploader.log already uses.
+const DEBUG_LOG_MAX_BYTES = 25 * 1024 * 1024;
+const ROT_LOG_MAX_BYTES = 10 * 1024 * 1024;
+const INTERNAL_LOG_MAX_BACKUPS = 2;
+
+function _flushDebugLog() {
+  if (_debugLogWriting || _debugLogBuffer.length === 0) return;
+  const chunk = _debugLogBuffer.join('');
+  _debugLogBuffer.length = 0;
+  _debugLogWriting = true;
+  const target = getDebugLogPath();
+  // Pass a noop logger here — debugLog() is THIS file's writer, recursing
+  // into it would deadlock the buffer/timer state.
+  maybeRotateLogFile(target, DEBUG_LOG_MAX_BYTES, INTERNAL_LOG_MAX_BACKUPS, () => {});
+  fs.appendFile(target, chunk, 'utf-8', () => {
+    _debugLogWriting = false;
+    // If more lines arrived during the write, flush them next tick.
+    if (_debugLogBuffer.length) setImmediate(_flushDebugLog);
+  });
+}
+
+function debugLog(msg) {
+  try {
+    const ts = new Date().toISOString();
+    _debugLogBuffer.push(`[${ts}] ${msg}\n`);
+    if (!_debugLogFlushTimer) {
+      _debugLogFlushTimer = setTimeout(() => {
+        _debugLogFlushTimer = null;
+        _flushDebugLog();
+      }, 500);
+    }
+  } catch {}
+}
+
+let _logVerbose = false;
+function setLogVerbose(v) { _logVerbose = !!v; try { require('./lib/doodstream-upload').setDebugVerbose(_logVerbose); } catch {} }
+function _ctxTag(ctx) {
+  if (!ctx || typeof ctx !== 'object') return '';
+  const tags = [];
+  if (ctx.batch) tags.push(`b:${String(ctx.batch).slice(0, 8)}`);
+  if (ctx.job) tags.push(`j:${String(ctx.job).slice(-8)}`);
+  if (ctx.hoster) tags.push(ctx.hoster);
+  if (ctx.attempt !== undefined && ctx.attempt !== null) tags.push(`a:${ctx.attempt}`);
+  return tags.length ? `[${tags.join(' ')}] ` : '';
+}
+function _split(a, b) {
+  if (typeof a === 'string') return { ctx: null, msg: a, extra: b };
+  return { ctx: a, msg: b, extra: arguments[2] };
+}
+function logDebug(a, b) {
+  if (!_logVerbose) return;
+  const s = _split(a, b);
+  debugLog(`[DEBUG] ${_ctxTag(s.ctx)}${s.msg}`);
+}
+function logInfo(a, b) {
+  const s = _split(a, b);
+  debugLog(`[INFO ] ${_ctxTag(s.ctx)}${s.msg}`);
+}
+function logWarn(a, b) {
+  const s = _split(a, b);
+  debugLog(`[WARN ] ${_ctxTag(s.ctx)}${s.msg}`);
+}
+function logError(a, b, c) {
+  let ctx, msg, err;
+  if (typeof a === 'string') { ctx = null; msg = a; err = b; }
+  else { ctx = a; msg = b; err = c; }
+  const errStr = err ? ` :: ${err.stack || err.message || err}` : '';
+  debugLog(`[ERROR] ${_ctxTag(ctx)}${msg}${errStr}`);
+}
+function logMarker(label, fields) {
+  let extra = '';
+  if (fields && typeof fields === 'object') {
+    extra = ' ' + Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(' ');
+  }
+  debugLog(`────── ${label}${extra} ──────`);
+}
+
+function _maybeLogEventLoopDelay(activeJobs) {
+  const now = Date.now();
+  if (now - _eldLastLog < 5000) return;
+  _eldLastLog = now;
+  try {
+    const ns = 1e6;
+    const mean = (_eventLoopDelay.mean / ns).toFixed(1);
+    const max = (_eventLoopDelay.max / ns).toFixed(1);
+    const p99 = (_eventLoopDelay.percentile(99) / ns).toFixed(1);
+    const stddev = (_eventLoopDelay.stddev / ns).toFixed(1);
+    let resStr = '';
+    try {
+      const info = process.getActiveResourcesInfo();
+      const hist = {};
+      for (const t of info) hist[t] = (hist[t] || 0) + 1;
+      const top = Object.entries(hist).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k}:${v}`).join(',');
+      resStr = ` resources=${info.length} {${top}}`;
+    } catch {}
+    let cpuStr = '';
+    try {
+      const d = process.cpuUsage(_lastCpu);
+      const wall = now - _lastCpuT;
+      const pct = wall > 0 ? Math.round((d.user + d.system) / 1000 / wall * 100) : 0;
+      const mem = process.memoryUsage();
+      const rss = Math.round(mem.rss / 1048576);
+      const heap = Math.round(mem.heapUsed / 1048576);
+      const ext = Math.round(mem.external / 1048576);
+      const ab = Math.round((mem.arrayBuffers || 0) / 1048576);
+      cpuStr = ` cpu=${pct}%core rss=${rss}MB heap=${heap}MB ext=${ext}MB ab=${ab}MB`;
+      _lastCpu = process.cpuUsage();
+      _lastCpuT = now;
+    } catch {}
+    let gcStr = '';
+    try {
+      gcStr = ` gc=${_gcCount} gcTotal=${_gcTotalMs.toFixed(0)}ms gcMax=${_gcMaxMs.toFixed(0)}ms`;
+      _gcCount = 0; _gcTotalMs = 0; _gcMaxMs = 0;
+    } catch {}
+    let upStr = '';
+    try {
+      if (uploadManager && typeof uploadManager.getDiagnostics === 'function') {
+        const d = uploadManager.getDiagnostics();
+        const byHoster = Object.entries(d.activeByHoster || {}).map(([h, c]) => `${h.replace(/\..*$/, '')}:${c}`).join(',');
+        upStr = ` active-by-hoster={${byHoster}} transient-errs=${d.transientErrors || 0} pending=${d.pending || 0}`;
+      }
+    } catch {}
+    logInfo(`eventloop-delay active=${activeJobs} mean=${mean}ms p99=${p99}ms max=${max}ms stddev=${stddev}ms threadpool=${process.env.UV_THREADPOOL_SIZE}${cpuStr}${gcStr}${resStr}${upStr}`);
+    _eventLoopDelay.reset();
+  } catch {}
+}
+
+// Dedicated account-rotation log so users can trace fallback decisions
+// without wading through general debug output. Writes to account-rotation.log
+// in the same directory as fileuploader.log (honors user's configured path).
+function getRotLogPath() {
+  const base = getLogFilePath();
+  const dir = path.dirname(base);
+  return path.join(dir, 'account-rotation.log');
+}
+const _rotLogBuffer = [];
+let _rotLogFlushTimer = null;
+let _rotLogWriting = false;
+
+function _flushRotLog() {
+  if (_rotLogWriting || _rotLogBuffer.length === 0) return;
+  const chunk = _rotLogBuffer.join('');
+  _rotLogBuffer.length = 0;
+  _rotLogWriting = true;
+  const tryTargets = [
+    getRotLogPath(),
+    path.join(app.getPath('desktop') || app.getPath('userData'), 'account-rotation.log'),
+    path.join(app.getPath('userData'), 'account-rotation.log')
+  ];
+  const write = (i) => {
+    if (i >= tryTargets.length) { _rotLogWriting = false; return; }
+    try {
+      fs.mkdirSync(path.dirname(tryTargets[i]), { recursive: true });
+    } catch {}
+    // Cap account-rotation.log so a long-running install can't keep
+    // growing it indefinitely (rotation events fire on every account-fail).
+    maybeRotateLogFile(tryTargets[i], ROT_LOG_MAX_BYTES, INTERNAL_LOG_MAX_BACKUPS, debugLog);
+    fs.appendFile(tryTargets[i], chunk, 'utf-8', (err) => {
+      if (err) return write(i + 1);
+      _rotLogWriting = false;
+      if (_rotLogBuffer.length) setImmediate(_flushRotLog);
+    });
+  };
+  write(0);
+}
+
+function getAllLogPaths() {
+  const upload = getLogFilePath();
+  const debugPath = getDebugLogPath();
+  const rot = getRotLogPath();
+  const dir = path.dirname(debugPath);
+  return {
+    fileuploader: upload,
+    debug: debugPath,
+    accountRotation: rot,
+    doodstreamDebug: path.join(dir, 'doodstream-debug.log'),
+    crashLog: path.join(dir, 'crash.log'),
+    logDir: dir
+  };
+}
+
+function rotLog(msg, ts) {
+  try {
+    const iso = new Date(ts || Date.now()).toISOString();
+    const line = `[${iso}] ${msg}\n`;
+    _rotLogBuffer.push(line);
+    if (!_rotLogFlushTimer) {
+      _rotLogFlushTimer = setTimeout(() => { _rotLogFlushTimer = null; _flushRotLog(); }, 500);
+    }
+    _debugLogBuffer.push(`[${iso}] [ROT] ${msg}\n`);
+    if (!_debugLogFlushTimer) {
+      _debugLogFlushTimer = setTimeout(() => { _debugLogFlushTimer = null; _flushDebugLog(); }, 500);
+    }
+  } catch {}
+}
+
+function _sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function _postWebhookWithRetry(req, maxAttempts) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(req.url, {
+        method: req.method,
+        headers: req.headers,
+        body: req.body,
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (res.status === 429) {
+        let waitMs = 2000 * attempt;
+        try {
+          const ra = res.headers.get('retry-after');
+          if (ra) waitMs = Math.min(60_000, Math.max(waitMs, Math.ceil(parseFloat(ra) * 1000)));
+        } catch {}
+        debugLog(`webhook: 429 rate-limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxAttempts})`);
+        if (attempt < maxAttempts) { await _sleepMs(waitMs); continue; }
+        return { ok: false, status: 429 };
+      }
+      if (res.status >= 200 && res.status < 300) {
+        return { ok: true, status: res.status };
+      }
+      if (res.status >= 400 && res.status < 500) {
+        debugLog(`webhook: client error HTTP ${res.status} — not retrying (check URL/payload)`);
+        return { ok: false, status: res.status };
+      }
+      debugLog(`webhook: server error HTTP ${res.status} (attempt ${attempt}/${maxAttempts})`);
+      lastErr = new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+      debugLog(`webhook: send error: ${err && err.message ? err.message : err} (attempt ${attempt}/${maxAttempts})`);
+    }
+    if (attempt < maxAttempts) await _sleepMs(2000 * attempt);
+  }
+  return { ok: false, error: lastErr && lastErr.message ? lastErr.message : String(lastErr) };
+}
+
+async function sendBatchWebhook(summary, durationSec, extra) {
+  try {
+    const gs = configStore.load().globalSettings || {};
+    const url = String(gs.webhookUrl || '').trim();
+    if (!url || !/^https?:\/\//i.test(url)) return { ok: false, skipped: true };
+    const req = buildWebhookRequest(url, summary, {
+      durationSec: Math.max(0, Number(durationSec) || 0),
+      appVersion: app.getVersion(),
+      machineName: require('os').hostname() || 'unknown-host',
+      mention: gs.webhookMention || '',
+      aborted: !!(extra && extra.aborted),
+      timestamp: new Date().toISOString()
+    });
+    const result = await _postWebhookWithRetry(req, 3);
+    if (result.ok) debugLog(`webhook: sent batch-done notification (HTTP ${result.status})`);
+    else debugLog(`webhook: gave up after retries (${result.status || result.error || 'unknown'})`);
+    return result;
+  } catch (err) {
+    debugLog(`webhook: build failed: ${err && err.message ? err.message : err}`);
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+}
+
+function safeSend(channel, data) {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  try {
+    mainWindow.webContents.send(channel, data);
+    return true;
+  } catch (err) {
+    debugLog(`safeSend(${channel}) failed: ${err && err.message ? err.message : err}`);
+    return false;
+  }
+}
+
+function _writeCrashLog(prefix, err, extra) {
+  try {
+    const ts = new Date().toISOString();
+    const line = `[${ts}] ${prefix} ${err && err.stack ? err.stack : (err && err.message) || String(err)}${extra ? ' :: ' + JSON.stringify(extra) : ''}\n`;
+    try {
+      const target = getDebugLogPath();
+      fs.appendFileSync(target, line, 'utf-8');
+    } catch {}
+    try {
+      const crashDir = path.dirname(getDebugLogPath());
+      fs.appendFileSync(path.join(crashDir, 'crash.log'), line, 'utf-8');
+    } catch {}
+  } catch {}
+}
+
+process.on('unhandledRejection', (reason) => {
+  debugLog(`UNHANDLED REJECTION: ${reason && reason.stack ? reason.stack : reason}`);
+  _writeCrashLog('UNHANDLED REJECTION', reason);
+});
+
+process.on('uncaughtException', (err, origin) => {
+  _writeCrashLog('UNCAUGHT EXCEPTION (' + origin + ')', err);
+  debugLog(`UNCAUGHT EXCEPTION (${origin}): ${err && err.stack ? err.stack : err}`);
+});
+
+process.on('exit', (code) => {
+  try { _writeCrashLog('PROCESS EXIT', new Error('code=' + code)); } catch {}
+});
+
+process.on('warning', (warning) => {
+  debugLog(`PROCESS WARNING: ${warning.name} ${warning.message}`);
+});
+
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  try {
+    process.on(sig, () => {
+      _writeCrashLog('SIGNAL ' + sig, new Error('process received ' + sig));
+      try {
+        if (_debugLogBuffer.length) fs.appendFileSync(getDebugLogPath(), _debugLogBuffer.join(''), 'utf-8');
+      } catch {}
+      process.exit(0);
+    });
+  } catch {}
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} Timeout`));
+    }, timeoutMs);
+
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+function normalizeApiError(payload, fallback) {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const msg = String(payload.msg || payload.message || '').trim();
+  if (msg) return msg;
+  if (payload.status) return `API Status ${payload.status}`;
+  return fallback;
+}
+
+function getDefaultLogFilePath() {
+  // In packaged builds the exe dir is %LOCALAPPDATA%\Programs\Multi-Hoster-Upload
+  // — a hidden, install-managed location that NSIS may even prune on
+  // uninstall. Default to the user's Desktop so the file is actually
+  // findable; fall back to userData if Desktop isn't available, and
+  // finally to the project dir in dev mode.
+  if (app.isPackaged) {
+    try {
+      const desktop = app.getPath('desktop');
+      if (desktop) return path.join(desktop, 'fileuploader.log');
+    } catch {}
+    try {
+      return path.join(app.getPath('userData'), 'fileuploader.log');
+    } catch {}
+    return path.join(path.dirname(process.execPath), 'fileuploader.log');
+  }
+  return path.join(__dirname, 'fileuploader.log');
+}
+
+// The log flush paths resolve the log file ~8x/second during uploads. Going
+// through configStore.load() there meant re-reading + cloning the whole config
+// (incl. an 8 MB+ history) on every flush — a major long-running main-thread
+// drag. logFilePath/logMode change only when the user saves settings, so cache
+// the two strings and invalidate on those saves (see _invalidateLogSettings).
+let _cachedLogSettings = null;
+function _getLogSettings() {
+  if (!_cachedLogSettings) {
+    const gs = (configStore.load() || {}).globalSettings || {};
+    _cachedLogSettings = {
+      logFilePath: String(gs.logFilePath || '').trim(),
+      logMode: gs.logMode || 'single'
+    };
+  }
+  return _cachedLogSettings;
+}
+function _invalidateLogSettings() { _cachedLogSettings = null; }
+
+function getBaseLogFilePath() {
+  const customPath = _getLogSettings().logFilePath;
+  return customPath || getDefaultLogFilePath();
+}
+
+// Log-mode bookkeeping. Three modes (see lib/log-mode.js): single, daily, session.
+// The session-id is stamped ONCE at main-process startup so every write of a
+// given session lands in the same file. A close→reopen of the app starts a new
+// main process, so a new SESSION_ID, so a new session file. A 6-digit random is
+// appended as a cheap hedge against same-minute restart collisions.
+const { resolveLogFileName, formatSessionStamp, formatDateStamp, stripModeStampFromFileName } = require('./lib/log-mode');
+const SESSION_ID = formatSessionStamp(new Date(), String(Math.floor(100000 + Math.random() * 900000)));
+let _activeLogKey = null;   // remembers (mode + date-or-session) so cache rolls correctly
+let _activeLogPath = null;
+
+function getLogFilePath() {
+  const mode = _getLogSettings().logMode;
+  const base = getBaseLogFilePath();
+  const dir = path.dirname(base);
+  const ext = path.extname(base);
+  const name = path.basename(base, ext);
+  const now = new Date();
+  // Cache key changes when the user toggles mode mid-run OR when the daily date
+  // rolls over at midnight — so the cached path can't be served stale.
+  const datePart = mode === 'daily' ? formatDateStamp(now) : '';
+  const key = `${mode}|${datePart}|${SESSION_ID}|${base}`;
+  if (_activeLogKey !== key) {
+    _activeLogPath = path.join(dir, resolveLogFileName({ baseName: name, ext, mode, date: now, sessionId: SESSION_ID }));
+    _activeLogKey = key;
+  }
+  return _activeLogPath;
+}
+
+function buildFallbackLogName(dir) {
+  // Match the active log-mode's naming so the fallback file is consistent with
+  // what the primary write would have produced.
+  const mode = _getLogSettings().logMode;
+  return path.join(dir, resolveLogFileName({ baseName: 'fileuploader', ext: '.log', mode, date: new Date(), sessionId: SESSION_ID }));
+}
+
+function getSafeDesktopDir() {
+  try {
+    const desktop = app.getPath('desktop');
+    if (desktop && fs.existsSync(desktop)) return desktop;
+  } catch {}
+  return null;
+}
+
+let _uploadLogFallbackWarned = false;
+// Buffer upload-log lines so a burst of completing jobs (e.g. 20 files finishing
+// within a second) becomes one file write instead of 20 sync writes.
+const _uploadLogBuffer = [];
+let _uploadLogFlushTimer = null;
+let _uploadLogWriting = false;
+
+// Cache the resolved upload-log target across flushes — mkdirSync + path
+// assembly on every 500ms flush during uploads is wasted work once we've
+// confirmed a writable directory. Invalidated when the user changes the log
+// path or when the daily-log date rolls over.
+let _cachedUploadLogTarget = null;
+let _cachedUploadLogKey = '';
+
+function _invalidateUploadLogTargetCache() {
+  _cachedUploadLogTarget = null;
+  _cachedUploadLogKey = '';
+}
+
+function _resolveUploadLogTarget() {
+  const primary = getLogFilePath();
+  // The primary path already encodes the mode + date/session, so it changes
+  // when the user toggles mode, daily rolls at midnight, or this is a new
+  // process — cache invalidates naturally on path change.
+  const key = primary;
+  if (_cachedUploadLogKey === key && _cachedUploadLogTarget) return _cachedUploadLogTarget;
+
+  const commit = (t) => {
+    _cachedUploadLogTarget = t;
+    _cachedUploadLogKey = key;
+    return t;
+  };
+
+  // Try primary → desktop → userData, mirror the original fallback ladder.
+  try {
+    fs.mkdirSync(path.dirname(primary), { recursive: true });
+    return commit({ path: primary, isFallback: false });
+  } catch (err) {
+    debugLog(`uploadLog primary dir unavailable (${err.message})`);
+  }
+  const desktop = getSafeDesktopDir();
+  if (desktop) {
+    try {
+      const p = buildFallbackLogName(desktop);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      return commit({ path: p, isFallback: true });
+    } catch {}
+  }
+  try {
+    const p = buildFallbackLogName(app.getPath('userData'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    return commit({ path: p, isFallback: true });
+  } catch (err) {
+    debugLog(`uploadLog: no writable target (${err.message})`);
+    return null;
+  }
+}
+
+// Cap the upload log file size. Beyond this we rotate to .1 (and shift
+// older numbered backups up) so a multi-month-running install can't fill
+// the disk. 50 MB ≈ ~600k log lines, plenty for human inspection.
+const UPLOAD_LOG_MAX_BYTES = 50 * 1024 * 1024;
+const UPLOAD_LOG_MAX_BACKUPS = 3;
+
+function _flushUploadLog() {
+  if (_uploadLogWriting || _uploadLogBuffer.length === 0) return;
+  const target = _resolveUploadLogTarget();
+  if (!target) { _uploadLogBuffer.length = 0; return; }
+  // Guard against the file's parent directory having been deleted/moved
+  // since the cache was filled. mkdirSync(recursive:true) is a no-op when
+  // the dir already exists; recreates it otherwise. Without this, every
+  // subsequent flush silently fails with ENOENT and entries are lost.
+  try { fs.mkdirSync(path.dirname(target.path), { recursive: true }); } catch {}
+  // Cheap size check + rotation right before the append, so we never grow
+  // a single log file beyond the cap regardless of session length.
+  maybeRotateLogFile(target.path, UPLOAD_LOG_MAX_BYTES, UPLOAD_LOG_MAX_BACKUPS, debugLog);
+  const chunk = _uploadLogBuffer.join('');
+  _uploadLogBuffer.length = 0;
+  _uploadLogWriting = true;
+  fs.appendFile(target.path, chunk, 'utf-8', (err) => {
+    _uploadLogWriting = false;
+    if (err) {
+      debugLog(`uploadLog append failed: ${err.message}`);
+      // Recovery: drop the cached target so the next flush re-resolves
+      // (could be ENOENT after dir delete, ENOSPC, EBUSY etc.) and
+      // restore the chunk so we don't lose entries on the retry.
+      _invalidateUploadLogTargetCache();
+      _uploadLogBuffer.unshift(chunk);
+      // Retry on the next event-loop tick rather than tight-looping.
+      if (!_uploadLogFlushTimer) {
+        _uploadLogFlushTimer = setTimeout(() => {
+          _uploadLogFlushTimer = null;
+          _flushUploadLog();
+        }, 1000);
+      }
+    } else if (target.isFallback && !_uploadLogFallbackWarned) {
+      _uploadLogFallbackWarned = true;
+      // Auto-persist the working fallback into the user's config so the
+      // next session writes here directly (no more fallback ladder) and
+      // the Settings input reflects reality.
+      _persistFallbackLogPath(target.path);
+      safeSend('upload-log-fallback', { fallbackPath: target.path });
+    }
+    if (_uploadLogBuffer.length && !_uploadLogFlushTimer) setImmediate(_flushUploadLog);
+  });
+}
+
+function _persistFallbackLogPath(workingPath) {
+  try {
+    const cfg = configStore.load();
+    const gs = cfg.globalSettings || {};
+    const mode = gs.logMode || 'single';
+    // Strip the mode-specific suffix so logFilePath stores the BARE base path.
+    // Otherwise daily would compound into "...-2026-06-03-2026-06-04.log" and
+    // session would compound a second session-stamp onto the first — which split
+    // a session's lines across two files (the first few before _persistFallback
+    // ran, the rest after, into the doubly-stamped path). gated on logMode (the
+    // legacy `sessionLog` field is no longer the source of truth).
+    let toSave = workingPath;
+    if (mode === 'daily' || mode === 'session') {
+      const dir = path.dirname(workingPath);
+      const base = path.basename(workingPath);
+      toSave = path.join(dir, stripModeStampFromFileName(base));
+    }
+    if (gs.logFilePath === toSave) return;
+    gs.logFilePath = toSave;
+    cfg.globalSettings = gs;
+    configStore.save({ globalSettings: gs }).catch(() => {});
+    _invalidateUploadLogTargetCache();
+    _invalidateLogSettings();
+    safeSend('log-path-auto-updated', { logFilePath: toSave });
+  } catch (err) {
+    debugLog(`persist fallback logpath failed: ${err.message}`);
+  }
+}
+
+// Whether this hoster's successful links should land in fileuploader.log.
+// Reads the LIVE uploadManager.hosterSettings (kept current via
+// updateSettings) so a mid-batch toggle takes effect immediately. Falls back
+// to the persisted config if no batch is active, then defaults to enabled.
+function shouldLogHosterToFile(hoster) {
+  const live = uploadManager && uploadManager.hosterSettings ? uploadManager.hosterSettings : null;
+  if (live) return hosterLogToFileEnabled(live, hoster);
+  try {
+    return hosterLogToFileEnabled(configStore.load().hosterSettings, hoster);
+  } catch {
+    return true;
+  }
+}
+
+function appendUploadLog(hoster, link, fileName) {
+  _uploadLogBuffer.push(formatUploadLogLine(new Date(), hoster, link, fileName));
+  if (!_uploadLogFlushTimer) {
+    _uploadLogFlushTimer = setTimeout(() => {
+      _uploadLogFlushTimer = null;
+      _flushUploadLog();
+    }, 500);
+  }
+}
+
+function flattenHistoryForExport(history) {
+  const rows = [];
+  const list = Array.isArray(history) ? history : [];
+
+  for (const batch of list) {
+    const batchId = batch && batch.id ? String(batch.id) : '';
+    const rawTs = batch && batch.timestamp ? String(batch.timestamp) : '';
+    const parsedTs = rawTs ? new Date(rawTs) : null;
+    const batchTimestamp = parsedTs && !Number.isNaN(parsedTs.getTime())
+      ? parsedTs.toISOString()
+      : rawTs;
+    const files = Array.isArray(batch && batch.files) ? batch.files : [];
+
+    for (const file of files) {
+      const fileName = file && file.name ? String(file.name) : '';
+      const filePath = file && file.path ? String(file.path) : '';
+      const fileSize = Number.isFinite(Number(file && file.size)) ? Number(file.size) : '';
+      const results = Array.isArray(file && file.results) ? file.results : [];
+
+      if (results.length === 0) {
+        rows.push({
+          batchId,
+          batchTimestamp,
+          fileName,
+          filePath,
+          fileSize,
+          hoster: '',
+          status: '',
+          link: '',
+          error: ''
+        });
+        continue;
+      }
+
+      for (const result of results) {
+        // Only accept real URLs. file_code alone is just an opaque ID and
+        // ends up looking like "nur sone Nummerierung" in the CSV.
+        const rawLink = result && (result.download_url || result.embed_url) || '';
+        const link = /^https?:\/\//i.test(String(rawLink)) ? String(rawLink) : '';
+        rows.push({
+          batchId,
+          batchTimestamp,
+          fileName,
+          filePath,
+          fileSize,
+          hoster: result && result.hoster ? String(result.hoster) : '',
+          status: result && result.status ? String(result.status) : '',
+          link,
+          error: result && (result.error || result.message) ? String(result.error || result.message) : ''
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+function toCsvCell(value) {
+  const text = value === null || value === undefined ? '' : String(value);
+  if (!/[",\r\n]/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildHistoryCsv(rows) {
+  const header = [
+    'Batch ID',
+    'Batch Timestamp',
+    'File Name',
+    'File Path',
+    'File Size Bytes',
+    'Hoster',
+    'Status',
+    'Link',
+    'Error'
+  ];
+  const lines = [header.map(toCsvCell).join(',')];
+  for (const row of rows) {
+    lines.push([
+      row.batchId,
+      row.batchTimestamp,
+      row.fileName,
+      row.filePath,
+      row.fileSize,
+      row.hoster,
+      row.status,
+      row.link,
+      row.error
+    ].map(toCsvCell).join(','));
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+// --- Multi-account helpers ---
+function hosterAccountHasCreds(name, account) {
+  if (!account) return false;
+  if (account.authType === 'api') return !!account.apiKey;
+  if (account.authType === 'login') return !!(account.username && account.password);
+  // Fallback for old format
+  if (name === 'vidmoly.me') return !!(account.username && account.password);
+  if (name === 'voe.sx' || name === 'doodstream.com') return !!(account.username && account.password) || !!account.apiKey;
+  if (name === 'clouddrop.cc') return !!account.apiKey;
+  return !!account.apiKey;
+}
+
+function getNextFallbackAccount(config, hosterName, failedAccountId) {
+  const accounts = config.hosters[hosterName];
+  if (!Array.isArray(accounts)) return null;
+  const failedIndex = accounts.findIndex(a => a.id === failedAccountId);
+  if (failedIndex < 0) return null;
+  for (let i = failedIndex + 1; i < accounts.length; i++) {
+    if (accounts[i].enabled !== false && hosterAccountHasCreds(hosterName, accounts[i])) {
+      return accounts[i];
+    }
+  }
+  return null;
+}
+
+function buildAccountPools(config) {
+  const pools = {};
+  const all = config && config.hosters ? config.hosters : {};
+  for (const [hoster, accounts] of Object.entries(all)) {
+    if (!Array.isArray(accounts)) continue;
+    const usable = accounts.filter(a => a && a.enabled !== false && hosterAccountHasCreds(hoster, a));
+    if (usable.length > 0) pools[hoster] = usable;
+  }
+  return pools;
+}
+
+function buildTaskFromAccount(hoster, account, extra) {
+  const task = { ...extra, hoster, accountId: account.id, ...selectUploadAuth(hoster, account) };
+  return task;
+}
+
+let _rotationCursors = null;
+function rotationCursors() {
+  if (_rotationCursors === null) {
+    const persisted = configStore.load().rotationCursors;
+    _rotationCursors = (persisted && typeof persisted === 'object') ? { ...persisted } : {};
+  }
+  return _rotationCursors;
+}
+
+function makeAccountPicker(config) {
+  return createAccountPicker({
+    hosters: config.hosters,
+    hosterSettings: config.hosterSettings,
+    hasCreds: hosterAccountHasCreds,
+    indices: rotationCursors()
+  });
+}
+
+function persistRotation(pick) {
+  if (!pick.dirty()) return;
+  _rotationCursors = { ...rotationCursors(), ...pick.indices() };
+  configStore.saveRotationCursors(_rotationCursors);
+}
+
+function buildUploadTasks(config, files, hosters, pick) {
+  const tasks = [];
+  for (const file of files) {
+    for (const hoster of hosters) {
+      const account = pick(hoster);
+      if (!account) { debugLog(`  skip ${hoster}: no enabled account with creds`); continue; }
+      tasks.push(buildTaskFromAccount(hoster, account, { file }));
+    }
+  }
+  return tasks;
+}
+
+function buildUploadTasksFromJobs(config, jobs, pick) {
+  if (!Array.isArray(jobs)) return [];
+  const tasks = [];
+  for (const job of jobs) {
+    if (!job || !job.file || !job.hoster) continue;
+    const account = pick(job.hoster);
+    if (!account) { debugLog(`  skip ${job.hoster}: no enabled account`); continue; }
+    tasks.push(buildTaskFromAccount(job.hoster, account, { file: job.file, jobId: job.id || job.jobId || null }));
+  }
+  return tasks;
+}
+
+async function checkDoodstreamHealth(hosterConfig, otp) {
+  const username = hosterConfig && hosterConfig.username
+    ? String(hosterConfig.username).trim()
+    : '';
+  const password = hosterConfig && hosterConfig.password
+    ? String(hosterConfig.password).trim()
+    : '';
+
+  // Login-based check (preferred)
+  if (username && password) {
+    const uploader = new DoodstreamUploader();
+    try {
+      await uploader.login(username, password, otp || undefined);
+    } catch (err) {
+      if (err.otpRequired) {
+        return { status: 'otp_required', message: err.message || 'OTP erforderlich' };
+      }
+      throw err;
+    }
+    return { status: 'ok', message: 'Login ok, Upload-Seite bereit' };
+  }
+
+  // Fall back to API key check
+  const apiKey = hosterConfig && hosterConfig.apiKey
+    ? String(hosterConfig.apiKey).trim()
+    : '';
+
+  if (!apiKey) {
+    return { status: 'error', message: 'Login oder API Key fehlt' };
+  }
+
+  const apiBase = HOSTER_CONFIGS['doodstream.com'].apiBase;
+
+  const accountRes = await fetch(`${apiBase}/api/account/info?key=${encodeURIComponent(apiKey)}`, {
+    method: 'GET',
+    redirect: 'follow'
+  });
+  const accountPayload = await accountRes.json().catch(() => null);
+  if (!accountPayload || typeof accountPayload !== 'object') {
+    return { status: 'error', message: 'Account-Check lieferte kein gültiges JSON' };
+  }
+
+  if (Number(accountPayload.status || 0) !== 200) {
+    return {
+      status: 'error',
+      message: normalizeApiError(accountPayload, 'Account-Check fehlgeschlagen')
+    };
+  }
+
+  const serverRes = await fetch(`${apiBase}/api/upload/server?key=${encodeURIComponent(apiKey)}`, {
+    method: 'GET',
+    redirect: 'follow'
+  });
+  const serverPayload = await serverRes.json().catch(() => null);
+  if (!serverPayload || typeof serverPayload !== 'object') {
+    return { status: 'warn', message: 'Upload-Server-Check lieferte kein gültiges JSON' };
+  }
+
+  const serverResult = serverPayload.result;
+  if (typeof serverResult === 'string' && /^https?:\/\//i.test(serverResult.trim())) {
+    return { status: 'ok', message: 'API Key gültig, Upload-Server verfügbar' };
+  }
+
+  const serverMsg = String(serverPayload.msg || serverPayload.message || '').trim();
+  if (/no servers available/i.test(serverMsg)) {
+    return {
+      status: 'warn',
+      message: 'API Key gültig, aktuell kein Server von API (Uploader nutzt Fallback)'
+    };
+  }
+
+  return {
+    status: 'warn',
+    message: serverMsg || 'API Key gültig, Upload-Server aktuell nicht geliefert'
+  };
+}
+
+async function checkVidmolyHealth(hosterConfig) {
+  const username = hosterConfig && hosterConfig.username
+    ? String(hosterConfig.username).trim()
+    : '';
+  const password = hosterConfig && hosterConfig.password
+    ? String(hosterConfig.password).trim()
+    : '';
+
+  if (!username || !password) {
+    return { status: 'error', message: 'Username oder Passwort fehlt' };
+  }
+
+  const uploader = new VidmolyUploader();
+  await uploader.login(username, password);
+  const { uploadUrl, fileFieldName } = await uploader.getUploadParams();
+
+  if (!uploadUrl || !/^https?:\/\//i.test(uploadUrl)) {
+    return { status: 'error', message: 'Upload-URL wurde nicht erkannt' };
+  }
+
+  return {
+    status: 'ok',
+    message: `Login ok, Upload-Form bereit (Dateifeld: ${fileFieldName || 'file'})`
+  };
+}
+
+async function checkVoeHealth(hosterConfig) {
+  const username = hosterConfig && hosterConfig.username
+    ? String(hosterConfig.username).trim()
+    : '';
+  const password = hosterConfig && hosterConfig.password
+    ? String(hosterConfig.password).trim()
+    : '';
+
+  if (!username || !password) {
+    // Fall back to API key check if no login
+    const apiKey = hosterConfig && hosterConfig.apiKey
+      ? String(hosterConfig.apiKey).trim()
+      : '';
+    if (!apiKey) {
+      return { status: 'error', message: 'Login oder API Key fehlt' };
+    }
+    // Quick API check
+    const res = await fetch(`https://voe.sx/api/upload/server?key=${encodeURIComponent(apiKey)}`, { method: 'GET' });
+    const data = await res.json().catch(() => null);
+    if (data && data.result && typeof data.result === 'string' && /^https?:\/\//i.test(data.result.trim())) {
+      return { status: 'ok', message: 'API Key gültig, Upload-Server verfügbar' };
+    }
+    const msg = data && (data.msg || data.message) ? String(data.msg || data.message).trim() : '';
+    if (/no servers/i.test(msg)) {
+      return { status: 'warn', message: 'API Key gültig, aktuell kein Server verfügbar' };
+    }
+    return { status: 'error', message: msg || 'API Key ungültig oder Server nicht erreichbar' };
+  }
+
+  const uploader = new VoeUploader();
+  await uploader.login(username, password);
+  const { csrfToken } = await uploader._getUploadParams();
+
+  if (!csrfToken) {
+    return { status: 'error', message: 'Login ok, aber Upload-Seite liefert kein CSRF-Token' };
+  }
+
+  return {
+    status: 'ok',
+    message: 'Login ok, Upload-Seite bereit'
+  };
+}
+
+async function checkByseHealth(hosterConfig) {
+  const apiKey = hosterConfig && hosterConfig.apiKey
+    ? String(hosterConfig.apiKey).trim()
+    : '';
+
+  if (!apiKey) {
+    return { status: 'error', message: 'API Key fehlt' };
+  }
+
+  const apiBase = 'https://api.byse.sx';
+
+  const serverRes = await fetch(`${apiBase}/upload/server?key=${encodeURIComponent(apiKey)}`, {
+    method: 'GET',
+    redirect: 'follow'
+  });
+  const serverPayload = await serverRes.json().catch(() => null);
+
+  if (!serverPayload || typeof serverPayload !== 'object') {
+    return { status: 'error', message: 'API lieferte kein gültiges JSON' };
+  }
+
+  const serverResult = serverPayload.result;
+  if (typeof serverResult === 'string' && /^https?:\/\//i.test(serverResult.trim())) {
+    return { status: 'ok', message: 'API Key gültig, Upload-Server verfügbar' };
+  }
+
+  const msg = String(serverPayload.msg || serverPayload.message || '').trim();
+
+  // Byse API returns { msg: "OK", result: <server-url> } on success.
+  // If msg is "OK" but result wasn't a valid URL, treat as success with warning.
+  if (/^ok$/i.test(msg)) {
+    return { status: 'ok', message: 'API Key gültig' };
+  }
+
+  if (msg) {
+    return { status: 'error', message: msg };
+  }
+
+  return { status: 'error', message: 'API Key ungültig oder Server nicht erreichbar' };
+}
+
+async function checkClouddropHealth(hosterConfig) {
+  const apiKey = hosterConfig && hosterConfig.apiKey
+    ? String(hosterConfig.apiKey).trim()
+    : '';
+  if (!apiKey) return { status: 'error', message: 'API Key fehlt' };
+  try {
+    const uploader = new ClouddropUploader(apiKey);
+    await uploader.checkAuth();
+    return { status: 'ok', message: 'API Key gültig' };
+  } catch (err) {
+    return { status: 'error', message: err && err.message ? err.message : 'Clouddrop Auth fehlgeschlagen' };
+  }
+}
+
+// requestedChecks can be:
+// - array of strings (hoster names) for legacy/all-accounts check
+// - array of { hoster, accountId } for specific account checks
+async function runHosterHealthCheck(config, requestedChecks) {
+  const allowed = ['doodstream.com', 'vidmoly.me', 'voe.sx', 'byse.sx', 'clouddrop.cc'];
+
+  // Normalize input to [{ hoster, accountId? }]
+  let checks;
+  if (!Array.isArray(requestedChecks) || requestedChecks.length === 0) {
+    // Check all accounts for all hosters
+    checks = [];
+    for (const name of allowed) {
+      const accounts = config.hosters[name];
+      if (Array.isArray(accounts)) {
+        for (const acc of accounts) {
+          if (hosterAccountHasCreds(name, acc)) checks.push({ hoster: name, accountId: acc.id });
+        }
+      }
+    }
+  } else if (typeof requestedChecks[0] === 'string') {
+    // Legacy: array of hoster names — check all accounts for each
+    checks = [];
+    for (const name of requestedChecks) {
+      const accounts = config.hosters[name];
+      if (Array.isArray(accounts)) {
+        for (const acc of accounts) {
+          if (hosterAccountHasCreds(name, acc)) checks.push({ hoster: name, accountId: acc.id });
+        }
+      }
+    }
+  } else {
+    checks = requestedChecks;
+  }
+
+  {
+    const seen = new Set();
+    const cleaned = [];
+    for (const c of checks) {
+      if (!c || !c.hoster) continue;
+      if (!c.accountId) { cleaned.push({ ...c, _invalid: true }); continue; }
+      const key = `${c.hoster}|${c.accountId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cleaned.push(c);
+    }
+    checks = cleaned;
+  }
+
+  const runOne = async ({ hoster, accountId, otp, _invalid }) => {
+    if (_invalid) {
+      return { hoster, accountId, status: 'error', message: 'Account-ID fehlt im Check-Payload' };
+    }
+    if (!allowed.includes(hoster)) {
+      return { hoster, accountId, status: 'skipped', message: 'Kein Health-Check fuer diesen Hoster' };
+    }
+    const accounts = config.hosters[hoster];
+    const hosterConfig = Array.isArray(accounts) ? accounts.find(a => a.id === accountId) : null;
+    try {
+      const result = await _dispatchHealthCheck(hoster, hosterConfig, otp || '');
+      return { hoster, accountId, ...result };
+    } catch (err) {
+      return { hoster, accountId, status: 'error', message: err && err.message ? err.message : 'Health-Check fehlgeschlagen' };
+    }
+  };
+
+  const groups = new Map();
+  for (const c of checks) {
+    if (!groups.has(c.hoster)) groups.set(c.hoster, []);
+    groups.get(c.hoster).push(c);
+  }
+  const groupResults = await Promise.all(Array.from(groups.values()).map(async (group) => {
+    const out = [];
+    for (const c of group) {
+      out.push(await runOne(c));
+    }
+    return out;
+  }));
+  const indexByCheck = new Map();
+  groupResults.flat().forEach((r) => { indexByCheck.set(`${r.hoster}|${r.accountId || ''}`, r); });
+  const results = checks.map(c => indexByCheck.get(`${c.hoster}|${c.accountId || ''}`));
+
+  return { checkedAt: new Date().toISOString(), results };
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1100,
+    height: 750,
+    minWidth: 800,
+    minHeight: 550,
+    backgroundColor: '#16181c',
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.js')
+    }
+  });
+
+  mainWindow.webContents.setBackgroundThrottling(false);
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
+    debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        const choice = dialog.showMessageBoxSync(mainWindow, {
+          type: 'error',
+          title: 'Renderer abgestürzt',
+          message: `Der Renderer-Prozess ist abgestürzt (${details.reason}).`,
+          detail: 'Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.',
+          buttons: ['Neu laden', 'Beenden'],
+          defaultId: 0,
+          cancelId: 1
+        });
+        if (choice === 0) {
+          mainWindow.webContents.reload();
+        } else {
+          app.exit(1);
+        }
+      } catch {
+        try { mainWindow.webContents.reload(); } catch {}
+      }
+    }
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    _writeCrashLog('RENDERER UNRESPONSIVE', new Error('webContents unresponsive'));
+    debugLog('RENDERER UNRESPONSIVE');
+  });
+
+  mainWindow.webContents.on('responsive', () => {
+    debugLog('RENDERER RESPONSIVE AGAIN');
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    _writeCrashLog('DID-FAIL-LOAD', new Error(errorDescription), { errorCode, validatedURL });
+    debugLog(`DID-FAIL-LOAD: ${errorCode} ${errorDescription} url=${validatedURL}`);
+  });
+
+  app.on('child-process-gone', (_event, details) => {
+    _writeCrashLog('CHILD PROCESS GONE', new Error(details.reason || 'unknown'), details);
+    debugLog(`CHILD PROCESS GONE: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+    if (details && details.type === 'GPU') {
+      try { const f = _gpuDisableFlagPath(); if (f) fs.writeFileSync(f, new Date().toISOString(), 'utf-8'); } catch {}
+    }
+  });
+
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+}
+
+function createTray() {
+  try {
+    const candidates = [
+      path.join(process.resourcesPath || __dirname, 'assets', 'app_icon.ico'),
+      path.join(__dirname, 'assets', 'app_icon.ico'),
+      path.join(__dirname, 'assets', 'icon.png')
+    ];
+    let icon = null;
+    for (const p of candidates) {
+      try {
+        const img = nativeImage.createFromPath(p);
+        if (img && !img.isEmpty()) { icon = img; break; }
+      } catch {}
+    }
+    tray = new Tray(icon || nativeImage.createEmpty());
+    tray.setToolTip('Multi-Hoster-Upload');
+
+    const contextMenu = Menu.buildFromTemplate([
+      { label: 'Öffnen', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+      { type: 'separator' },
+      { label: 'Beenden', click: () => { app.quit(); } }
+    ]);
+    tray.setContextMenu(contextMenu);
+
+    tray.on('click', () => {
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    });
+  } catch (err) {
+    tray = null;
+    debugLog(`createTray failed (non-fatal): ${err && err.message ? err.message : err}`);
+  }
+}
+
+function updateTrayTooltip(text) {
+  if (tray && !tray.isDestroyed()) tray.setToolTip(text);
+}
+
+app.whenReady().then(() => {
+  if (!_hasSingleInstanceLock) return;
+  try {
+    const _bootCfg = configStore.load();
+    setLogVerbose(!!(_bootCfg.globalSettings && _bootCfg.globalSettings.logVerbose));
+  } catch {}
+  logMarker('APP START', {
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    node: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+    verbose: _logVerbose,
+    pid: process.pid
+  });
+  _sweepOrphanConfigTmps();
+  createWindow();
+  createTray();
+
+  // Minimize to tray instead of taskbar
+  mainWindow.on('minimize', () => {
+    mainWindow.hide();
+  });
+
+  // Auto-start folder monitor if enabled
+  try {
+    const launchConfig = configStore.load();
+    const fm = launchConfig.globalSettings && launchConfig.globalSettings.folderMonitor;
+    if (fm && fm.enabled && fm.folderPath) {
+      if (fs.existsSync(fm.folderPath)) {
+        startFolderMonitor(fm);
+      } else {
+        logWarn(`folder-monitor auto-start skipped: path not found (${fm.folderPath})`);
+        // Persist the disable so the user gets a clean state on next launch
+        const gs = { ...launchConfig.globalSettings, folderMonitor: { ...fm, enabled: false } };
+        configStore.save({ globalSettings: gs }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    debugLog(`folder-monitor auto-start failed: ${err.message}`);
+  }
+
+  // Auto-start remote server if enabled
+  try {
+    const _remCfg = configStore.load();
+    const remoteConfig = _remCfg.globalSettings && _remCfg.globalSettings.remote;
+    if (remoteConfig && remoteConfig.enabled) {
+      startRemoteServer().catch(err => {
+        debugLog(`remote-server auto-start failed: ${err.message}`);
+      });
+    }
+    const diagConfig = _remCfg.globalSettings && _remCfg.globalSettings.diagnostics;
+    if (diagConfig && diagConfig.enabled) {
+      startDiagnosticAgent().catch(err => {
+        debugLog(`diagnostics-agent auto-start failed: ${err.message}`);
+      });
+    }
+  } catch (err) {
+    debugLog(`remote-server auto-start failed: ${err.message}`);
+  }
+
+  // Auto-show drop target if enabled
+  try {
+    const dtConfig = configStore.load();
+    if (dtConfig.globalSettings && dtConfig.globalSettings.showDropTarget) {
+      createDropTargetWindow();
+    }
+  } catch {}
+
+  // Auto-check for updates after 3 seconds
+  setTimeout(async () => {
+    try {
+      logInfo('update-check: starting');
+      const result = await checkForUpdate();
+      logInfo(`update-check: available=${result && result.available}, remote=${result && result.remoteVersion}`);
+      logDebug(`update-check result: ${JSON.stringify(result)}`);
+      if (result && result.available && mainWindow && !mainWindow.isDestroyed()) {
+        safeSend('app:update-available', result);
+      }
+    } catch (err) {
+      logError('update-check failed', err);
+    }
+  }, 3000);
+});
+
+app.on('window-all-closed', () => {
+  const activeJobs = uploadManager && typeof uploadManager.getActiveJobCount === 'function' ? uploadManager.getActiveJobCount() : 0;
+  debugLog(`window-all-closed: activeJobs=${activeJobs}, uploadManager=${!!uploadManager}`);
+  _writeCrashLog('WINDOW-ALL-CLOSED', new Error('all windows closed'), { activeJobs, uploadManager: !!uploadManager });
+  app.quit();
+});
+
+app.on('before-quit', () => {
+  if (uploadManager) try { uploadManager.cancel(); } catch {}
+  try { folderMonitor.stop(); } catch {}
+  try {
+    if (remoteServer) { remoteServer.stop(); remoteServer = null; }
+    destroyCaptureWindow();
+  } catch {}
+  try { stopDiagnosticAgent(); } catch {}
+  try { destroyDropTargetWindow(); } catch {}
+  try { if (tray && !tray.isDestroyed()) { tray.destroy(); tray = null; } } catch {}
+  // Flush pending log buffers synchronously so no lines are lost.
+  try {
+    if (_debugLogBuffer.length) {
+      fs.appendFileSync(getDebugLogPath(), _debugLogBuffer.join(''), 'utf-8');
+      _debugLogBuffer.length = 0;
+    }
+  } catch {}
+  try {
+    if (_uploadLogBuffer.length) {
+      const target = _resolveUploadLogTarget();
+      if (target) fs.appendFileSync(target.path, _uploadLogBuffer.join(''), 'utf-8');
+      _uploadLogBuffer.length = 0;
+    }
+  } catch {}
+  try {
+    if (_rotLogBuffer.length) {
+      fs.appendFileSync(getRotLogPath(), _rotLogBuffer.join(''), 'utf-8');
+      _rotLogBuffer.length = 0;
+    }
+  } catch {}
+});
+
+// --- IPC Handlers ---
+
+// Debug log from renderer
+ipcMain.handle('debug-log', (_event, msg) => {
+  debugLog(`[RENDERER] ${msg}`);
+  return true;
+});
+
+ipcMain.handle('get-config', () => {
+  return configStore.load();
+});
+
+ipcMain.handle('save-config', async (_event, config) => {
+  await configStore.save(config);
+  if (config && config.globalSettings) _invalidateLogSettings();
+  try {
+    if (config && config.globalSettings && Object.prototype.hasOwnProperty.call(config.globalSettings, 'logVerbose')) {
+      setLogVerbose(!!config.globalSettings.logVerbose);
+    }
+  } catch {}
+  // If a batch is running and some accounts got marked failed before any
+  // fallback existed, re-resolve now — the user may have just added one.
+  // Without this re-probe, those accounts stay stuck with no override until
+  // the app restarts, and every subsequent job wastes an attempt on them.
+  if (uploadManager && typeof uploadManager.getFailedAccountKeys === 'function') {
+    try {
+      const cfg = configStore.load();
+      const keys = uploadManager.getFailedAccountKeys();
+      for (const key of keys) {
+        const sep = key.indexOf(':');
+        if (sep < 0) continue;
+        const hoster = key.slice(0, sep);
+        const failedAccountId = key.slice(sep + 1);
+        if (uploadManager.getOverride(hoster)) continue; // already has a fallback
+        const fallback = getNextFallbackAccount(cfg, hoster, failedAccountId);
+        if (fallback) {
+          rotLog(`main: config-updated → late fallback ${fallback.id} for ${hoster} (was stuck on ${failedAccountId})`);
+          uploadManager.switchAccount(hoster, fallback);
+          _sessionAccountOverrides.set(hoster, fallback);
+          safeSend('account-switched', {
+              hoster, fromAccountId: failedAccountId, toAccountId: fallback.id
+            });
+        }
+      }
+    } catch (err) {
+      debugLog(`save-config re-resolve failed: ${err && err.message ? err.message : err}`);
+    }
+  }
+  if (uploadManager && typeof uploadManager.updateAccountPools === 'function') {
+    try {
+      uploadManager.updateAccountPools(buildAccountPools(configStore.load()));
+    } catch (err) {
+      debugLog(`save-config pool refresh failed: ${err && err.message ? err.message : err}`);
+    }
+  }
+  return true;
+});
+
+ipcMain.handle('get-history', () => {
+  return configStore.loadHistory();
+});
+
+ipcMain.handle('prune-history', async (_event, payload) => {
+  const retention = payload && payload.retention;
+  const dryRun = !!(payload && payload.dryRun);
+  return configStore.pruneHistory(retention, { dryRun });
+});
+
+ipcMain.handle('save-text-file', async (_event, defaultName, content, filters) => {
+  const safeName = String(defaultName || `export-${new Date().toISOString().slice(0, 10)}.txt`);
+  const safeFilters = Array.isArray(filters) && filters.length
+    ? filters
+    : [{ name: 'Textdatei', extensions: ['txt', 'csv', 'log'] }];
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Speichern unter',
+    defaultPath: safeName,
+    filters: safeFilters
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(filePath, String(content === null || content === undefined ? '' : content), 'utf-8');
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('export-history', async (_event, format) => {
+  const normalizedFormat = String(format || 'csv').toLowerCase() === 'json' ? 'json' : 'csv';
+  const history = configStore.loadHistory();
+  const rows = flattenHistoryForExport(history);
+  const datePrefix = new Date().toISOString().slice(0, 10);
+
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Upload-Verlauf exportieren',
+    defaultPath: `upload-history-${datePrefix}.${normalizedFormat}`,
+    filters: normalizedFormat === 'json'
+      ? [{ name: 'JSON-Datei', extensions: ['json'] }]
+      : [{ name: 'CSV-Datei', extensions: ['csv'] }]
+  });
+
+  if (canceled || !filePath) return { ok: false, canceled: true };
+
+  if (normalizedFormat === 'json') {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      totalBatches: Array.isArray(history) ? history.length : 0,
+      totalRows: rows.length,
+      history
+    };
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+  } else {
+    fs.writeFileSync(filePath, buildHistoryCsv(rows), 'utf-8');
+  }
+
+  return {
+    ok: true,
+    path: filePath,
+    format: normalizedFormat,
+    totalBatches: Array.isArray(history) ? history.length : 0,
+    totalRows: rows.length
+  };
+});
+
+ipcMain.handle('run-health-check', async (_event, payload) => {
+  const config = configStore.load();
+  const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
+  return runHosterHealthCheck(config, hosters);
+});
+
+// Validate ephemeral credentials WITHOUT persisting them to config.hosters.
+// This is the IPC that backs the two-step "Prüfen → Anlegen" modal flow: the
+// new account is never on disk until the user confirms after a green check, so
+// failed/OTP-pending creds can't leak into config (and a double-click on the
+// Prüfen button cannot create duplicates because nothing is written until the
+// second, distinct "Anlegen" click). NOTE: this payload carries plaintext creds
+// across the IPC boundary — same trust level as save-config — DO NOT log it.
+ipcMain.handle('validate-credentials', async (_event, payload) => {
+  if (!payload || !payload.hoster) {
+    return { status: 'error', message: 'Hoster fehlt' };
+  }
+  const ephemeralHosterConfig = {
+    username: payload.username || '',
+    password: payload.password || '',
+    apiKey: payload.apiKey || '',
+    enabled: true
+  };
+  try {
+    return await _dispatchHealthCheck(payload.hoster, ephemeralHosterConfig, payload.otp || '');
+  } catch (err) {
+    return { status: 'error', message: err && err.message ? err.message : 'Validierung fehlgeschlagen' };
+  }
+});
+
+async function _dispatchHealthCheck(hoster, hosterConfig, otp) {
+  // Mirrors the per-hoster switch in runHosterHealthCheck so both code paths
+  // (batch check by accountId and ephemeral validate) go through identical
+  // checkers + timeout wrappers and surface identical result shapes.
+  if (hoster === 'doodstream.com') {
+    return withTimeout(checkDoodstreamHealth(hosterConfig, otp), HEALTH_CHECK_TIMEOUT, 'Doodstream-Check');
+  }
+  if (hoster === 'vidmoly.me') {
+    return withTimeout(checkVidmolyHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'Vidmoly-Check');
+  }
+  if (hoster === 'voe.sx') {
+    return withTimeout(checkVoeHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'VOE-Check');
+  }
+  if (hoster === 'byse.sx') {
+    return withTimeout(checkByseHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'Byse-Check');
+  }
+  if (hoster === 'clouddrop.cc') {
+    return withTimeout(checkClouddropHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'Clouddrop-Check');
+  }
+  return { status: 'skipped', message: 'Kein Health-Check fuer diesen Hoster' };
+}
+
+ipcMain.handle('select-files', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Alle Dateien', extensions: ['*'] },
+      { name: 'Videos', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'] }
+    ]
+  });
+  return result.canceled ? null : result.filePaths;
+});
+
+// Debug self-test: runs a minimal upload in the main process to verify events work
+ipcMain.handle('debug-test-upload', async () => {
+  const testFile = path.join(__dirname, 'test-self-check.txt');
+  try {
+    fs.writeFileSync(testFile, 'selftest ' + Date.now(), 'utf-8');
+    const mgr = new UploadManager({ 'voe.sx': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } });
+    const events = [];
+    return new Promise((resolve) => {
+      mgr.on('progress', (data) => { events.push({ s: data.status, e: data.error || null }); });
+      mgr.on('batch-done', (summary) => {
+        try { fs.unlinkSync(testFile); } catch {}
+        resolve({ ok: true, events, summary: { ok: summary.succeeded, fail: summary.failed } });
+      });
+      mgr.startBatch([{ file: testFile, hoster: 'voe.sx', apiKey: 'invalid-test-key' }]);
+      setTimeout(() => {
+        try { fs.unlinkSync(testFile); } catch {}
+        resolve({ ok: false, events, timeout: true });
+      }, 20000);
+    });
+  } catch (err) {
+    try { fs.unlinkSync(testFile); } catch {}
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'multiSelections']
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+
+  const files = [];
+  for (const folder of result.filePaths) await walkFolderAsync(folder, files);
+  return files.length > 0 ? files.map(f => f.path) : null;
+});
+
+ipcMain.handle('select-folder-with-sizes', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'multiSelections']
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+
+  const files = [];
+  for (const folder of result.filePaths) await walkFolderAsync(folder, files);
+  return files.length > 0 ? files : null;
+});
+
+async function walkFolderAsync(rootDir, outFiles) {
+  const fsp = fs.promises;
+  const stack = [rootDir];
+  let scanned = 0;
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = await fsp.readdir(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile()) {
+        let size = 0;
+        try { size = (await fsp.stat(full)).size; } catch {}
+        outFiles.push({ path: full, name: entry.name, size });
+      }
+    }
+    if ((++scanned % 8) === 0) await new Promise(setImmediate);
+  }
+}
+
+ipcMain.handle('resolve-folder-files', async (_event, folderPath) => {
+  const files = [];
+  await walkFolderAsync(folderPath, files);
+  return files;
+});
+
+ipcMain.handle('get-file-sizes', async (_event, paths) => {
+  if (!Array.isArray(paths)) return {};
+  const fsp = fs.promises;
+  const out = {};
+  let i = 0;
+  for (const p of paths) {
+    try { out[p] = (await fsp.stat(p)).size; } catch { out[p] = 0; }
+    if ((++i % 32) === 0) await new Promise(setImmediate);
+  }
+  return out;
+});
+
+ipcMain.handle('start-upload', (_event, payload) => {
+  const config = configStore.load();
+  const files = payload && Array.isArray(payload.files) ? payload.files : [];
+  const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
+  const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+  const isAutoRetry = !!(payload && payload.isAutoRetry);
+
+  // At 500+ jobs JSON.stringify blew up the debug log with MB-sized lines
+  // per start-upload and added noticeable delay — log counts only.
+  logMarker('BATCH START', { files: files.length, hosters: hosters.length, jobs: jobs.length });
+  debugLog(`start-upload: files=${files.length}, hosters=${hosters.length}, jobs=${jobs.length}`);
+
+  const pick = makeAccountPicker(config);
+  const tasks = jobs.length > 0
+    ? buildUploadTasksFromJobs(config, jobs, pick)
+    : buildUploadTasks(config, files, hosters, pick);
+  persistRotation(pick);
+
+  // Identify jobs that were skipped (no account/credentials)
+  const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
+  const skippedJobs = jobs.filter(j => j.id && !taskJobIds.has(j.id)).map(j => ({
+    jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster'
+  }));
+  if (skippedJobs.length > 0) {
+    debugLog(`  skipped ${skippedJobs.length} jobs: ${skippedJobs.map(s => s.hoster).join(', ')}`);
+  }
+
+  debugLog(`  tasks built: ${tasks.length}`);
+
+  if (tasks.length === 0) return { error: 'Keine gültigen Zugangsdaten für die gewählten Hoster.', skippedJobs };
+
+  // Pre-resolve a fallback for every hoster that has one. Lets the upload
+  // manager break out of the retry loop after a single generic failure and
+  // try the alternate account immediately, instead of hammering a probably-
+  // dead primary 5× before the account-failed event even fires. Doesn't
+  // trigger pre-job-swap (which only fires when the current account is in
+  // _failedAccounts), so jobs still start on the primary as expected.
+  const hostersInBatch = new Set(tasks.map(t => t.hoster).filter(Boolean));
+  for (const hoster of hostersInBatch) {
+    if (_sessionAccountOverrides.has(hoster)) continue; // already learned from past batch
+    const accounts = config.hosters && config.hosters[hoster];
+    if (!Array.isArray(accounts) || accounts.length < 2) continue;
+    const primary = accounts.find(a => a && a.enabled !== false && hosterAccountHasCreds(hoster, a));
+    if (!primary) continue;
+    const next = getNextFallbackAccount(config, hoster, primary.id);
+    if (next) {
+      _sessionAccountOverrides.set(hoster, next);
+      rotLog(`main: pre-resolved fallback for ${hoster} → ${next.id} (primary ${primary.id} will try acc2 on first failure)`);
+    }
+  }
+
+  // Fresh collector for this new batch — old entries from the previous
+  // batch's jobs are dropped (user's signal for "fresh log" is starting a
+  // new upload; addJobs during a running batch keeps them).
+  _jobLogCollector.clear();
+
+  // Pass hoster settings to the upload manager
+  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
+  globalThis._mhuUploadManagerRef = uploadManager;
+
+  const _progressByJob = new Map();
+  const _progressTerminalQueue = [];
+  let _progressFlushTimer = null;
+  const PROGRESS_BATCH_INTERVAL_MS = 100;
+  function _scheduleProgressFlush() {
+    if (_progressFlushTimer) return;
+    _progressFlushTimer = setTimeout(() => {
+      _progressFlushTimer = null;
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        _progressByJob.clear();
+        _progressTerminalQueue.length = 0;
+        return;
+      }
+      const batch = _progressTerminalQueue.splice(0);
+      for (const v of _progressByJob.values()) batch.push(v);
+      _progressByJob.clear();
+      if (batch.length) safeSend('upload-progress-batch', batch);
+    }, PROGRESS_BATCH_INTERVAL_MS);
+  }
+
+  uploadManager.on('progress', (data) => {
+    if (data.status !== 'uploading') {
+      debugLog(`progress: ${data.fileName} ${data.hoster} ${data.status} ${data.error || ''}`);
+      _appendJobLog(data.jobId, {
+        ts: Date.now(), kind: 'progress', status: data.status,
+        hoster: data.hoster, accountId: data.accountId || null,
+        error: data.error || null, attempt: data.attempt || 0, maxAttempts: data.maxAttempts || 0
+      });
+    }
+    if (data.status === 'done' && data.result) {
+      const link = data.result.download_url || data.result.embed_url || data.result.file_code || '';
+      if (link) {
+        if (shouldLogHosterToFile(data.hoster)) {
+          appendUploadLog(data.hoster || '', link, data.fileName || '');
+        } else {
+          debugLog(`upload-log: skip ${data.fileName} @ ${data.hoster} (logToFile disabled for hoster)`);
+        }
+      } else {
+        debugLog(`WARNING: done but no link for ${data.fileName} @ ${data.hoster}: ${JSON.stringify(data.result)}`);
+      }
+    }
+    const isTerminal = data.status === 'done' || data.status === 'error' || data.status === 'aborted' || data.status === 'skipped';
+    if (isTerminal) {
+      if (data.jobId) _progressByJob.delete(data.jobId);
+      _progressTerminalQueue.push(data);
+    } else if (data.jobId) {
+      _progressByJob.set(data.jobId, data);
+    } else {
+      _progressTerminalQueue.push(data);
+    }
+    _scheduleProgressFlush();
+  });
+
+  uploadManager.on('stats', (data) => {
+    try {
+      if (!data || typeof data !== 'object') return;
+      safeSend('upload-stats', data);
+      if (data.state === 'uploading' && data.activeJobs > 0) {
+        const speedMb = ((Number(data.globalSpeedKbs) || 0) / 1024).toFixed(1);
+        updateTrayTooltip(`Upload: ${data.activeJobs} aktiv - ${speedMb} MB/s`);
+        _maybeLogEventLoopDelay(data.activeJobs);
+      } else {
+        updateTrayTooltip('Multi-Hoster-Upload');
+      }
+    } catch (e) { debugLog(`stats listener error: ${e && e.message}`); }
+  });
+
+  uploadManager.on('account-failed', ({ hoster, accountId }) => {
+    // Persist to session cache so a subsequent batch (after batch-done)
+    // gets primed and won't burn retries on this account again.
+    _sessionFailedAccounts.set(hoster + ':' + accountId, true);
+    const cfg = configStore.load();
+    const fallback = getNextFallbackAccount(cfg, hoster, accountId);
+    if (fallback) {
+      rotLog(`main: account-failed ${hoster} ${accountId} → resolved fallback ${fallback.id}`);
+      uploadManager.switchAccount(hoster, fallback);
+      _sessionAccountOverrides.set(hoster, fallback);
+      safeSend('account-switched', { hoster, fromAccountId: accountId, toAccountId: fallback.id });
+    } else {
+      rotLog(`main: account-failed ${hoster} ${accountId} → NO fallback available (end of chain)`);
+    }
+  });
+
+  const ROT_LOG_RENDERER_EVENTS = new Set([
+    'switchAccount',
+    'pre-job-swap',
+    'try-alternate-after-fail',
+    'mark-failed',
+    'rotation-end',
+    'doodstream-via-api',
+    'doodstream-via-web',
+    'suspect-reject-alt',
+    'suspect-reject-exhausted'
+  ]);
+  uploadManager.on('rot-log', (entry) => {
+    try {
+      if (!entry || typeof entry !== 'object') return;
+      const { ts, event, ...rest } = entry;
+      const pairs = Object.entries(rest)
+        .map(([k, v]) => {
+          let sv;
+          try { sv = typeof v === 'string' ? v : JSON.stringify(v); }
+          catch { sv = '<unserializable>'; }
+          return `${k}=${sv}`;
+        })
+        .join(' ');
+      rotLog(`[${event}] ${pairs}`, ts);
+      if (entry.jobId) {
+        _appendJobLog(entry.jobId, { ts: ts || Date.now(), kind: 'rot', event, ...rest });
+      }
+      if (ROT_LOG_RENDERER_EVENTS.has(event)) {
+        safeSend('account-rotation-log', entry);
+      }
+    } catch (e) { debugLog(`rot-log listener error: ${e && e.message}`); }
+  });
+
+  // Capture the manager identity at listener-registration time so the post-
+  // batch null-out can compare against IT — not against whatever the global
+  // happens to point at after an `await`. Without this, a renderer that
+  // fires start-upload while we're still awaiting appendHistory would
+  // create a fresh manager which the trailing `uploadManager = null` then
+  // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
+  const _thisManager = uploadManager;
+  uploadManager.on('batch-done', async (summary) => {
+    debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
+    logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
+    logMemorySnapshot('batch-done');
+    const _batchDurationSec = _thisManager && _thisManager.startTime
+      ? Math.round((Date.now() - _thisManager.startTime) / 1000)
+      : 0;
+    try { await configStore.appendHistory(summary); } catch (err) {
+      debugLog(`appendHistory failed: ${err.message}`);
+    }
+    safeSend('upload-batch-done', summary);
+
+    const fullyAborted = isAllAborted(summary);
+    if (isAutoRetry) {
+      debugLog('webhook: skipped — auto-retry round (initial batch already notified)');
+    } else if (fullyAborted) {
+      debugLog('webhook: skipped — batch fully aborted/cancelled');
+    } else {
+      await sendBatchWebhook(summary, _batchDurationSec, { aborted: fullyAborted });
+    }
+
+    // Shutdown after finish
+    handleShutdownAfterFinish();
+    if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+    else debugLog('batch-done: skipping uploadManager null-out — a newer manager replaced this one mid-await');
+  });
+
+  // Defer startBatch to next tick so the IPC response is sent first.
+  // This ensures webContents.send() calls from upload events
+  // are not interleaved with the handle() response.
+  process.nextTick(() => {
+    if (!uploadManager) { debugLog('nextTick: uploadManager was nulled before startBatch'); return; }
+    debugLog(`nextTick: calling startBatch now (priming ${_sessionFailedAccounts.size} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
+    uploadManager.startBatch(tasks, {
+      primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
+      primeOverrides: Array.from(_sessionAccountOverrides.entries())
+    }).catch((err) => {
+      debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
+      const errorSummary = {
+        id: 'error',
+        timestamp: new Date().toISOString(),
+        total: tasks.length,
+        succeeded: 0,
+        failed: tasks.length,
+        files: [],
+        error: err ? err.message : 'Unbekannter Fehler'
+      };
+      safeSend('upload-batch-done', errorSummary);
+      if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
+      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+    });
+  });
+
+  logMemorySnapshot('batch-start');
+  debugLog(`start-upload returning started=true (startBatch deferred to nextTick)`);
+  return { started: true, taskCount: tasks.length, skippedJobs };
+});
+
+// Logged at batch boundaries so we can spot memory growth between batches
+// across long sessions (main process side only — the renderer's live view
+// still uses DevTools for profiling). Non-invasive: single line per boundary.
+function logMemorySnapshot(label) {
+  try {
+    const m = process.memoryUsage();
+    const mb = (n) => (n / 1024 / 1024).toFixed(1);
+    debugLog(`memory[${label}]: rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}/${mb(m.heapTotal)}MB external=${mb(m.external)}MB arrayBuffers=${mb(m.arrayBuffers)}MB`);
+  } catch {}
+}
+
+ipcMain.handle('cancel-upload', () => {
+  if (uploadManager) {
+    uploadManager.cancel();
+  }
+  return true;
+});
+
+ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
+  if (uploadManager) {
+    uploadManager.cancelJobs(Array.isArray(jobIds) ? jobIds : []);
+  }
+  return true;
+});
+
+ipcMain.handle('add-jobs-to-batch', (_event, payload) => {
+  if (!uploadManager || !uploadManager.running) {
+    return { error: 'Kein Upload aktiv' };
+  }
+  const config = configStore.load();
+  const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+  const pick = makeAccountPicker(config);
+  const tasks = buildUploadTasksFromJobs(config, jobs, pick);
+  persistRotation(pick);
+  const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
+  const skippedJobs = jobs
+    .filter(j => j && j.id && !taskJobIds.has(j.id))
+    .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gÃ¼ltiger Account fÃ¼r diesen Hoster' }));
+
+  if (tasks.length === 0) {
+    debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
+    return { added: 0, skippedJobs, alreadyInBatchJobIds: [] };
+  }
+
+  const addResult = uploadManager.addJobs(tasks);
+  const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
+  const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
+    ? addResult.alreadyInBatchJobIds
+    : [];
+
+  debugLog(
+    `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
+  );
+  return { added, skippedJobs, alreadyInBatchJobIds };
+});
+
+ipcMain.handle('finish-after-active', () => {
+  if (uploadManager) {
+    uploadManager.finishAfterActive();
+  }
+  return true;
+});
+
+ipcMain.handle('get-session-failed-accounts', () => {
+  return Array.from(_sessionFailedAccounts.keys());
+});
+
+ipcMain.handle('reset-session-failed-account', (_event, payload) => {
+  if (!payload || typeof payload !== 'object') return { ok: false };
+  const { hoster, accountId } = payload;
+  if (!hoster || !accountId) return { ok: false };
+  const key = `${hoster}:${accountId}`;
+  const removed = _sessionFailedAccounts.delete(key);
+  if (uploadManager && typeof uploadManager.clearFailedAccount === 'function') {
+    try { uploadManager.clearFailedAccount(hoster, accountId); } catch {}
+  }
+  rotLog(`session-failed: manual reset ${key} (was set: ${removed})`);
+  return { ok: true, removed };
+});
+
+ipcMain.handle('reset-all-session-failed-accounts', () => {
+  const count = _sessionFailedAccounts.size;
+  _sessionFailedAccounts.clear();
+  if (uploadManager && typeof uploadManager.clearAllFailedAccounts === 'function') {
+    try { uploadManager.clearAllFailedAccounts(); } catch {}
+  }
+  rotLog(`session-failed: cleared all (${count})`);
+  return { ok: true, count };
+});
+
+ipcMain.handle('get-job-log', (_event, jobId) => {
+  if (!jobId || typeof jobId !== 'string') return [];
+  const arr = _jobLogCollector.get(jobId);
+  return Array.isArray(arr) ? arr.slice() : [];
+});
+
+ipcMain.handle('get-log-paths', () => {
+  return getAllLogPaths();
+});
+
+ipcMain.handle('get-app-info', () => {
+  return {
+    name: app.getName(),
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    node: process.versions.node,
+    chrome: process.versions.chrome,
+    platform: process.platform,
+    arch: process.arch,
+    osRelease: require('os').release(),
+    pid: process.pid,
+    isPackaged: app.isPackaged,
+    logVerbose: _logVerbose
+  };
+});
+
+ipcMain.handle('reveal-log-file', async (_event, target) => {
+  const { shell } = require('electron');
+  const paths = getAllLogPaths();
+  const file = (target && typeof target === 'string' && paths[target]) || null;
+  try {
+    if (file && fs.existsSync(file)) {
+      shell.showItemInFolder(file);
+      return { ok: true, path: file };
+    }
+    const dir = paths.logDir;
+    if (dir) {
+      fs.mkdirSync(dir, { recursive: true });
+      shell.openPath(dir);
+      return { ok: true, path: dir };
+    }
+    return { ok: false, error: 'Kein Log-Pfad gefunden' };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('test-webhook', async (_event, payload) => {
+  const target = (typeof payload === 'string' ? payload : (payload && payload.url) || '').trim();
+  const mention = (payload && typeof payload === 'object' && payload.mention) || '';
+  if (!target || !/^https?:\/\//i.test(target)) return { ok: false, error: 'Ungültige URL (muss mit http(s):// beginnen)' };
+  try {
+    const req = buildWebhookRequest(target, {
+      total: 3, succeeded: 2, failed: 1,
+      files: [{ name: 'test.mkv', results: [
+        { hoster: 'voe.sx', status: 'done' },
+        { hoster: 'byse.sx', status: 'done' },
+        { hoster: 'doodstream.com', status: 'error', error: 'Testfehler' }
+      ] }]
+    }, {
+      durationSec: 754,
+      appVersion: app.getVersion(),
+      machineName: require('os').hostname(),
+      mention,
+      timestamp: new Date().toISOString()
+    });
+    const res = await fetch(req.url, {
+      method: req.method, headers: req.headers, body: req.body,
+      signal: AbortSignal.timeout(10_000)
+    });
+    return { ok: res.status >= 200 && res.status < 300, status: res.status };
+  } catch (err) {
+    return { ok: false, error: err && err.message ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle('set-log-verbose', (_event, enabled) => {
+  setLogVerbose(enabled);
+  logMarker('VERBOSE TOGGLE', { enabled: _logVerbose });
+  return { ok: true, verbose: _logVerbose };
+});
+
+ipcMain.handle('create-support-bundle', async () => {
+  const { dialog } = require('electron');
+  try {
+    if (_debugLogBuffer.length) {
+      try { fs.appendFileSync(getDebugLogPath(), _debugLogBuffer.join(''), 'utf-8'); _debugLogBuffer.length = 0; } catch {}
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const defaultName = `multi-hoster-support-${stamp}.txt`;
+    const desktop = (() => { try { return app.getPath('desktop'); } catch { return app.getPath('userData'); } })();
+    const res = await dialog.showSaveDialog(mainWindow || undefined, {
+      title: 'Diagnose-Paket speichern',
+      defaultPath: path.join(desktop, defaultName),
+      filters: [{ name: 'Text', extensions: ['txt'] }]
+    });
+    if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+    const paths = getAllLogPaths();
+    const cfg = configStore.load();
+    const text = buildSupportBundleText({
+      header: {
+        App: app.getName(),
+        Version: app.getVersion(),
+        Electron: process.versions.electron,
+        Node: process.versions.node,
+        Chrome: process.versions.chrome,
+        Platform: process.platform,
+        Arch: process.arch,
+        OS: `${require('os').type()} ${require('os').release()}`,
+        Packaged: app.isPackaged,
+        Verbose: _logVerbose,
+        PID: process.pid,
+        CreatedAt: new Date().toISOString()
+      },
+      sanitizedConfig: sanitizeConfig(cfg),
+      files: [
+        { label: 'debug.log (last 5 MB)', path: paths.debug, maxBytes: 5 * 1024 * 1024 },
+        { label: 'account-rotation.log (last 2 MB)', path: paths.accountRotation, maxBytes: 2 * 1024 * 1024 },
+        { label: 'doodstream-debug.log (last 2 MB)', path: paths.doodstreamDebug, maxBytes: 2 * 1024 * 1024 },
+        { label: 'crash.log', path: path.join(paths.logDir || path.dirname(paths.debug), 'crash.log'), maxBytes: 1 * 1024 * 1024 },
+        { label: 'fileuploader.log (last 1 MB)', path: paths.fileuploader, maxBytes: 1 * 1024 * 1024 }
+      ]
+    });
+    fs.writeFileSync(res.filePath, text, 'utf-8');
+    logMarker('SUPPORT BUNDLE', { path: res.filePath, bytes: text.length });
+    return { ok: true, path: res.filePath, bytes: text.length };
+  } catch (err) {
+    debugLog(`create-support-bundle failed: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('open-log-folder', async () => {
+  // Reveal the active log file (or its directory) in the OS file manager.
+  // Prefers the configured log path, then the rotation log, then just the
+  // parent dir.
+  const { shell } = require('electron');
+  const primary = getLogFilePath();
+  if (fs.existsSync(primary)) { shell.showItemInFolder(primary); return { ok: true, path: primary }; }
+  const rot = getRotLogPath();
+  if (fs.existsSync(rot)) { shell.showItemInFolder(rot); return { ok: true, path: rot }; }
+  try {
+    const dir = path.dirname(primary);
+    fs.mkdirSync(dir, { recursive: true });
+    shell.openPath(dir);
+    return { ok: true, path: dir };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('clear-history', async () => {
+  await configStore.clearHistory();
+  return true;
+});
+
+// --- Backup export / import ---
+ipcMain.handle('export-backup', async () => {
+  const _bd = new Date();
+  const _bdate = `${String(_bd.getDate()).padStart(2, '0')}-${String(_bd.getMonth() + 1).padStart(2, '0')}-${_bd.getFullYear()}`;
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Backup exportieren',
+    defaultPath: `${_bdate}-multihoster-backup.mhu`,
+    filters: [
+      { name: 'Multi-Hoster Backup (verschlüsselt)', extensions: ['mhu'] },
+      { name: 'Multi-Hoster Backup (Klartext JSON)', extensions: ['json'] }
+    ]
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  const config = configStore.load();
+  config.history = [];
+  if (filePath.toLowerCase().endsWith('.json')) {
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf-8');
+  } else {
+    const encrypted = backupCrypto.encrypt(config);
+    fs.writeFileSync(filePath, encrypted);
+  }
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle('import-backup', async (_event, legacyPassword) => {
+  let buffer;
+  let sourcePath = _lastImportPath;
+  if (legacyPassword && sourcePath) {
+    buffer = fs.readFileSync(sourcePath);
+  } else {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Backup importieren',
+      filters: [
+        { name: 'Multi-Hoster Backup', extensions: ['mhu', 'json'] },
+        { name: 'Verschlüsselt (.mhu)', extensions: ['mhu'] },
+        { name: 'Klartext (.json)', extensions: ['json'] }
+      ],
+      properties: ['openFile']
+    });
+    if (canceled || !filePaths.length) return { ok: false, canceled: true };
+    sourcePath = filePaths[0];
+    buffer = fs.readFileSync(sourcePath);
+    _lastImportPath = sourcePath;
+  }
+  let imported;
+  const looksLikeJson = buffer.length >= 1 && (buffer[0] === 0x7B || buffer[0] === 0x20 || buffer[0] === 0x0A || buffer[0] === 0x0D || buffer[0] === 0x09 || buffer[0] === 0xEF);
+  if (looksLikeJson) {
+    try {
+      const text = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+      imported = JSON.parse(text);
+    } catch (err) {
+      _lastImportPath = null;
+      return { ok: false, error: 'Klartext-Backup ist kein gültiges JSON: ' + (err.message || err) };
+    }
+  } else {
+    try {
+      imported = backupCrypto.decrypt(buffer, legacyPassword);
+    } catch (err) {
+      if (err && err.needsPassword) {
+        return { ok: false, needsPassword: true, hint: 'Falls dieses Backup mit der aktuellen Version erzeugt wurde, ist die Datei vermutlich beim Transfer beschädigt worden (z. B. FTP-Text-Modus). Versuch es mit einem Klartext-JSON-Export.' };
+      }
+      _lastImportPath = null;
+      throw err;
+    }
+  }
+  _lastImportPath = null;
+  // Validate imported data has required structure
+  if (!imported || typeof imported !== 'object' || !imported.hosters || !imported.hosterSettings || !imported.globalSettings) {
+    return { ok: false, error: 'Backup-Datei hat ungültige Struktur (hosters, hosterSettings oder globalSettings fehlt).' };
+  }
+  // Safety net: timestamped backup so multiple imports don't overwrite each other
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
+  try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
+  // Strip machine-specific state because imported absolute paths can point to
+  // locations that do not exist on the current system.
+  // Any path that does not resolve locally is cleared so the user can re-set it
+  // instead of hitting silent failures later.
+  const importedGlobal = imported.globalSettings || {};
+  if (importedGlobal.logFilePath && !fs.existsSync(path.dirname(importedGlobal.logFilePath))) {
+    importedGlobal.logFilePath = '';
+  }
+  if (importedGlobal.folderMonitor && typeof importedGlobal.folderMonitor === 'object') {
+    const fm = importedGlobal.folderMonitor;
+    if (fm.folderPath && !fs.existsSync(fm.folderPath)) {
+      fm.folderPath = '';
+      fm.enabled = false;
+    }
+  }
+  importedGlobal.pendingQueue = null;
+  // Single atomic write — no split state, no TOCTOU race
+  const merged = {
+    hosters: imported.hosters,
+    hosterSettings: imported.hosterSettings,
+    globalSettings: importedGlobal,
+    history: []
+  };
+  await configStore._atomicWrite(configStore._serializeForDisk(merged));
+  _invalidateLogSettings();
+  return { ok: true, config: configStore.load() };
+});
+
+ipcMain.handle('read-own-upload-log', () => {
+  // Read all log files (base + daily logs) and return parsed entries
+  const entries = [];
+  const basePath = getBaseLogFilePath();
+  const dir = path.dirname(basePath);
+  const ext = path.extname(basePath);
+  const name = path.basename(basePath, ext);
+
+  // Collect all matching log files (base + daily variants)
+  const logFiles = [];
+  try {
+    for (const file of fs.readdirSync(dir)) {
+      if (file.startsWith(name) && file.endsWith(ext)) {
+        logFiles.push(path.join(dir, file));
+      }
+    }
+  } catch {}
+  if (logFiles.length === 0 && fs.existsSync(basePath)) {
+    logFiles.push(basePath);
+  }
+
+  for (const logPath of logFiles) {
+    try {
+      const content = fs.readFileSync(logPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const parsed = parseUploadLogLine(line);
+        if (parsed) entries.push(parsed);
+      }
+    } catch {}
+  }
+  return entries;
+});
+
+ipcMain.handle('import-upload-log', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Upload-Log importieren',
+    filters: [
+      { name: 'Log-Dateien', extensions: ['log', 'txt'] },
+      { name: 'Alle Dateien', extensions: ['*'] }
+    ],
+    properties: ['openFile']
+  });
+  if (canceled || !filePaths.length) return { canceled: true };
+  const content = fs.readFileSync(filePaths[0], 'utf-8');
+  // Parse log format: date|hoster|link||filename|
+  const entries = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const parts = trimmed.split('|');
+    if (parts.length >= 5) {
+      const hoster = (parts[1] || '').trim();
+      const fileName = (parts[4] || '').trim();
+      if (hoster && fileName) entries.push({ hoster, fileName });
+    }
+  }
+  return { entries, path: filePaths[0] };
+});
+
+ipcMain.handle('copy-to-clipboard', (_event, text) => {
+  clipboard.writeText(text);
+  return true;
+});
+
+ipcMain.handle('app:check-updates', async () => {
+  try {
+    return await checkForUpdate();
+  } catch (err) {
+    return { available: false, error: err.message };
+  }
+});
+
+ipcMain.handle('app:install-update', () => {
+  try { if (uploadManager) uploadManager.cancel(); } catch {}
+  installUpdate((progress) => {
+    safeSend('app:update-progress', progress);
+  }).catch((err) => {
+    safeSend('app:update-progress', { stage: 'error', error: err.message });
+  });
+  return { started: true };
+});
+
+ipcMain.handle('app:abort-update', () => {
+  abortUpdate();
+  return true;
+});
+
+ipcMain.handle('app:get-version', () => {
+  return app.getVersion();
+});
+
+ipcMain.handle('app:restart', () => {
+  app.relaunch();
+  app.quit();
+});
+
+ipcMain.handle('app:quit', () => {
+  app.quit();
+});
+
+// --- Hoster settings ---
+ipcMain.handle('get-hoster-settings', () => {
+  const config = configStore.load();
+  return config.hosterSettings || {};
+});
+
+ipcMain.handle('save-hoster-settings', async (_event, hosterSettings) => {
+  await configStore.save({ hosterSettings });
+  if (uploadManager) uploadManager.updateSettings(hosterSettings, null);
+  return true;
+});
+
+// --- Global settings ---
+ipcMain.handle('get-global-settings', () => {
+  const config = configStore.load();
+  return config.globalSettings || {};
+});
+
+function _preserveDiagSubtree(globalSettings) {
+  if (!globalSettings || typeof globalSettings !== 'object') return globalSettings;
+  try {
+    const cur = configStore.load();
+    if (cur.globalSettings && cur.globalSettings.diagnostics) {
+      globalSettings.diagnostics = cur.globalSettings.diagnostics;
+    }
+  } catch {}
+  return globalSettings;
+}
+
+ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
+  globalSettings = _preserveDiagSubtree(globalSettings);
+  await configStore.save({ globalSettings });
+  _invalidateLogSettings();
+  if (uploadManager) uploadManager.updateSettings(null, globalSettings);
+  return true;
+});
+
+function _sleepSyncMs(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* spin */ }
+  }
+}
+
+function _sweepOrphanConfigTmps() {
+  try {
+    const dir = path.dirname(configStore.filePath);
+    const isAlive = (pid) => {
+      try { process.kill(pid, 0); return true; } catch (e) { return !!(e && e.code === 'EPERM'); }
+    };
+    const orphans = selectOrphanTmps(fs.readdirSync(dir), {
+      baseName: path.basename(configStore.filePath),
+      currentPid: process.pid,
+      isAlive
+    });
+    for (const file of orphans) {
+      try { fs.unlinkSync(path.join(dir, file)); } catch {}
+    }
+  } catch {}
+}
+
+// Synchronous save for beforeunload — blocks renderer until write completes
+// Uses atomic write pattern (tmp + backup + rename) to prevent corruption.
+// Returns false on any failure so the renderer (which surfaces this via the
+// beforeunload chain) doesn't quietly think queue + settings persisted when
+// they didn't. Errors are logged for diagnostics regardless.
+ipcMain.on('save-global-settings-sync', (event, globalSettings) => {
+  const tmpPath = configStore.filePath + '.' + process.pid + '.tmp';
+  try {
+    const current = configStore.load();
+    const _diskDiag = current.globalSettings && current.globalSettings.diagnostics;
+    current.globalSettings = globalSettings;
+    if (_diskDiag) current.globalSettings.diagnostics = _diskDiag;
+    try { configStore._guardHosters(current, false); } catch {}
+    _invalidateLogSettings();
+    const data = configStore._serializeForDisk(current);
+    const backupPath = configStore.filePath + '.bak';
+    const _fd = fs.openSync(tmpPath, 'w');
+    try { fs.writeSync(_fd, data); fs.fsyncSync(_fd); } finally { fs.closeSync(_fd); }
+    if (fs.existsSync(configStore.filePath)) {
+      // Use try/catch around the read so an AV/lock race doesn't fail the
+      // whole save just because we couldn't refresh the .bak — the write to
+      // the live file via rename is what matters.
+      try {
+        const existing = fs.readFileSync(configStore.filePath, 'utf-8');
+        if (existing && existing.trim().length > 2) {
+          fs.writeFileSync(backupPath, existing, 'utf-8');
+        }
+      } catch (bakErr) {
+        debugLog(`save-global-settings-sync: backup read/write skipped: ${bakErr.message}`);
+      }
+    }
+    let renamed = false;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
+      try {
+        fs.renameSync(tmpPath, configStore.filePath);
+        renamed = true;
+      } catch (renameErr) {
+        lastErr = renameErr;
+        const code = renameErr && renameErr.code;
+        if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
+          _sleepSyncMs(40);
+        } else {
+          throw renameErr;
+        }
+      }
+    }
+    if (!renamed) throw lastErr || new Error('renameSync failed');
+    event.returnValue = true;
+  } catch (err) {
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    debugLog(`save-global-settings-sync FAILED: ${err && err.message ? err.message : err}`);
+    event.returnValue = false;
+  }
+});
+
+// --- Folder Monitor ---
+function startFolderMonitor(settings) {
+  try {
+    folderMonitor.stop();
+    folderMonitor.removeAllListeners();
+    folderMonitor.on('new-files', (files) => {
+      debugLog(`folder-monitor: ${files.length} new file(s)`);
+      safeSend('folder-monitor:new-files', files);
+    });
+    folderMonitor.on('error', (err) => {
+      debugLog(`folder-monitor error: ${err.message}`);
+    });
+    folderMonitor.start(settings);
+    debugLog(`folder-monitor started: ${settings.folderPath}`);
+  } catch (err) {
+    debugLog(`folder-monitor start failed: ${err.message}`);
+    throw err;
+  }
+}
+
+ipcMain.handle('folder-monitor:start', (_event, settings) => {
+  startFolderMonitor(settings);
+  return { ok: true };
+});
+
+ipcMain.handle('folder-monitor:stop', () => {
+  folderMonitor.stop();
+  debugLog('folder-monitor stopped');
+  return { ok: true };
+});
+
+ipcMain.handle('folder-monitor:status', () => {
+  return folderMonitor.status();
+});
+
+ipcMain.handle('folder-monitor:select-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory']
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
+// --- Remote Control ---
+function generateToken() {
+  const crypto = require('crypto');
+  return crypto.randomBytes(32).toString('hex');
+}
+
+// --- Remote Diagnostics (read-only) ---
+function _diagAppInfo() {
+  return {
+    name: app.getName(),
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    node: process.versions.node,
+    chrome: process.versions.chrome,
+    packaged: app.isPackaged,
+    pid: process.pid,
+    uptimeSec: Math.round(process.uptime())
+  };
+}
+
+function _diagSystemInfo() {
+  const os = require('os');
+  let disk = null;
+  try {
+    const sf = fs.statfsSync(app.getPath('userData'));
+    disk = { freeBytes: sf.bavail * sf.bsize, totalBytes: sf.blocks * sf.bsize };
+  } catch {}
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    osType: os.type(),
+    osRelease: os.release(),
+    hostname: os.hostname(),
+    totalMemBytes: os.totalmem(),
+    freeMemBytes: os.freemem(),
+    cpuCount: (os.cpus() || []).length,
+    osUptimeSec: Math.round(os.uptime()),
+    disk
+  };
+}
+
+function _diagAgentInfo() {
+  const cfg = configStore.load();
+  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
+  return {
+    version: app.getVersion(),
+    port: diag.port || 9110,
+    bindAddress: _diagBindHost(diag),
+    clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
+    lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
+  };
+}
+
+function _buildDiagnosticHandler() {
+  const collectors = createCollectors({
+    loadConfig: () => configStore.load(),
+    loadHistory: () => configStore.loadHistory(),
+    getAllLogPaths,
+    support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
+    stats,
+    appInfo: _diagAppInfo,
+    systemInfo: _diagSystemInfo,
+    agentInfo: _diagAgentInfo
+  });
+  const agent = createAgent(collectors);
+  return (msg, _client, reply) => {
+    let result;
+    try { result = agent.handle(msg.op, msg.args); }
+    catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
+    reply(result);
+  };
+}
+
+function _getSuggestedRemoteHosts() {
+  const os = require('os');
+  const hosts = [];
+  try {
+    for (const entry of Object.values(os.networkInterfaces())) {
+      for (const net of (entry || [])) {
+        if (net && net.family === 'IPv4' && !net.internal && net.address) hosts.push(net.address);
+      }
+    }
+  } catch {}
+  return [...new Set(hosts)];
+}
+
+function _diagAllowlist(diag) {
+  return Array.isArray(diag && diag.allowlist) ? diag.allowlist.map((x) => String(x).trim()).filter(Boolean) : [];
+}
+
+function _diagBindHost(diag) {
+  const mode = (diag && diag.bindMode) || 'local';
+  if (mode === 'network' && _diagAllowlist(diag).length > 0) return '0.0.0.0';
+  return '127.0.0.1';
+}
+
+function _diagPublicHost(diag) {
+  const explicit = String((diag && diag.publicHost) || '').trim();
+  if (explicit) return explicit;
+  if (_diagBindHost(diag) === '127.0.0.1') return '127.0.0.1';
+  return _getSuggestedRemoteHosts()[0] || '127.0.0.1';
+}
+
+function buildDiagnosticCode(diag, fp) {
+  const payload = { v: 1, h: _diagPublicHost(diag), p: diag.port || 9110, t: diag.token, n: diag.label || require('os').hostname() };
+  if (fp) { payload.fp = fp; payload.s = 'wss'; }
+  return 'mhu1_' + Buffer.from(JSON.stringify(payload)).toString('base64url');
+}
+
+async function startDiagnosticAgent() {
+  if (diagnosticAgent) { try { diagnosticAgent.stop(); } catch {} diagnosticAgent = null; }
+  const config = configStore.load();
+  const diag = config.globalSettings && config.globalSettings.diagnostics;
+  if (!diag || !diag.enabled) return;
+
+  let token = diag.token;
+  if (!token) {
+    token = generateToken();
+    const gs = { ...config.globalSettings, diagnostics: { ...diag, token, codeIssuedAt: Date.now() } };
+    await configStore.save({ globalSettings: gs });
+  }
+
+  if (!_diagHandler) _diagHandler = _buildDiagnosticHandler();
+  const host = _diagBindHost(diag);
+  const allowlist = _diagAllowlist(diag);
+  diagnosticAgent = new RemoteServer();
+  try {
+    await diagnosticAgent.start({
+      port: diag.port || 9110,
+      host,
+      token,
+      diagnosticMode: true,
+      allowlist,
+      onDiagnosticRequest: _diagHandler
+    });
+    debugLog(`diagnostics-agent started on ${host}:${diagnosticAgent.getPort()} (allowlist ${allowlist.length})`);
+  } catch (e) {
+    debugLog(`diagnostics-agent start failed: ${e.message}`);
+    diagnosticAgent = null;
+  }
+}
+
+function stopDiagnosticAgent() {
+  if (diagnosticAgent) { try { diagnosticAgent.stop(); } catch {} diagnosticAgent = null; }
+}
+
+ipcMain.handle('diagnostics:get-settings', () => {
+  const cfg = configStore.load();
+  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
+  return {
+    enabled: !!diag.enabled,
+    port: diag.port || 9110,
+    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
+    bindAddress: _diagBindHost(diag),
+    publicHost: diag.publicHost || '',
+    allowlist: _diagAllowlist(diag),
+    suggestedHosts: _getSuggestedRemoteHosts(),
+    label: diag.label || require('os').hostname(),
+    codeIssuedAt: diag.codeIssuedAt || 0,
+    code: diag.token ? buildDiagnosticCode(diag) : ''
+  };
+});
+
+ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
+  const cfg = configStore.load();
+  const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
+  const next = {
+    ...cur,
+    enabled: !!(incoming && incoming.enabled),
+    port: (incoming && Number(incoming.port)) || cur.port || 9110,
+    bindMode: (incoming && incoming.bindMode === 'network') ? 'network' : 'local',
+    publicHost: (incoming && incoming.publicHost != null) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
+    allowlist: (incoming && Array.isArray(incoming.allowlist))
+      ? incoming.allowlist.map((x) => String(x).trim()).filter(Boolean)
+      : _diagAllowlist(cur),
+    label: (incoming && incoming.label != null) ? String(incoming.label) : cur.label
+  };
+  next.bindAddress = _diagBindHost(next);
+  const gs = { ...cfg.globalSettings, diagnostics: next };
+  await configStore.save({ globalSettings: gs });
+  await startDiagnosticAgent();
+  return { ok: true, bindAddress: next.bindAddress, allowlistCount: next.allowlist.length };
+});
+
+ipcMain.handle('diagnostics:regenerate', async () => {
+  const cfg = configStore.load();
+  const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
+  const next = { ...cur, token: generateToken(), codeIssuedAt: Date.now() };
+  const gs = { ...cfg.globalSettings, diagnostics: next };
+  await configStore.save({ globalSettings: gs });
+  if (next.enabled) await startDiagnosticAgent();
+  return { ok: true, code: buildDiagnosticCode(next), codeIssuedAt: next.codeIssuedAt };
+});
+
+ipcMain.handle('diagnostics:status', () => {
+  const cfg = configStore.load();
+  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
+  return {
+    running: !!diagnosticAgent,
+    port: diagnosticAgent ? diagnosticAgent.getPort() : (diag.port || 9110),
+    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
+    bindAddress: _diagBindHost(diag),
+    publicHost: _diagPublicHost(diag),
+    allowlistCount: _diagAllowlist(diag).length,
+    clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
+    lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
+  };
+});
+
+function createCaptureWindow() {
+  if (captureWindow && !captureWindow.isDestroyed()) return;
+  captureWindowReady = false;
+  captureWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'lib', 'remote-capture-preload.js')
+    }
+  });
+  captureWindow.loadFile(path.join(__dirname, 'lib', 'remote-capture.html'));
+
+  // Wait for window to be fully loaded before sending signaling messages
+  captureWindow.webContents.on('dom-ready', () => {
+    debugLog('remote: capture window ready, draining', signalingQueue.length, 'queued messages');
+    captureWindowReady = true;
+    for (const msg of signalingQueue) {
+      captureWindow.webContents.send('remote:signaling-to-capture', msg);
+    }
+    signalingQueue = [];
+  });
+
+  // Crash recovery: if hidden window closes unexpectedly while clients connected, recreate it
+  captureWindow.on('closed', () => {
+    captureWindow = null;
+    captureWindowReady = false;
+    signalingQueue = [];
+    if (remoteServer && remoteServer.getClientCount() > 0) {
+      debugLog('remote: capture window crashed, recreating...');
+      createCaptureWindow();
+    }
+  });
+}
+
+function destroyCaptureWindow() {
+  if (captureWindow && !captureWindow.isDestroyed()) {
+    captureWindow.close();
+    captureWindow = null;
+  }
+}
+
+async function startRemoteServer() {
+  if (remoteServer) {
+    remoteServer.stop();
+    remoteServer = null;
+  }
+
+  const config = configStore.load();
+  const remote = config.globalSettings && config.globalSettings.remote;
+  if (!remote || !remote.enabled) return;
+
+  let token = remote.token;
+  if (!token) {
+    token = generateToken();
+    const gs = { ...config.globalSettings, remote: { ...remote, token } };
+    await configStore.save({ globalSettings: gs });
+  }
+
+  remoteServer = new RemoteServer();
+  await remoteServer.start({
+    port: remote.port || 9100,
+    token,
+    allowInput: remote.allowInput !== false,
+    mainWindow,
+    onSignalingToCapture: (data) => {
+      if (!captureWindow || captureWindow.isDestroyed()) {
+        debugLog('remote: signaling dropped, no capture window');
+        return;
+      }
+      if (captureWindowReady) {
+        captureWindow.webContents.send('remote:signaling-to-capture', data);
+      } else {
+        debugLog('remote: capture window not ready, queuing', data.type, 'message');
+        signalingQueue.push(data);
+      }
+    },
+    onCreateCaptureWindow: () => createCaptureWindow(),
+    onDestroyCaptureWindow: () => destroyCaptureWindow()
+  });
+
+  debugLog(`remote-server started on port ${remoteServer.getPort()}`);
+}
+
+// IPC: Signaling from capture window back to dashboard client
+ipcMain.on('remote:signaling-from-capture', (_event, data) => {
+  if (remoteServer && data.clientId) {
+    remoteServer.sendToClient(data.clientId, data);
+  }
+});
+
+// IPC: Debug logging from capture window
+ipcMain.on('remote:capture-log', (_event, msg) => {
+  debugLog('remote-capture:', msg);
+});
+
+// IPC: Input events from capture window
+ipcMain.on('remote:input-event', (_event, data) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const config = configStore.load();
+  const remote = config.globalSettings && config.globalSettings.remote;
+  if (!remote || !remote.allowInput) return;
+  if (data.role !== 'admin') return;
+
+  // Capture includes window frame (title bar) but NOT invisible DWM borders
+  // sendInputEvent coordinates are relative to web content area
+  const winBounds = mainWindow.getBounds();
+  const contentBounds = mainWindow.getContentBounds();
+  // Windows 10/11: getBounds() includes ~7px invisible resize borders not in capture
+  const dwm = process.platform === 'win32' ? 7 : 0;
+  const capturedW = winBounds.width - 2 * dwm;
+  const capturedH = winBounds.height - dwm; // only bottom has invisible border
+  const contentOffsetX = contentBounds.x - (winBounds.x + dwm);
+  const contentOffsetY = contentBounds.y - winBounds.y;
+  const rawX = typeof data.x === 'number' && isFinite(data.x) ? data.x : 0;
+  const rawY = typeof data.y === 'number' && isFinite(data.y) ? data.y : 0;
+  const x = Math.round(rawX * capturedW - contentOffsetX);
+  const y = Math.round(rawY * capturedH - contentOffsetY);
+
+  switch (data.type) {
+    case 'mousemove':
+      mainWindow.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+      break;
+    case 'mousedown':
+      mainWindow.webContents.sendInputEvent({
+        type: 'mouseDown', x, y,
+        button: data.button === 'right' ? 'right' : 'left',
+        clickCount: 1
+      });
+      break;
+    case 'mouseup':
+      mainWindow.webContents.sendInputEvent({
+        type: 'mouseUp', x, y,
+        button: data.button === 'right' ? 'right' : 'left',
+        clickCount: 1
+      });
+      break;
+    case 'scroll':
+      mainWindow.webContents.sendInputEvent({
+        type: 'mouseWheel', x, y,
+        deltaX: data.deltaX || 0,
+        deltaY: data.deltaY || 0
+      });
+      break;
+    case 'keydown':
+      mainWindow.webContents.sendInputEvent({
+        type: 'keyDown',
+        keyCode: data.key,
+        modifiers: buildModifiers(data)
+      });
+      if (data.key.length === 1) {
+        mainWindow.webContents.sendInputEvent({
+          type: 'char',
+          keyCode: data.key,
+          modifiers: buildModifiers(data)
+        });
+      }
+      break;
+    case 'keyup':
+      mainWindow.webContents.sendInputEvent({
+        type: 'keyUp',
+        keyCode: data.key,
+        modifiers: buildModifiers(data)
+      });
+      break;
+  }
+});
+
+function buildModifiers(data) {
+  const mods = [];
+  if (data.shift) mods.push('shift');
+  if (data.ctrl) mods.push('control');
+  if (data.alt) mods.push('alt');
+  return mods;
+}
+
+// IPC: Get capture source ID (desktopCapturer must run in main process in Electron 33+)
+ipcMain.handle('remote:get-capture-source-id', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    debugLog('remote: capture source - mainWindow not available');
+    return null;
+  }
+  // Use getMediaSourceId() for exact window capture without enumeration
+  const sourceId = mainWindow.getMediaSourceId();
+  debugLog('remote: capture source - getMediaSourceId:', sourceId);
+  if (sourceId) return sourceId;
+
+  // Fallback: enumerate sources
+  const { desktopCapturer } = require('electron');
+  const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
+  const title = mainWindow.getTitle();
+  debugLog('remote: capture source - fallback, looking for title:', title);
+  let source = sources.find(s => s.name === title);
+  if (!source) source = sources.find(s => s.name.includes('Multi-Hoster'));
+  if (!source) source = sources.find(s => s.id.startsWith('screen:'));
+  debugLog('remote: capture source -', source ? `found: ${source.name} (${source.id})` : 'NONE FOUND');
+  return source ? source.id : null;
+});
+
+// IPC: Client count updates from capture window
+ipcMain.on('remote:client-count', (_event, count) => {
+  safeSend('remote:client-count', count);
+});
+
+// IPC: Remote settings
+ipcMain.handle('remote:get-settings', () => {
+  const config = configStore.load();
+  return config.globalSettings && config.globalSettings.remote || {};
+});
+
+ipcMain.handle('remote:save-settings', async (_event, remoteSettings) => {
+  const config = configStore.load();
+  const gs = { ...config.globalSettings, remote: remoteSettings };
+  await configStore.save({ globalSettings: gs });
+
+  if (remoteSettings.enabled) {
+    await startRemoteServer();
+  } else if (remoteServer) {
+    remoteServer.stop();
+    remoteServer = null;
+    destroyCaptureWindow();
+    debugLog('remote-server stopped');
+  }
+  return true;
+});
+
+ipcMain.handle('remote:generate-token', () => {
+  return generateToken();
+});
+
+ipcMain.handle('remote:status', () => {
+  return {
+    running: !!remoteServer,
+    port: remoteServer ? remoteServer.getPort() : null,
+    clientCount: remoteServer ? remoteServer.getClientCount() : 0
+  };
+});
+
+// --- Always on top ---
+ipcMain.handle('set-always-on-top', async (_event, value) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setAlwaysOnTop(!!value);
+  }
+  await configStore.save({ globalSettings: { ...configStore.load().globalSettings, alwaysOnTop: !!value } });
+  return true;
+});
+
+ipcMain.handle('get-always-on-top', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return mainWindow.isAlwaysOnTop();
+  }
+  return false;
+});
+
+// --- Drop Target Window ---
+function createDropTargetWindow() {
+  if (dropTargetWindow && !dropTargetWindow.isDestroyed()) return;
+  const { screen } = require('electron');
+  const display = screen.getPrimaryDisplay();
+  const { width, height } = display.workAreaSize;
+  dropTargetWindow = new BrowserWindow({
+    width: 120,
+    height: 120,
+    x: width - 140,
+    y: height - 140,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    focusable: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      preload: path.join(__dirname, 'preload-drop-target.js')
+    }
+  });
+  dropTargetWindow.loadFile('renderer/drop-target.html');
+  dropTargetWindow.on('closed', () => { dropTargetWindow = null; });
+}
+
+function destroyDropTargetWindow() {
+  if (dropTargetWindow && !dropTargetWindow.isDestroyed()) {
+    dropTargetWindow.close();
+    dropTargetWindow = null;
+  }
+}
+
+ipcMain.handle('show-drop-target', () => {
+  createDropTargetWindow();
+  return true;
+});
+
+ipcMain.handle('hide-drop-target', () => {
+  destroyDropTargetWindow();
+  return true;
+});
+
+ipcMain.on('drop-target:files', (_event, paths) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!mainWindow.isVisible() || mainWindow.isMinimized()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    safeSend('drop-target:files', paths);
+  }
+});
+
+// --- Shutdown after finish ---
+let shutdownMode = 'nothing';
+let shutdownTimer = null;
+
+ipcMain.handle('set-shutdown-after-finish', (_event, mode) => {
+  shutdownMode = mode || 'nothing';
+  // Cancel active countdown if mode changed to 'nothing'
+  if (shutdownMode === 'nothing' && shutdownTimer) {
+    clearTimeout(shutdownTimer);
+    shutdownTimer = null;
+  }
+  return true;
+});
+
+ipcMain.handle('get-shutdown-after-finish', () => {
+  return shutdownMode;
+});
+
+ipcMain.handle('cancel-shutdown', () => {
+  if (shutdownTimer) {
+    clearTimeout(shutdownTimer);
+    shutdownTimer = null;
+  }
+  shutdownMode = 'nothing';
+  return true;
+});
+
+function handleShutdownAfterFinish() {
+  if (shutdownMode === 'nothing') return;
+
+  const { exec } = require('child_process');
+
+  // Notify renderer
+  safeSend('shutdown-countdown', { mode: shutdownMode, seconds: 60 });
+
+  // Clear any previous countdown to prevent orphaned timers
+  if (shutdownTimer) clearTimeout(shutdownTimer);
+
+  shutdownTimer = setTimeout(() => {
+    // Read current mode at execution time (not captured at scheduling time)
+    if (shutdownMode === 'shutdown') {
+      exec('shutdown /s /t 0', (err) => { if (err) debugLog(`shutdown failed: ${err.message}`); });
+    } else if (shutdownMode === 'restart') {
+      exec('shutdown /r /t 0', (err) => { if (err) debugLog(`restart failed: ${err.message}`); });
+    } else if (shutdownMode === 'sleep') {
+      exec('rundll32.exe powrprof.dll,SetSuspendState 0,1,0', (err) => { if (err) debugLog(`sleep failed: ${err.message}`); });
+    }
+    // else: mode was changed to 'nothing' during countdown — do nothing
+  }, 60000);
+}
+
+// Restore always-on-top from config on window creation
+app.on('browser-window-created', () => {
+  const config = configStore.load();
+  if (config.globalSettings && config.globalSettings.alwaysOnTop && mainWindow) {
+    mainWindow.setAlwaysOnTop(true);
+  }
+});
