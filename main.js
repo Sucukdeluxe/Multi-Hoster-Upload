@@ -1,6 +1,8 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
+const { configureStartupRenderer, createStartupWindow } = require('./lib/startup-renderer');
+configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
 const path = require('path');
 const fs = require('fs');
@@ -26,16 +28,6 @@ const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
 const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
-
-function _gpuDisableFlagPath() {
-  try { return path.join(app.getPath('userData'), 'gpu-disabled.flag'); } catch { return null; }
-}
-(function maybeDisableHardwareAcceleration() {
-  let disable = false;
-  try { if (/^RDP/i.test(process.env.SESSIONNAME || '')) disable = true; } catch {}
-  if (!disable) { try { const f = _gpuDisableFlagPath(); if (f && fs.existsSync(f)) disable = true; } catch {} }
-  if (disable) { try { app.disableHardwareAcceleration(); } catch {} }
-})();
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -1230,7 +1222,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
 }
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
+  const startupWindow = createStartupWindow(BrowserWindow, {
     width: 1100,
     height: 750,
     minWidth: 800,
@@ -1243,6 +1235,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js')
     }
   });
+  mainWindow = startupWindow.window;
 
   mainWindow.webContents.setBackgroundThrottling(false);
 
@@ -1288,12 +1281,12 @@ function createWindow() {
   app.on('child-process-gone', (_event, details) => {
     _writeCrashLog('CHILD PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`CHILD PROCESS GONE: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
-    if (details && details.type === 'GPU') {
-      try { const f = _gpuDisableFlagPath(); if (f) fs.writeFileSync(f, new Date().toISOString(), 'utf-8'); } catch {}
-    }
   });
 
-  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  startupWindow.load(path.join(__dirname, 'renderer', 'index.html'), (err) => {
+    _writeCrashLog('LOAD FILE FAILED', err);
+    debugLog(`LOAD FILE FAILED: ${err && err.stack ? err.stack : err}`);
+  });
 }
 
 function createTray() {
@@ -2288,8 +2281,8 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
   try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
-  // Strip machine-specific state because imported absolute paths can point to
-  // locations that do not exist on the current system.
+  // Strip machine-specific state: absolute paths from the source machine will
+  // not exist on this one (e.g. C:\Users\Administrator\... vs \bakeredwin318\...).
   // Any path that does not resolve locally is cleared so the user can re-set it
   // instead of hitting silent failures later.
   const importedGlobal = imported.globalSettings || {};

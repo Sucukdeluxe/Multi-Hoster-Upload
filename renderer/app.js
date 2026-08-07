@@ -3266,7 +3266,7 @@ function renderSettings() {
   pages.diagnose.innerHTML = `
       <div class="settings-section-label">Diagnose-Zugriff (nur lesen) <span class="panel-status" id="diagStatusBadge">…</span></div>
       <p class="hint" style="margin:0 0 12px;padding:8px 10px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08)">
-        Erlaubt eine externe, <strong>nur lesende Ferndiagnose</strong> von Logs, Queue-Status und sanitierter Config (Passwörter/API-Keys/Token werden maskiert). <strong>Kein Bildschirm, keine Eingabe-Steuerung.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> (nur über SSH-/VPN-Tunnel erreichbar).
+        Erlaubt Claude <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und sanitierte Config (Passwörter/API-Keys/Token werden maskiert). <strong>Kein Bildschirm, keine Eingabe-Steuerung.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> (nur über SSH-/VPN-Tunnel erreichbar).
       </p>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
@@ -4260,8 +4260,6 @@ function getCredsFieldsHtml(authType, account, hoster) {
 
 function openAccountModal(editAccountId) {
   editingAccountId = editAccountId || null;
-  // Reset the two-step state — any previously validated snapshot from a prior
-  // modal session is stale and must not allow a no-recheck commit.
   _resetAccountModalState();
   const modal = document.getElementById('accountModal');
   const title = document.getElementById('accountModalTitle');
@@ -4281,17 +4279,17 @@ function openAccountModal(editAccountId) {
     const found = findAccountById(editingAccountId);
     if (!found) return;
     title.textContent = 'Account bearbeiten';
-    subtitle.textContent = `Zugangsdaten für ${getAccountDisplayName(found.name, found.account)} bearbeiten.`;
+    subtitle.textContent = `Zugangsdaten für ${getAccountDisplayName(found.name, found.account)} bearbeiten und prüfen.`;
     hosterRow.style.display = 'none';
-    saveBtn.textContent = 'Prüfen';
+    saveBtn.textContent = window.AccountSubmit.getAccountSubmitLabel({ isEdit: true });
     if (labelInput) labelInput.value = found.account.label || '';
     credsContainer.innerHTML = getCredsFieldsHtml(found.account.authType || 'login', found.account, found.name);
   } else {
     // Add mode — always show all options (multiple accounts per hoster allowed)
     title.textContent = 'Account hinzufügen';
-    subtitle.textContent = 'Wähle einen Hoster und gib deine Zugangsdaten ein. Erst „Prüfen" klicken; nach grünem Login wird daraus „Anlegen".';
+    subtitle.textContent = 'Wähle einen Hoster und gib deine Zugangsdaten ein. Der Account wird vor dem Anlegen geprüft.';
     hosterRow.style.display = 'flex';
-    saveBtn.textContent = 'Prüfen';
+    saveBtn.textContent = window.AccountSubmit.getAccountSubmitLabel({ isEdit: false });
     hosterSelect.innerHTML = HOSTER_ADD_OPTIONS.map(opt =>
       `<option value="${opt.value}">${escapeHtml(opt.label)}</option>`
     ).join('');
@@ -4308,10 +4306,6 @@ function openAccountModal(editAccountId) {
     });
   });
 
-  // Wire field invalidation: any change to a cred field after a green check
-  // drops the validated snapshot so the next click is a re-check, not a commit
-  // of unverified creds. Re-wired here every open because credsContainer's HTML
-  // was replaced.
   _wireCredFieldInvalidation();
 
   modal.style.display = 'flex';
@@ -4321,11 +4315,7 @@ function closeAccountModal() {
   document.getElementById('accountModal').style.display = 'none';
   _hideOtpField();
   editingAccountId = null;
-  // Cancel any pending auto-close so a stale timer can't close a future modal
-  // the user reopens within the auto-close window.
-  if (_autoCloseTimer) { clearTimeout(_autoCloseTimer); _autoCloseTimer = null; }
-  _validatedCreds = null;
-  _accountModalBusy = false;
+  _resetAccountModalState();
 }
 
 function openDeleteAccountModal(accountId) {
@@ -4381,66 +4371,54 @@ function readAccountCredsFromModal(authType) {
   return { enabled: !!apiKey, authType: 'api', apiKey, label };
 }
 
-// --- Two-step account-modal state machine ---
-//
-// Goal: never persist invalid/unverified credentials to config.hosters. The
-// user clicks "Prüfen" → ephemeral validate-credentials IPC runs → on green
-// the button label flips to "Anlegen" / "Speichern" → the next click commits
-// to config. Editing any cred field between the two clicks drops the validated
-// snapshot so the user can't sneak unverified creds through by editing
-// post-green.
-//
-// Invariants enforced here:
-//  1. Nothing reaches config.hosters until _validatedCreds matches a green
-//     result for the currently-typed creds.
-//  2. _accountModalBusy is set SYNCHRONOUSLY at the top of the click handler
-//     before any await — guards against double-clicks producing duplicates.
-//  3. OTP retry stays ephemeral: each retry re-runs validate-credentials with
-//     the new OTP, no config writes until green.
-//  4. Edit mode hits the same path → bad edits never overwrite known-good
-//     creds on disk.
-let _accountModalBusy = false;
-let _validatedCreds = null; // { hosterName, authType, snapshot, status } when green
+const _accountSubmitter = window.AccountSubmit.createAccountSubmitter();
+let _accountModalCommitLocked = false;
 let _autoCloseTimer = null;
-// Session token used to ignore stale validate-credentials responses: if the
-// user closes the modal mid-flight and reopens it, the late .then must NOT
-// stomp the new session's state. Bumped on every modal reset.
 let _accountModalSession = 0;
 
 function _resetAccountModalState() {
-  _accountModalBusy = false;
-  _validatedCreds = null;
   _accountModalSession++;
+  _accountModalCommitLocked = false;
   if (_autoCloseTimer) { clearTimeout(_autoCloseTimer); _autoCloseTimer = null; }
+  _syncAccountSubmitButton();
 }
 
 function _credsSnapshotKey(authType, creds) {
-  // Identity key for the typed creds — used to detect post-validation edits.
-  // Label changes do NOT invalidate (label is metadata, not a credential).
   if (authType === 'login') return `login:${creds.username || ''}:${creds.password || ''}`;
   return `api:${creds.apiKey || ''}`;
 }
 
+function _defaultAccountSubmitButtonText(ctx) {
+  return window.AccountSubmit.getAccountSubmitLabel({ isEdit: !!(ctx && ctx.isEdit) });
+}
+
+function _syncAccountSubmitButton() {
+  const saveBtn = document.getElementById('saveAccountBtn');
+  if (!saveBtn) return;
+  saveBtn.textContent = _defaultAccountSubmitButtonText(_determineHosterContext());
+  saveBtn.disabled = _accountSubmitter.isBusy() || _accountModalCommitLocked;
+}
+
+function _invalidateAccountSubmit() {
+  _accountModalSession++;
+  const statusEl = document.getElementById('accountModalStatus');
+  if (statusEl) {
+    statusEl.textContent = '';
+    statusEl.className = 'account-modal-status';
+  }
+  const saveBtn = document.getElementById('saveAccountBtn');
+  if (saveBtn && !_accountSubmitter.isBusy() && !_accountModalCommitLocked) {
+    saveBtn.disabled = false;
+    saveBtn.textContent = _defaultAccountSubmitButtonText(_determineHosterContext());
+  }
+}
+
 function _wireCredFieldInvalidation() {
-  // Any change to a cred IDENTITY field (username/password/apiKey) clears the
-  // validated snapshot and reverts the button to "Prüfen". Label edits don't
-  // invalidate (label is metadata, not a credential). OTP edits don't either:
-  // OTP is an ephemeral auth challenge — once doodstream returned "ok" for
-  // these username+password+OTP, the resulting trust is on the creds; the user
-  // clearing or fixing the OTP field afterward shouldn't force a re-prompt.
   const ids = ['accField_username', 'accField_password', 'accField_apiKey'];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el || el.dataset.invalidateBound === '1') continue;
-    el.addEventListener('input', () => {
-      if (_validatedCreds) {
-        _validatedCreds = null;
-        const saveBtn = document.getElementById('saveAccountBtn');
-        if (saveBtn) saveBtn.textContent = 'Prüfen';
-        const statusEl = document.getElementById('accountModalStatus');
-        if (statusEl) { statusEl.textContent = ''; statusEl.className = 'account-modal-status'; }
-      }
-    });
+    el.addEventListener('input', _invalidateAccountSubmit);
     el.dataset.invalidateBound = '1';
   }
 }
@@ -4458,12 +4436,18 @@ function _determineHosterContext() {
   return { hosterName: opt.hoster, authType: opt.authType, accountId: null, isEdit: false };
 }
 
+function _isAccountSubmitCurrent(session, ctx, snapshotKey) {
+  if (session !== _accountModalSession) return false;
+  const currentCtx = _determineHosterContext();
+  if (!currentCtx) return false;
+  if (currentCtx.hosterName !== ctx.hosterName || currentCtx.authType !== ctx.authType) return false;
+  if (currentCtx.accountId !== ctx.accountId || currentCtx.isEdit !== ctx.isEdit) return false;
+  const currentCreds = readAccountCredsFromModal(currentCtx.authType);
+  return _credsSnapshotKey(currentCtx.authType, currentCreds) === snapshotKey;
+}
+
 async function saveAccount() {
-  // SYNCHRONOUS re-entry guard — must come before any await. Without this a
-  // double-click before the first IPC returns triggers two saveAccount() calls
-  // and (in the old code) two pushes/two IPCs. _accountModalBusy is checked
-  // synchronously and set synchronously, so the second click no-ops cleanly.
-  if (_accountModalBusy) return;
+  if (_accountSubmitter.isBusy() || _accountModalCommitLocked) return;
 
   const ctx = _determineHosterContext();
   if (!ctx) return;
@@ -4476,37 +4460,8 @@ async function saveAccount() {
     return;
   }
 
-  // STEP 2: commit. Only fires if a previous "Prüfen" already validated the
-  // EXACT same creds (label changes don't break this — label isn't part of the
-  // credential identity).
   const snapshotKey = _credsSnapshotKey(ctx.authType, creds);
-  if (_validatedCreds &&
-      _validatedCreds.hosterName === ctx.hosterName &&
-      _validatedCreds.authType === ctx.authType &&
-      _validatedCreds.snapshot === snapshotKey) {
-    // Set busy INSIDE the try so a sync throw on the saveBtn deref above can't
-    // leak _accountModalBusy=true and lock the user out for the session.
-    try {
-      _accountModalBusy = true;
-      saveBtn.disabled = true;
-      saveBtn.textContent = ctx.isEdit ? 'Speichere…' : 'Lege an…';
-      await _commitAccount(ctx, creds, _validatedCreds.status, _validatedCreds.message);
-    } finally {
-      _accountModalBusy = false;
-      if (saveBtn) saveBtn.disabled = false;
-    }
-    return;
-  }
-
-  // STEP 1: validate ephemerally. NOTHING is written to config.hosters here.
-  // Snapshot the session token so a stale late-arriving response from a
-  // closed-and-reopened modal can't stomp the new session's state.
   const mySession = _accountModalSession;
-  _accountModalBusy = true;
-  saveBtn.disabled = true;
-  statusEl.textContent = 'Prüfe Login…';
-  statusEl.className = 'account-modal-status checking';
-
   const otpInput = document.getElementById('accField_otp');
   const otp = otpInput ? otpInput.value.trim() : '';
   const payload = {
@@ -4518,94 +4473,100 @@ async function saveAccount() {
     otp
   };
 
-  let row;
+  const submission = _accountSubmitter.submit({
+    validate: () => window.api.validateCredentials(payload),
+    commit: () => _persistAccount(ctx, creds),
+    afterCommit: (persisted, validation) => _applyCommittedAccount(persisted, validation),
+    isCurrent: () => _isAccountSubmitCurrent(mySession, ctx, snapshotKey)
+  });
+  if (!submission) return;
+  saveBtn.disabled = true;
+  saveBtn.textContent = _defaultAccountSubmitButtonText(ctx);
+  statusEl.textContent = 'Prüfe Zugangsdaten…';
+  statusEl.className = 'account-modal-status checking';
+
+  let result;
   try {
-    row = await window.api.validateCredentials(payload);
-  } catch (err) {
-    row = { status: 'error', message: err && err.message ? err.message : 'Prüfung fehlgeschlagen' };
-  } finally {
-    if (mySession === _accountModalSession) {
-      _accountModalBusy = false;
-      if (saveBtn) saveBtn.disabled = false;
-    }
+    result = await submission;
+  } catch (error) {
+    result = { status: 'error', error };
   }
 
-  // Stale response — modal was closed/reopened while we awaited. Drop it.
-  if (mySession !== _accountModalSession) return;
-
-  if (row && row.status === 'otp_required') {
-    statusEl.textContent = row.message || 'OTP wurde an deine E-Mail gesendet.';
-    statusEl.className = 'account-modal-status error';
-    _showOtpField();
-    _wireCredFieldInvalidation(); // OTP input now exists — wire its listener too
-    saveBtn.textContent = 'Mit OTP prüfen';
-    return;
-  }
-  if (row && (row.status === 'ok' || row.status === 'warn')) {
-    statusEl.textContent = row.status === 'warn' ? row.message || 'Prüfung mit Warnung abgeschlossen.' : 'Login erfolgreich! Klick „' + (ctx.isEdit ? 'Speichern' : 'Anlegen') + '" zum Übernehmen.';
+  const current = _isAccountSubmitCurrent(mySession, ctx, snapshotKey);
+  if (result.status === 'committed' && current) {
+    _accountModalCommitLocked = true;
+    const validation = result.validation || {};
+    statusEl.textContent = validation.status === 'warn'
+      ? validation.message || 'Account wurde mit Warnung geprüft und gespeichert.'
+      : validation.message || 'Account wurde erfolgreich geprüft und gespeichert.';
     statusEl.className = 'account-modal-status ok';
     _hideOtpField();
-    _validatedCreds = {
-      hosterName: ctx.hosterName,
-      authType: ctx.authType,
-      snapshot: snapshotKey,
-      status: row.status,
-      message: row.message || ''
-    };
-    saveBtn.textContent = ctx.isEdit ? 'Speichern' : 'Anlegen';
+    saveBtn.textContent = _defaultAccountSubmitButtonText(ctx);
+    saveBtn.disabled = true;
+    if (_autoCloseTimer) clearTimeout(_autoCloseTimer);
+    _autoCloseTimer = setTimeout(() => {
+      _autoCloseTimer = null;
+      closeAccountModal();
+    }, 600);
     return;
   }
-  // error
-  const msg = (row && row.message) || 'Login fehlgeschlagen';
+
+  _syncAccountSubmitButton();
+  if (!current) return;
+
+  if (result.status === 'otp_required') {
+    const validation = result.validation || {};
+    statusEl.textContent = validation.message || 'OTP wurde an deine E-Mail gesendet.';
+    statusEl.className = 'account-modal-status error';
+    _showOtpField();
+    saveBtn.textContent = _defaultAccountSubmitButtonText(ctx);
+    return;
+  }
+
+  const validation = result.validation || {};
+  const msg = result.status === 'error'
+    ? (result.error && result.error.message) || 'Prüfung oder Speichern fehlgeschlagen'
+    : validation.message || 'Login fehlgeschlagen';
   statusEl.textContent = msg;
   statusEl.className = 'account-modal-status error';
 }
 
-async function _commitAccount(ctx, creds, validatedStatus, validatedMessage) {
-  // Persist the validated creds to config.hosters and close the modal. By the
-  // time we reach this function the validate-credentials IPC has already
-  // returned ok/warn for these exact creds, so we skip a redundant re-check.
-  let accountId;
-  if (!Array.isArray(config.hosters[ctx.hosterName])) config.hosters[ctx.hosterName] = [];
+function _copyHosterTree(hosters) {
+  const candidate = {};
+  for (const [name, accounts] of Object.entries(hosters || {})) {
+    candidate[name] = Array.isArray(accounts) ? accounts.map(account => ({ ...account })) : accounts;
+  }
+  return candidate;
+}
+
+async function _persistAccount(ctx, creds) {
+  const candidateHosters = _copyHosterTree(config.hosters);
+  if (!Array.isArray(candidateHosters[ctx.hosterName])) candidateHosters[ctx.hosterName] = [];
+  let accountId = ctx.accountId;
   if (ctx.isEdit) {
-    accountId = ctx.accountId;
-    const idx = config.hosters[ctx.hosterName].findIndex(a => a.id === accountId);
-    if (idx >= 0) {
-      config.hosters[ctx.hosterName][idx] = { ...config.hosters[ctx.hosterName][idx], ...creds };
-    } else {
-      _accountModalBusy = false;
-      const _sb = document.getElementById('saveAccountBtn'); if (_sb) _sb.disabled = false;
-      const _st = document.getElementById('accountModalStatus');
-      if (_st) {
-        _st.textContent = 'Account nicht mehr in der Config — wurde extern gelöscht. Modal schließen und neu anlegen.';
-        _st.className = 'account-modal-status error';
-      }
-      return;
-    }
+    const idx = candidateHosters[ctx.hosterName].findIndex(account => account.id === accountId);
+    if (idx < 0) throw new Error('Account nicht mehr in der Config — wurde extern gelöscht. Modal schließen und neu anlegen.');
+    candidateHosters[ctx.hosterName][idx] = { ...candidateHosters[ctx.hosterName][idx], ...creds };
   } else {
     accountId = `${ctx.hosterName}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    config.hosters[ctx.hosterName].push({ id: accountId, ...creds });
+    candidateHosters[ctx.hosterName].push({ id: accountId, ...creds });
   }
-  await window.api.saveConfig({ hosters: config.hosters });
-  // Skip the redundant await getConfig() — the in-memory state is the source
-  // of truth for what we just wrote, decrypted creds didn't change, and the
-  // round-trip was the main lag source on add/delete.
-  accountStatuses[accountId] = { status: validatedStatus, message: validatedMessage || '' };
+  await window.api.saveConfig({ hosters: candidateHosters });
+  return { accountId, candidateHosters, isEdit: ctx.isEdit };
+}
+
+function _applyCommittedAccount(persisted, validation) {
+  const { accountId, candidateHosters, isEdit } = persisted;
+  config.hosters = candidateHosters;
+  accountStatuses[accountId] = { status: validation.status, message: validation.message || '' };
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
-  // Targeted updates instead of the 4-panel cascade. For add we need a full
-  // accounts-list re-render (new card) and the hoster summary count; for edit
-  // we can update the single card. Settings panel only needs re-render if its
-  // hoster-summary section is visible — that's covered by renderHosterSummary.
-  if (ctx.isEdit) {
+  if (isEdit) {
     updateAccountCard(accountId);
   } else {
     renderAccounts();
   }
   renderHosterSummary();
-  // Auto-close after a short pause so the user sees the success state.
-  if (_autoCloseTimer) clearTimeout(_autoCloseTimer);
-  _autoCloseTimer = setTimeout(() => { closeAccountModal(); _autoCloseTimer = null; }, 600);
 }
 
 function _showOtpField() {
@@ -5170,6 +5131,7 @@ function setupListeners() {
 
   // Account hoster select change → update credential fields
   document.getElementById('accountHosterSelect').addEventListener('change', (e) => {
+    _invalidateAccountSubmit();
     const opt = HOSTER_ADD_OPTIONS.find(o => o.value === e.target.value);
     const authType = opt ? opt.authType : 'login';
     const credsContainer = document.getElementById('accountCredsFields');
@@ -5180,15 +5142,6 @@ function setupListeners() {
         input.type = input.type === 'password' ? 'text' : 'password';
       });
     });
-    document.getElementById('accountModalStatus').textContent = '';
-    document.getElementById('accountModalStatus').className = 'account-modal-status';
-    // Hoster changed → any prior validation is stale by construction. Drop the
-    // snapshot and revert the button so the user has to re-Prüfen.
-    _validatedCreds = null;
-    const sb = document.getElementById('saveAccountBtn');
-    if (sb) sb.textContent = 'Prüfen';
-    // The cred inputs were just replaced — rewire invalidation listeners on
-    // the fresh elements so post-validation edits still revert the button.
     _wireCredFieldInvalidation();
   });
 

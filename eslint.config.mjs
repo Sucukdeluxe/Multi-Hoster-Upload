@@ -55,6 +55,7 @@ const nodeGlobals = {
   fetch: 'readonly',
   crypto: 'readonly',
   structuredClone: 'readonly',
+  performance: 'readonly',
 };
 
 export default [
@@ -85,7 +86,6 @@ export default [
         requestAnimationFrame: 'readonly',
         queueMicrotask: 'readonly',
         Intl: 'readonly',
-        performance: 'readonly',
         EventSource: 'readonly',
       }
     },
