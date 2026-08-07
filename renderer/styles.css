@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg-primary: #16181c;
   --bg-secondary: #20242b;
   --bg-card: #262b33;
@@ -8,7 +9,7 @@
   --border-hover: rgba(255, 255, 255, 0.18);
   --text: #edf1f7;
   --text-muted: #9ea7b3;
-  --text-dim: #727b88;
+  --text-dim: #8490a0;
   --accent: #3ea7ff;
   --accent-end: #65d8ff;
   --success: #43c788;
@@ -216,7 +217,7 @@ body {
   text-transform: uppercase;
   cursor: pointer;
   border-bottom: 2px solid transparent;
-  transition: all 0.2s;
+  transition: color 0.2s, background-color 0.2s, border-color 0.2s;
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); background: rgba(255, 255, 255, 0.03); }
@@ -256,7 +257,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  transition: all 0.2s;
+  transition: color 0.2s, background-color 0.2s, border-color 0.2s, filter 0.2s, transform 0.2s;
 }
 .btn-xs { padding: 4px 10px; font-size: 11px; border-radius: 4px; }
 .btn-sm { padding: 5px 12px; font-size: 12px; border-radius: 5px; }
@@ -319,7 +320,7 @@ body {
   border: 1px dashed rgba(126, 220, 255, 0.28);
   border-radius: 18px;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: color 0.3s, background-color 0.3s, border-color 0.3s;
   color: var(--text-muted);
   min-height: 200px;
   background:
@@ -359,7 +360,7 @@ body {
   background: transparent;
   cursor: pointer;
   color: var(--text-muted);
-  transition: all 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s, transform 0.15s;
 }
 .toolbar-btn:hover {
   background: rgba(255,255,255,0.1);
@@ -571,7 +572,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   border-bottom: none;
   color: var(--text-muted);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
 .recent-tab:first-child { border-radius: 4px 0 0 0; }
 .recent-tab:last-child { border-radius: 0 4px 0 0; }
@@ -677,6 +678,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   background: rgba(5, 7, 16, 0.72);
   z-index: 2500;
   padding: 24px;
+  overscroll-behavior: contain;
 }
 .modal-card {
   width: min(560px, 100%);
@@ -713,6 +715,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   padding: 14px 16px 10px;
   overflow: auto;
 }
+.modal-body .settings-row { gap: 10px; }
+.modal-body .key-input { min-height: 36px; }
 .modal-actions-inline {
   display: flex;
   gap: 8px;
@@ -1190,12 +1194,29 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .accounts-empty {
+  width: min(520px, 100%);
+  margin: clamp(56px, 12vh, 120px) auto 0;
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(62, 167, 255, 0.06), rgba(255, 255, 255, 0.025));
+  box-shadow: var(--panel-shadow);
   text-align: center;
-  padding: 48px 16px;
-  color: var(--text-dim);
 }
-.accounts-empty p { font-size: 14px; margin-bottom: 4px; }
-.accounts-empty .hint { font-size: 12px; }
+.accounts-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 14px;
+  border-radius: 14px;
+  background: rgba(62, 167, 255, 0.14);
+  color: var(--accent-end);
+  font-size: 30px;
+  font-weight: 300;
+}
+.accounts-empty h3 { font-size: 17px; margin-bottom: 6px; }
+.accounts-empty p { max-width: 390px; margin: 0 auto 18px; color: var(--text-muted); font-size: 13px; line-height: 1.55; }
 
 /* History View */
 .history-container { padding: 16px; overflow: auto; flex: 1; background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent 24%); }
@@ -1292,7 +1313,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   font-size: 12px;
   opacity: 0;
   pointer-events: none;
-  transition: all 0.3s;
+  transition: opacity 0.3s, transform 0.3s;
   z-index: 2000;
 }
 .copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1339,3 +1360,29 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+:where(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent-end);
+  outline-offset: 2px;
+}
+
+.key-input:focus-visible,
+.hs-input:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid rgba(101, 216, 255, 0.45);
+  outline-offset: 1px;
+}
+
+.menu-spinner input[type="text"]:focus-visible {
+  outline: 2px solid var(--accent-end);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

@@ -66,11 +66,11 @@
     </div>
   </nav>
 
-  <nav class="tab-bar">
-    <button class="tab active" data-view="upload">Upload</button>
-    <button class="tab" data-view="accounts">Accounts</button>
-    <button class="tab" data-view="settings">Einstellungen</button>
-    <button class="tab" data-view="history">Verlauf</button>
+  <nav class="tab-bar" role="tablist" aria-label="Hauptbereiche">
+    <button class="tab active" id="upload-tab" role="tab" aria-selected="true" aria-controls="upload-view" tabindex="0" data-view="upload">Upload</button>
+    <button class="tab" id="accounts-tab" role="tab" aria-selected="false" aria-controls="accounts-view" tabindex="-1" data-view="accounts">Accounts</button>
+    <button class="tab" id="settings-tab" role="tab" aria-selected="false" aria-controls="settings-view" tabindex="-1" data-view="settings">Einstellungen</button>
+    <button class="tab" id="history-tab" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1" data-view="history">Verlauf</button>
     <span class="version-label" id="versionLabel"></span>
   </nav>
 
@@ -80,7 +80,7 @@
     <button class="btn btn-sm btn-secondary" id="dismissUpdateBtn">&times;</button>
   </div>
 
-  <div id="upload-view" class="view active">
+  <div id="upload-view" class="view active" role="tabpanel" aria-labelledby="upload-tab">
     <div class="upload-toolbar">
       <div class="toolbar-left">
         <span class="hoster-summary" id="hosterSummary" style="display:none"></span>
@@ -99,35 +99,35 @@
 
       <div class="queue-shell" id="queueShell" style="display:none">
         <div class="queue-command-bar" id="queueCommandBar">
-          <button class="toolbar-btn" id="startUploadBtn" title="Start all" disabled>
-            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z" fill="#4caf50"/></svg>
+          <button class="toolbar-btn" id="startUploadBtn" title="Alle Uploads starten" aria-label="Alle Uploads starten" disabled>
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M4 2l10 6-10 6z" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="startSelectedBtn" title="Start selected" disabled>
-            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M6 3l8 5-8 5z" fill="#4caf50"/><rect x="1" y="3" width="3" height="10" rx="0.5" fill="#4caf50"/></svg>
+          <button class="toolbar-btn" id="startSelectedBtn" title="Ausgewählte Uploads starten" aria-label="Ausgewählte Uploads starten" disabled>
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M6 3l8 5-8 5z" fill="#4caf50"/><rect x="1" y="3" width="3" height="10" rx="0.5" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="reuploadSelectedBtn" title="Reupload selected file">
-            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-5 2.1V1H2v4h4V4H3.7A5.5 5.5 0 1 1 2.5 8H1a7 7 0 1 0 7-7z" fill="#4caf50"/></svg>
+          <button class="toolbar-btn" id="reuploadSelectedBtn" title="Ausgewählte Datei erneut hochladen" aria-label="Ausgewählte Datei erneut hochladen">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M8 1a7 7 0 0 0-5 2.1V1H2v4h4V4H3.7A5.5 5.5 0 1 1 2.5 8H1a7 7 0 1 0 7-7z" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="abortSelectedBtn" title="Abort selected file">
-            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1" fill="#e53935"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <button class="toolbar-btn" id="abortSelectedBtn" title="Ausgewählten Upload abbrechen" aria-label="Ausgewählten Upload abbrechen">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1" fill="#e53935"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
           </button>
-          <button class="toolbar-btn" id="finishStopBtn" title="Finish Uploads in Progress and Stop">
-            <svg width="16" height="16" viewBox="0 0 16 16"><path d="M2 8l4 4 8-8" stroke="#4caf50" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="9" width="5" height="5" rx="1" fill="#e53935"/></svg>
+          <button class="toolbar-btn" id="finishStopBtn" title="Aktive Uploads beenden und stoppen" aria-label="Aktive Uploads beenden und stoppen">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M2 8l4 4 8-8" stroke="#4caf50" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="11" y="9" width="5" height="5" rx="1" fill="#e53935"/></svg>
           </button>
-          <button class="toolbar-btn toolbar-btn-danger" id="abortAllBtn" title="Abort all Downloads">
-            <svg width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#e53935"/><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+          <button class="toolbar-btn toolbar-btn-danger" id="abortAllBtn" title="Alle Uploads abbrechen" aria-label="Alle Uploads abbrechen">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#e53935"/><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
           </button>
           <span class="toolbar-sep"></span>
-          <button class="toolbar-btn" id="moveTopBtn" title="Move to the top">
+          <button class="toolbar-btn" id="moveTopBtn" title="Ganz nach oben" aria-label="Ganz nach oben">
             <svg width="16" height="16" viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="2" rx="0.5" fill="#4caf50"/><path d="M8 5l-4 5h8z" fill="#4caf50"/><path d="M8 9l-4 5h8z" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="moveUpBtn" title="Move up">
+          <button class="toolbar-btn" id="moveUpBtn" title="Nach oben" aria-label="Nach oben">
             <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 2l-5 6h10z" fill="#4caf50"/><rect x="6" y="8" width="4" height="6" rx="0.5" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="moveDownBtn" title="Move down">
+          <button class="toolbar-btn" id="moveDownBtn" title="Nach unten" aria-label="Nach unten">
             <svg width="16" height="16" viewBox="0 0 16 16"><rect x="6" y="2" width="4" height="6" rx="0.5" fill="#4caf50"/><path d="M8 14l-5-6h10z" fill="#4caf50"/></svg>
           </button>
-          <button class="toolbar-btn" id="moveBottomBtn" title="Move to the bottom">
+          <button class="toolbar-btn" id="moveBottomBtn" title="Ganz nach unten" aria-label="Ganz nach unten">
             <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 7l-4-5h8z" fill="#4caf50"/><path d="M8 11l-4-5h8z" fill="#4caf50"/><rect x="4" y="13" width="8" height="2" rx="0.5" fill="#4caf50"/></svg>
           </button>
         </div>
@@ -136,14 +136,14 @@
           <table class="queue-table" id="queueTable">
             <thead>
               <tr>
-                <th class="col-filename sortable" data-col="filename" data-sort="filename">Filename<span class="col-resizer"></span></th>
-                <th class="col-size sortable" data-col="size" data-sort="size">Uploaded / Size<span class="col-resizer"></span></th>
-                <th class="col-host sortable" data-col="host" data-sort="host">Host<span class="col-resizer"></span></th>
+                <th class="col-filename sortable" data-col="filename" data-sort="filename">Dateiname<span class="col-resizer"></span></th>
+                <th class="col-size sortable" data-col="size" data-sort="size">Hochgeladen / Größe<span class="col-resizer"></span></th>
+                <th class="col-host sortable" data-col="host" data-sort="host">Hoster<span class="col-resizer"></span></th>
                 <th class="col-status sortable" data-col="status" data-sort="status">Status<span class="col-resizer"></span></th>
                 <th class="col-elapsed" data-col="elapsed">Zeit<span class="col-resizer"></span></th>
                 <th class="col-remaining" data-col="remaining">Rest<span class="col-resizer"></span></th>
-                <th class="col-speed sortable" data-col="speed" data-sort="speed">Speed<span class="col-resizer"></span></th>
-                <th class="col-progress sortable" data-col="progress" data-sort="progress">Progress</th>
+                <th class="col-speed sortable" data-col="speed" data-sort="speed">Geschwindigkeit<span class="col-resizer"></span></th>
+                <th class="col-progress sortable" data-col="progress" data-sort="progress">Fortschritt</th>
               </tr>
             </thead>
             <tbody id="queueBody"></tbody>
@@ -168,8 +168,8 @@
         <div class="recent-files-panel" id="recentFilesPanel">
           <div class="recent-files-header">
             <div class="recent-tabs">
-              <button class="recent-tab active" data-panel="filesTab">Files</button>
-              <button class="recent-tab" data-panel="statsTab">Stats</button>
+              <button class="recent-tab active" data-panel="filesTab">Dateien</button>
+              <button class="recent-tab" data-panel="statsTab">Statistik</button>
             </div>
             <span class="recent-files-hint" id="recentFilesHint">Zuletzt erzeugte Upload-Links</span>
             <button class="btn btn-xs btn-secondary" id="exportRecentFilesBtn" title="Alle Zeilen als Datei exportieren (Zeit, Hoster, Link, Dateiname)">Exportieren</button>
@@ -181,8 +181,8 @@
                 <thead id="recentFilesHead">
                   <tr>
                     <th class="col-date sortable" data-recent-sort="date">Datum<span class="sort-indicator">▼</span></th>
-                    <th class="col-filename sortable" data-recent-sort="filename">Filename<span class="sort-indicator">↕</span></th>
-                    <th class="col-host sortable" data-recent-sort="host">Host<span class="sort-indicator">↕</span></th>
+                    <th class="col-filename sortable" data-recent-sort="filename">Dateiname<span class="sort-indicator">↕</span></th>
+                    <th class="col-host sortable" data-recent-sort="host">Hoster<span class="sort-indicator">↕</span></th>
                     <th class="col-link sortable" data-recent-sort="link">Link<span class="sort-indicator">↕</span></th>
                   </tr>
                 </thead>
@@ -193,24 +193,24 @@
           <div class="recent-tab-body" id="statsTab">
             <div class="stats-grid">
               <div class="stats-col">
-                <h4>Files in queue (count)</h4>
-                <div class="stats-row"><span>total:</span><span id="statQueueTotal">0</span></div>
-                <div class="stats-row"><span>done:</span><span id="statQueueDone">0</span></div>
-                <div class="stats-row"><span>remaining:</span><span id="statQueueRemaining">0</span></div>
-                <div class="stats-row"><span>in progress:</span><span id="statQueueInProgress">0</span></div>
-                <div class="stats-row"><span>error:</span><span id="statQueueError">0</span></div>
+                <h4>Dateien in der Warteschlange</h4>
+                <div class="stats-row"><span>Gesamt:</span><span id="statQueueTotal">0</span></div>
+                <div class="stats-row"><span>Fertig:</span><span id="statQueueDone">0</span></div>
+                <div class="stats-row"><span>Verbleibend:</span><span id="statQueueRemaining">0</span></div>
+                <div class="stats-row"><span>Läuft:</span><span id="statQueueInProgress">0</span></div>
+                <div class="stats-row"><span>Fehler:</span><span id="statQueueError">0</span></div>
               </div>
               <div class="stats-col">
-                <h4>File size in queue</h4>
-                <div class="stats-row"><span>total:</span><span id="statSizeTotal">0 B</span></div>
-                <div class="stats-row"><span>remaining:</span><span id="statSizeRemaining">0 B</span></div>
+                <h4>Dateigröße in der Warteschlange</h4>
+                <div class="stats-row"><span>Gesamt:</span><span id="statSizeTotal">0 B</span></div>
+                <div class="stats-row"><span>Verbleibend:</span><span id="statSizeRemaining">0 B</span></div>
               </div>
               <div class="stats-col">
-                <h4>Session</h4>
-                <div class="stats-row"><span>Upload speed:</span><span id="statSpeed">0 B/s</span></div>
-                <div class="stats-row"><span>Remaining time:</span><span id="statEta">--:--</span></div>
-                <div class="stats-row"><span>Run time:</span><span id="statRunTime">00:00:00</span></div>
-                <div class="stats-row"><span>Uploaded (this run):</span><span id="statSessionBytes">0 B</span></div>
+                <h4>Sitzung</h4>
+                <div class="stats-row"><span>Upload-Geschwindigkeit:</span><span id="statSpeed">0 B/s</span></div>
+                <div class="stats-row"><span>Restzeit:</span><span id="statEta">--:--</span></div>
+                <div class="stats-row"><span>Laufzeit:</span><span id="statRunTime">00:00:00</span></div>
+                <div class="stats-row"><span>In diesem Lauf hochgeladen:</span><span id="statSessionBytes">0 B</span></div>
               </div>
             </div>
           </div>
@@ -219,7 +219,7 @@
     </div>
   </div>
 
-  <div id="accounts-view" class="view">
+  <div id="accounts-view" class="view" role="tabpanel" aria-labelledby="accounts-tab">
     <div class="accounts-container">
       <div class="accounts-header">
         <div>
@@ -232,7 +232,7 @@
             <input type="checkbox" id="autoHealthCheckToggle" checked>
             <span>Auto-Check vor Upload</span>
           </label>
-          <button class="btn btn-primary" id="addAccountBtn">+ Account hinzufügen</button>
+          <button class="btn btn-primary" id="addAccountBtn">Account hinzufügen</button>
         </div>
       </div>
       <div class="health-check-results account-health-results" id="healthCheckResults"></div>
@@ -244,7 +244,7 @@
   </div>
 
   <div class="modal-overlay" id="accountModal" style="display:none">
-    <div class="modal-card">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-describedby="accountModalSubtitle">
       <div class="modal-header">
         <div>
           <h3 id="accountModalTitle">Account hinzufügen</h3>
@@ -254,15 +254,15 @@
       </div>
       <div class="modal-body">
         <div class="settings-row" id="accountHosterRow">
-          <label>Hoster</label>
-          <select class="key-input" id="accountHosterSelect" style="max-width:300px"></select>
+          <label for="accountHosterSelect">Hoster</label>
+          <select class="key-input" id="accountHosterSelect" name="hoster" autocomplete="off" style="max-width:300px"></select>
         </div>
         <div class="settings-row">
-          <label>Label (optional)</label>
-          <input type="text" class="key-input" id="accField_label" placeholder="z.B. Hauptaccount, Premium, Kunde XY" maxlength="60">
+          <label for="accField_label">Label (optional)</label>
+          <input type="text" class="key-input" id="accField_label" name="accountLabel" autocomplete="off" placeholder="z. B. Hauptaccount, Premium, Kunde XY" maxlength="60">
         </div>
         <div id="accountCredsFields"></div>
-        <div class="account-modal-status" id="accountModalStatus"></div>
+        <div class="account-modal-status" id="accountModalStatus" role="status" aria-live="polite"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" id="cancelAccountModalBtn">Abbrechen</button>
@@ -303,7 +303,7 @@
     </div>
   </div>
 
-  <div id="settings-view" class="view">
+  <div id="settings-view" class="view" role="tabpanel" aria-labelledby="settings-tab">
     <div class="settings-container">
       <h2>Upload-Einstellungen</h2>
       <p class="settings-hint">Hoster-Einstellungen erscheinen erst, sobald ein Account hinterlegt ist. Änderungen werden automatisch gespeichert.</p>
@@ -315,7 +315,7 @@
     </div>
   </div>
 
-  <div id="history-view" class="view">
+  <div id="history-view" class="view" role="tabpanel" aria-labelledby="history-tab">
     <div class="history-container">
       <div class="history-header">
         <h2>Upload-Verlauf</h2>
@@ -368,17 +368,17 @@
     <span class="sb-separator">|</span>
     <span class="sb-eta" id="sbEta">ETA --:--</span>
     <span class="sb-separator">|</span>
-    <span class="sb-connections" id="sbConnections">Aktive Verbindungen 0</span>
+    <span class="sb-connections" id="sbConnections">Verbindungen 0</span>
     <span class="sb-separator">|</span>
     <span class="sb-queue-count" id="sbQueueCount">Gesamt 0</span>
     <span class="sb-separator">|</span>
-    <span class="sb-remaining-count" id="sbRemainingCount">Remaining 0</span>
+    <span class="sb-remaining-count" id="sbRemainingCount">Verbleibend 0</span>
     <span class="sb-separator">|</span>
-    <span class="sb-progress-count" id="sbInProgressCount">In Progress 0</span>
+    <span class="sb-progress-count" id="sbInProgressCount">Läuft 0</span>
     <span class="sb-separator">|</span>
-    <span class="sb-done-count" id="sbDoneCount">Done 0</span>
+    <span class="sb-done-count" id="sbDoneCount">Fertig 0</span>
     <span class="sb-separator">|</span>
-    <span class="sb-error-count" id="sbErrorCount">Error 0</span>
+    <span class="sb-error-count" id="sbErrorCount">Fehler 0</span>
   </div>
 
   <div class="copy-toast" id="copyToast"></div>

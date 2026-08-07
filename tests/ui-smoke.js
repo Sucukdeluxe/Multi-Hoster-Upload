@@ -53,8 +53,14 @@ setTimeout(async () => {
     const tabLabels = await wc.executeJavaScript('[...document.querySelectorAll(".tab")].map(el => el.textContent.trim()).join("|")');
     check('Current tab labels present', tabLabels === 'Upload|Accounts|Einstellungen|Verlauf');
 
+    const tabSemantics = await wc.executeJavaScript('document.querySelector(".tab-bar")?.getAttribute("role") + "|" + document.querySelector(".tab.active")?.getAttribute("aria-selected")');
+    check('Tab navigation exposes active state', tabSemantics === 'tablist|true');
+
     const activeTab = await wc.executeJavaScript('document.querySelector(".tab.active")?.textContent?.trim()');
     check('Upload tab active by default', activeTab === 'Upload');
+
+    const tabStops = await wc.executeJavaScript('[...document.querySelectorAll(".tab")].map(el => el.tabIndex).join("|")');
+    check('Tab navigation exposes one keyboard stop', tabStops === '0|-1|-1|-1');
 
     const dropVisible = await wc.executeJavaScript('document.getElementById("dropZone")?.style.display !== "none"');
     check('Drop zone visible (no files)', dropVisible);
@@ -70,6 +76,21 @@ setTimeout(async () => {
 
     const version = await wc.executeJavaScript('document.getElementById("versionLabel")?.textContent');
     check('Version label present', version && version.startsWith('v'));
+
+    const localizedQueueHeaders = await wc.executeJavaScript('[...document.querySelectorAll("#queueTable thead th")].map(el => el.childNodes[0]?.textContent.trim()).join("|")');
+    check('Upload table labels are consistently German', localizedQueueHeaders === 'Dateiname|Hochgeladen / Größe|Hoster|Status|Zeit|Rest|Geschwindigkeit|Fortschritt');
+
+    const localizedRecentTabs = await wc.executeJavaScript('[...document.querySelectorAll(".recent-tab")].map(el => el.textContent.trim()).join("|")');
+    check('Recent panel labels are consistently German', localizedRecentTabs === 'Dateien|Statistik');
+
+    const localizedStatusbar = await wc.executeJavaScript('["sbConnections", "sbQueueCount", "sbRemainingCount", "sbInProgressCount", "sbDoneCount", "sbErrorCount"].map(id => document.getElementById(id)?.textContent).join("|")');
+    check('Statusbar labels are consistently German', localizedStatusbar === 'Verbindungen 0|Gesamt 0|Verbleibend 0|Läuft 0|Fertig 0|Fehler 0');
+
+    const toolbarLabels = await wc.executeJavaScript('[...document.querySelectorAll("#queueCommandBar .toolbar-btn")].map(el => el.getAttribute("aria-label")).join("|")');
+    check('Upload toolbar actions have German accessible names', toolbarLabels === 'Alle Uploads starten|Ausgewählte Uploads starten|Ausgewählte Datei erneut hochladen|Ausgewählten Upload abbrechen|Aktive Uploads beenden und stoppen|Alle Uploads abbrechen|Ganz nach oben|Nach oben|Nach unten|Ganz nach unten');
+
+    const keyboardTab = await wc.executeJavaScript('document.getElementById("upload-tab").focus(); document.getElementById("upload-tab").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); document.querySelector(".tab.active")?.textContent?.trim() + "|" + document.activeElement?.id');
+    check('Arrow keys move and activate main tabs', keyboardTab === 'Accounts|accounts-tab');
 
     const ctxHidden = await wc.executeJavaScript('document.getElementById("contextMenu")?.style.display');
     check('Context menu hidden', ctxHidden === 'none');
@@ -88,7 +109,10 @@ setTimeout(async () => {
     const addAccountEnabled = await wc.executeJavaScript('document.getElementById("addAccountBtn")?.disabled === false');
     check('Add account button enabled', addAccountEnabled);
 
-    await wc.executeJavaScript('document.getElementById("addAccountBtn").click()');
+    const emptyAccountAction = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]")?.textContent?.trim()');
+    check('Empty account state offers direct action', emptyAccountAction === 'Ersten Account hinzufügen');
+
+    await wc.executeJavaScript('document.querySelector("[data-account-empty-add]").focus(); document.querySelector("[data-account-empty-add]").click()');
     await new Promise(r => setTimeout(r, 200));
 
     const accountModalVisible = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display');
@@ -96,6 +120,21 @@ setTimeout(async () => {
 
     const accountModalTitle = await wc.executeJavaScript('document.getElementById("accountModalTitle")?.textContent');
     check('Account modal is in add mode', accountModalTitle === 'Account hinzufügen');
+
+    const accountModalSemantics = await wc.executeJavaScript('document.querySelector("#accountModal .modal-card")?.getAttribute("role") + "|" + document.querySelector("#accountModal .modal-card")?.getAttribute("aria-modal")');
+    check('Account modal exposes dialog semantics', accountModalSemantics === 'dialog|true');
+
+    const accountFormLabels = await wc.executeJavaScript('["accountHosterSelect", "accField_label", "accField_username", "accField_password"].every(id => document.getElementById(id)?.labels?.length === 1)');
+    check('Account form controls have linked labels', accountFormLabels);
+
+    const accountStatusLive = await wc.executeJavaScript('document.getElementById("accountModalStatus")?.getAttribute("aria-live")');
+    check('Account validation status is announced', accountStatusLive === 'polite');
+
+    const initialAccountFocus = await wc.executeJavaScript('document.activeElement?.id');
+    check('Account modal focuses first control', initialAccountFocus === 'accountHosterSelect');
+
+    const trappedAccountFocus = await wc.executeJavaScript('document.getElementById("saveAccountBtn").focus(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true })); document.activeElement?.id');
+    check('Account modal keeps keyboard focus inside', trappedAccountFocus === 'closeAccountModalBtn');
 
     const authOptionCount = await wc.executeJavaScript('document.querySelectorAll("#accountHosterSelect option").length');
     check('7 hoster authentication options exist', authOptionCount === 7);
@@ -109,9 +148,18 @@ setTimeout(async () => {
     const credentialInputs = await wc.executeJavaScript('document.querySelectorAll("#accountCredsFields .key-input").length');
     check('Credential inputs rendered', credentialInputs === 2);
 
-    await wc.executeJavaScript('document.getElementById("cancelAccountModalBtn").click()');
+    const passwordToggleState = await wc.executeJavaScript('document.querySelector("#accountCredsFields .toggle-vis").click(); document.querySelector("#accountCredsFields .toggle-vis").getAttribute("aria-label") + "|" + document.querySelector("#accountCredsFields .toggle-vis").getAttribute("aria-pressed")');
+    check('Password visibility action exposes its state', passwordToggleState === 'Passwort verbergen|true');
+
+    await wc.executeJavaScript('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
     const accountModalHidden = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display');
-    check('Account modal closes', accountModalHidden === 'none');
+    check('Escape closes account modal', accountModalHidden === 'none');
+
+    const restoredAccountFocus = await wc.executeJavaScript('document.activeElement?.hasAttribute("data-account-empty-add")');
+    check('Account modal restores trigger focus', restoredAccountFocus === true);
+
+    const fallbackAccountFocus = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]").focus(); document.querySelector("[data-account-empty-add]").click(); document.querySelector("[data-account-empty-add]").remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); document.activeElement?.id');
+    check('Account modal restores stable focus after list rerender', fallbackAccountFocus === 'addAccountBtn');
 
     console.log('\\n=== Settings View ===');
 

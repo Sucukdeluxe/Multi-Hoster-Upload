@@ -353,10 +353,14 @@ function _isHistoryTabActive() {
     if (!tab || tab === activeTab) return;
     if (activeTab) {
       activeTab.classList.remove('active');
+      activeTab.setAttribute('aria-selected', 'false');
+      activeTab.tabIndex = -1;
       const prevView = viewsById[`${activeTab.dataset.view}-view`];
       if (prevView) prevView.classList.remove('active');
     }
     tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    tab.tabIndex = 0;
     const nextView = viewsById[`${tab.dataset.view}-view`];
     if (nextView) nextView.classList.add('active');
     activeTab = tab;
@@ -368,6 +372,18 @@ function _isHistoryTabActive() {
   const tabBar = tabs[0] && tabs[0].parentElement;
   if (tabBar) {
     tabBar.addEventListener('click', (e) => handle(e.target));
+    tabBar.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      e.preventDefault();
+      const current = Math.max(0, tabs.indexOf(activeTab));
+      const next = e.key === 'Home'
+        ? 0
+        : e.key === 'End'
+          ? tabs.length - 1
+          : (current + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].focus();
+      handle(tabs[next]);
+    });
   } else {
     // Fallback: bind per-tab if somehow no common parent
     tabs.forEach(t => t.addEventListener('click', () => handle(t)));
@@ -1920,9 +1936,20 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.context-menu')) hideContextMenu();
 });
 document.addEventListener('keydown', (e) => {
+  const accountModal = document.getElementById('accountModal');
+  if (e.key === 'Tab' && accountModal && accountModal.style.display !== 'none') {
+    const focusable = Array.from(accountModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (first && last && ((!e.shiftKey && document.activeElement === last) || (e.shiftKey && document.activeElement === first))) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
   if (e.key === 'Escape') {
     hideContextMenu();
     cancelHosterModal();
+    if (accountModal && accountModal.style.display !== 'none') closeAccountModal();
   }
   if (e.target.closest('input, textarea, select')) return;
   const activeView = document.querySelector('.view.active');
@@ -2951,12 +2978,12 @@ function updateStatusBar() {
   const totalSize = Math.max(stats.totalSize, _sessionTotalBytes);
   document.getElementById('sbTotal').textContent = `${formatSize(uploadedSize)} / ${formatSize(totalSize)}`;
   document.getElementById('sbEta').textContent = `ETA ${etaSeconds > 0 ? formatTime(etaSeconds) : '--:--'}`;
-  document.getElementById('sbConnections').textContent = `Connections: ${lastUploadStats.activeJobs || 0}`;
-  document.getElementById('sbQueueCount').textContent = `Total: ${stats.total}`;
-  document.getElementById('sbRemainingCount').textContent = `Remaining: ${stats.remaining}`;
-  document.getElementById('sbInProgressCount').textContent = `In Progress: ${stats.inProgress}`;
-  document.getElementById('sbDoneCount').textContent = `Done: ${_sessionDoneCount}`;
-  document.getElementById('sbErrorCount').textContent = `Error: ${_sessionErrorCount}`;
+  document.getElementById('sbConnections').textContent = `Verbindungen ${lastUploadStats.activeJobs || 0}`;
+  document.getElementById('sbQueueCount').textContent = `Gesamt ${stats.total}`;
+  document.getElementById('sbRemainingCount').textContent = `Verbleibend ${stats.remaining}`;
+  document.getElementById('sbInProgressCount').textContent = `Läuft ${stats.inProgress}`;
+  document.getElementById('sbDoneCount').textContent = `Fertig ${_sessionDoneCount}`;
+  document.getElementById('sbErrorCount').textContent = `Fehler ${_sessionErrorCount}`;
 }
 
 // --- Health Check ---
@@ -3864,8 +3891,10 @@ function renderAccounts() {
   if (allAccounts.length === 0) {
     container.innerHTML = `
       <div class="accounts-empty">
-        <p>Keine Accounts vorhanden</p>
-        <span class="hint">Klicke auf "Account hinzufügen", um einen Hoster einzurichten.</span>
+        <div class="accounts-empty-icon" aria-hidden="true">+</div>
+        <h3>Noch keine Accounts</h3>
+        <p>Füge deinen ersten Hoster-Account hinzu. Die Zugangsdaten werden vor dem Speichern geprüft.</p>
+        <button class="btn btn-primary" type="button" data-account-empty-add>Ersten Account hinzufügen</button>
       </div>`;
     if (footer) footer.style.display = 'none';
     if (!_accountListenersBound) bindAccountListeners(container);
@@ -4106,6 +4135,7 @@ function bindAccountListeners(container) {
     }
     const btn = e.target.closest('button');
     if (!btn) return;
+    if (btn.hasAttribute('data-account-empty-add')) return openAccountModal(null);
     if (btn.dataset.accountToggle) return toggleAccount(btn.dataset.accountToggle);
     if (btn.dataset.accountEdit) return openAccountModal(btn.dataset.accountEdit);
     if (btn.dataset.accountDelete) return openDeleteAccountModal(btn.dataset.accountDelete);
@@ -4240,25 +4270,42 @@ function getCredsFieldsHtml(authType, account, hoster) {
     };
     return `
       <div class="settings-row">
-        <label>${escapeHtml(fld.label)}</label>
-        <input type="${fld.inputType}" class="key-input" id="accField_username" value="${escapeAttr(account.username || '')}" placeholder="${escapeAttr(fld.placeholder)}">
+        <label for="accField_username">${escapeHtml(fld.label)}</label>
+        <input type="${fld.inputType}" class="key-input" id="accField_username" name="username" autocomplete="username" spellcheck="false" value="${escapeAttr(account.username || '')}" placeholder="${escapeAttr(fld.placeholder)}">
       </div>
       <div class="settings-row">
-        <label>Passwort</label>
-        <input type="password" class="key-input" id="accField_password" value="${escapeAttr(account.password || '')}" placeholder="Passwort">
-        <button class="toggle-vis" type="button" title="Anzeigen">&#128065;</button>
+        <label for="accField_password">Passwort</label>
+        <input type="password" class="key-input" id="accField_password" name="password" autocomplete="current-password" value="${escapeAttr(account.password || '')}" placeholder="Passwort">
+        <button class="toggle-vis" type="button" title="Passwort anzeigen" aria-label="Passwort anzeigen" aria-pressed="false">&#128065;</button>
       </div>`;
   }
   // API key
   return `
     <div class="settings-row">
-      <label>API Key</label>
-      <input type="password" class="key-input" id="accField_apiKey" value="${escapeAttr(account.apiKey || '')}" placeholder="API Key">
-      <button class="toggle-vis" type="button" title="Anzeigen">&#128065;</button>
+      <label for="accField_apiKey">API-Key</label>
+      <input type="password" class="key-input" id="accField_apiKey" name="apiKey" autocomplete="off" spellcheck="false" value="${escapeAttr(account.apiKey || '')}" placeholder="API-Key">
+      <button class="toggle-vis" type="button" title="API-Key anzeigen" aria-label="API-Key anzeigen" aria-pressed="false">&#128065;</button>
     </div>`;
 }
 
+function wireCredentialVisibilityButtons(container) {
+  container.querySelectorAll('.toggle-vis').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = btn.previousElementSibling;
+      const visible = input.type === 'password';
+      const fieldName = input.id === 'accField_apiKey' ? 'API-Key' : 'Passwort';
+      input.type = visible ? 'text' : 'password';
+      btn.setAttribute('aria-pressed', String(visible));
+      btn.setAttribute('aria-label', `${fieldName} ${visible ? 'verbergen' : 'anzeigen'}`);
+      btn.title = `${fieldName} ${visible ? 'verbergen' : 'anzeigen'}`;
+    });
+  });
+}
+
+let _accountModalReturnFocus = null;
+
 function openAccountModal(editAccountId) {
+  _accountModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   editingAccountId = editAccountId || null;
   _resetAccountModalState();
   const modal = document.getElementById('accountModal');
@@ -4298,17 +4345,17 @@ function openAccountModal(editAccountId) {
     credsContainer.innerHTML = getCredsFieldsHtml(firstOpt.authType, {}, firstOpt.value);
   }
 
-  // Toggle visibility buttons
-  credsContainer.querySelectorAll('.toggle-vis').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const input = btn.previousElementSibling;
-      input.type = input.type === 'password' ? 'text' : 'password';
-    });
-  });
+  wireCredentialVisibilityButtons(credsContainer);
 
   _wireCredFieldInvalidation();
 
   modal.style.display = 'flex';
+  requestAnimationFrame(() => {
+    const firstControl = editingAccountId
+      ? document.getElementById('accField_label')
+      : hosterSelect;
+    if (firstControl) firstControl.focus();
+  });
 }
 
 function closeAccountModal() {
@@ -4316,6 +4363,12 @@ function closeAccountModal() {
   _hideOtpField();
   editingAccountId = null;
   _resetAccountModalState();
+  const returnFocus = _accountModalReturnFocus;
+  _accountModalReturnFocus = null;
+  const focusTarget = returnFocus && returnFocus.isConnected
+    ? returnFocus
+    : document.getElementById('addAccountBtn');
+  if (focusTarget) focusTarget.focus();
 }
 
 function openDeleteAccountModal(accountId) {
@@ -4879,7 +4932,7 @@ function renderHistoryTable(container) {
   };
 
   container.innerHTML = `<table class="results-table history-table"><thead><tr>
-    ${headerCell('date', 'Date')}${headerCell('filename', 'Filename')}${headerCell('host', 'Host')}${headerCell('link', 'Link')}
+    ${headerCell('date', 'Datum')}${headerCell('filename', 'Dateiname')}${headerCell('host', 'Hoster')}${headerCell('link', 'Link')}
   </tr></thead><tbody id="historyBody"></tbody></table>`;
 
   if (!_historyListenersBound) {
@@ -5136,12 +5189,7 @@ function setupListeners() {
     const authType = opt ? opt.authType : 'login';
     const credsContainer = document.getElementById('accountCredsFields');
     credsContainer.innerHTML = getCredsFieldsHtml(authType, {}, e.target.value);
-    credsContainer.querySelectorAll('.toggle-vis').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const input = btn.previousElementSibling;
-        input.type = input.type === 'password' ? 'text' : 'password';
-      });
-    });
+    wireCredentialVisibilityButtons(credsContainer);
     _wireCredFieldInvalidation();
   });
 
@@ -5185,7 +5233,7 @@ function showUpdateBanner(info) {
 function handleUpdateProgress(data) {
   const msg = document.getElementById('updateMessage');
   if (!msg) return;
-  if (data.stage === 'downloading') msg.textContent = `Downloading... ${data.percent || 0}%`;
+  if (data.stage === 'downloading') msg.textContent = `Wird heruntergeladen… ${data.percent || 0}%`;
   else if (data.stage === 'verifying') msg.textContent = 'Verifiziere...';
   else if (data.stage === 'launching') msg.textContent = 'Setup wird gestartet...';
   else if (data.stage === 'done') msg.textContent = 'Update installiert. App wird neu gestartet...';
