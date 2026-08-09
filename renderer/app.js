@@ -1902,7 +1902,12 @@ async function doOnlineBackupCreate() {
 
 function openOnlineBackupView(focusRestore = false) {
   document.querySelector('.tab[data-view="settings"]')?.click();
-  document.querySelector('[data-subtab="backup"]')?.click();
+  const searchInput = document.getElementById('settingsSearchInput');
+  if (searchInput && searchInput.value) {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+  }
+  document.querySelector('[data-settings-page="backup"]')?.click();
   if (focusRestore) document.getElementById('onlineBackupKeyInput')?.focus();
 }
 
@@ -3183,92 +3188,122 @@ function renderSettings() {
   const fm = globalSettings.folderMonitor || {};
   const remoteSettings = globalSettings.remote || {};
 
-  const subtabBar = document.createElement('div');
-  subtabBar.className = 'settings-subtabs';
-  subtabBar.innerHTML = `
-    <button class="settings-subtab active" data-subtab="allgemein">Allgemein</button>
-    <button class="settings-subtab" data-subtab="automatik">Automatik</button>
-    <button class="settings-subtab" data-subtab="logs">Logs & Diagnose</button>
-    <button class="settings-subtab" data-subtab="remote">Fernsteuerung</button>
-    <button class="settings-subtab" data-subtab="diagnose">Diagnose-Zugriff</button>
-    <button class="settings-subtab" data-subtab="backup">Backup</button>
-  `;
-  container.appendChild(subtabBar);
+  const pageDefinitions = [
+    { id: 'allgemein', label: 'Allgemein', search: 'fenster vordergrund drop target oberfläche updates aktualisierung version' },
+    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange fertig abschluss entfernen parallel geschwindigkeit speed limit fortsetzen wiederherstellen hoster' },
+    { id: 'automatik', label: 'Automatik', search: 'automatisch retry wiederholen ordner überwachen dateierweiterungen unterordner duplikate' },
+    { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'webhook discord meldung ping erwähnung batch fertig' },
+    { id: 'logs', label: 'Logs & Support', search: 'log protokoll debug verbose diagnose support paket datei ordner' },
+    { id: 'remote', label: 'Fernsteuerung', search: 'remote fernsteuerung server input port api token verbindung' },
+    { id: 'diagnose', label: 'Diagnose-Zugriff', search: 'diagnose zugriff lesen allowlist netzwerk lokal verbindung code support' },
+    { id: 'backup', label: 'Backup & Übertragen', search: 'backup sichern export import online schlüssel einstellungen accounts übertragen' }
+  ];
+  const pageHeader = (title, description) => `
+    <header class="settings-page-header">
+      <h3>${title}</h3>
+      <p>${description}</p>
+    </header>`;
 
+  const layout = document.createElement('div');
+  layout.className = 'settings-layout';
+  layout.innerHTML = `
+    <aside class="settings-sidebar">
+      <div class="settings-search-wrap">
+        <label for="settingsSearchInput">Schnell finden</label>
+        <div class="settings-search-control">
+          <span class="settings-search-icon" aria-hidden="true">⌕</span>
+          <input type="search" id="settingsSearchInput" placeholder="Einstellungen durchsuchen" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <nav class="settings-navigation" aria-label="Einstellungskategorien">
+        ${pageDefinitions.map((definition, index) => `<button class="settings-nav-button${index === 0 ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.search}" aria-current="${index === 0 ? 'page' : 'false'}">${definition.label}</button>`).join('')}
+      </nav>
+      <p class="settings-search-empty" id="settingsSearchEmpty" hidden>Keine passende Einstellung gefunden.</p>
+    </aside>
+    <div class="settings-content"></div>`;
+  container.appendChild(layout);
+
+  const navigation = layout.querySelector('.settings-navigation');
+  const content = layout.querySelector('.settings-content');
   const pages = {};
-  ['allgemein', 'automatik', 'logs', 'remote', 'diagnose', 'backup'].forEach((id) => {
+  pageDefinitions.forEach(({ id }) => {
     const page = document.createElement('div');
     page.className = id === 'allgemein' ? 'settings-subpage active' : 'settings-subpage';
     page.dataset.subpage = id;
     pages[id] = page;
-    container.appendChild(page);
+    content.appendChild(page);
   });
 
   pages.allgemein.innerHTML = `
-      <div class="settings-section-label">Uploads</div>
-        <div class="settings-row">
-          <label style="min-width:185px">Globale parallele Uploads</label>
-          <input type="number" class="hs-input settings-autosave" id="parallelUploadCountInput" value="${globalSettings.parallelUploadCount ?? 0}" min="0" max="100" style="width:80px">
-          <span class="hint">0 = nur pro Hoster</span>
-        </div>
-        <div class="settings-row">
-          <label style="min-width:185px">Globales Speed-Limit (MB/s)</label>
-          <input type="number" class="hs-input settings-autosave" id="globalMaxSpeedMbsInput" value="${globalSettings.globalMaxSpeedKbs > 0 ? (globalSettings.globalMaxSpeedKbs / 1024).toFixed(2).replace(/\\.00$/, '') : '0'}" min="0" step="0.1" style="width:80px">
-          <span class="hint">0 = unbegrenzt</span>
-        </div>
-      <div class="settings-section-label">Verhalten</div>
+      ${pageHeader('Allgemein', 'Fensterverhalten, Drop-Target und Programmupdates.')}
+      <div class="settings-section-label">Oberfläche</div>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
-          <label>Immer im Vordergrund</label>
+          <label for="alwaysOnTopInput">Immer im Vordergrund</label>
           <input type="checkbox" class="settings-autosave" id="alwaysOnTopInput" ${alwaysOnTopState ? 'checked' : ''}>
         </div>
         <div class="settings-row checkbox-row">
-          <label>Hoster-Limits hochskalieren</label>
-          <input type="checkbox" class="settings-autosave" id="scaleParallelUploadsInput" ${globalSettings.scaleParallelUploads ? 'checked' : ''}>
-        </div>
-        <div class="settings-row checkbox-row">
-          <label>Aus Queue entfernen bei Abschluss</label>
-          <input type="checkbox" class="settings-autosave" id="removeFromQueueOnDoneInput" ${globalSettings.removeFromQueueOnDone ? 'checked' : ''}>
-        </div>
-        <div class="settings-row checkbox-row">
-          <label>Queue beim Start wiederherstellen</label>
-          <input type="checkbox" class="settings-autosave" id="resumeQueueOnLaunchInput" ${globalSettings.resumeQueueOnLaunch === false ? '' : 'checked'}>
-        </div>
-        <div class="settings-row checkbox-row">
-          <label>Drop-Target anzeigen</label>
+          <label for="showDropTargetInput">Drop-Target anzeigen</label>
           <input type="checkbox" class="settings-autosave" id="showDropTargetInput" ${globalSettings.showDropTarget ? 'checked' : ''}>
         </div>
       </div>
-      <div class="settings-section-label">Updates</div>
+      <div class="settings-section-label">Programmupdate</div>
       <div class="settings-row">
-        <label>Manuell prüfen</label>
+        <label>Neue Version suchen</label>
         <button class="btn btn-xs btn-secondary" id="manualUpdateCheckBtn">Nach Updates suchen</button>
       </div>
-      <div class="settings-hoster-pointer">Die <strong>Upload-Einstellungen pro Hoster</strong> (Retries, Speed, Parallel, Max-Größe, Log) sind jetzt im <strong>Accounts</strong>-Tab — direkt bei den jeweiligen Hostern unter „Upload-Einstellungen".</div>
+  `;
+
+  pages.uploads.innerHTML = `
+      ${pageHeader('Upload-Verhalten', 'Globale Leistung, Warteschlange und Verhalten nach einem erfolgreichen Upload.')}
+      <div class="settings-section-label">Leistung</div>
+      <div class="settings-row">
+        <label for="parallelUploadCountInput">Globale parallele Uploads</label>
+        <input type="number" class="hs-input settings-autosave" id="parallelUploadCountInput" value="${globalSettings.parallelUploadCount ?? 0}" min="0" max="100">
+        <span class="hint">0 = nur die Einstellung des jeweiligen Hosters verwenden</span>
+      </div>
+      <div class="settings-row">
+        <label for="globalMaxSpeedMbsInput">Globales Speed-Limit</label>
+        <input type="number" class="hs-input settings-autosave" id="globalMaxSpeedMbsInput" value="${globalSettings.globalMaxSpeedKbs > 0 ? (globalSettings.globalMaxSpeedKbs / 1024).toFixed(2).replace(/\\.00$/, '') : '0'}" min="0" step="0.1">
+        <span class="hint">MB/s · 0 = unbegrenzt</span>
+      </div>
+      <div class="settings-option">
+        <div class="settings-option-copy">
+          <label for="scaleParallelUploadsInput">Hoster-Limits automatisch hochskalieren</label>
+          <span class="settings-option-description">Verteilt die globale Parallelität auf vorhandene Accounts eines Hosters.</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="scaleParallelUploadsInput" ${globalSettings.scaleParallelUploads ? 'checked' : ''}>
+      </div>
+      <div class="settings-section-label">Warteschlange</div>
+      <div class="settings-option">
+        <div class="settings-option-copy">
+          <label for="removeFromQueueOnDoneInput">Nach Abschluss aus der Liste entfernen</label>
+          <span class="settings-option-description">Erfolgreich hochgeladene Dateien verschwinden automatisch aus der Upload-Liste.</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="removeFromQueueOnDoneInput" ${globalSettings.removeFromQueueOnDone ? 'checked' : ''}>
+      </div>
+      <div class="settings-option">
+        <div class="settings-option-copy">
+          <label for="resumeQueueOnLaunchInput">Warteschlange beim Start wiederherstellen</label>
+          <span class="settings-option-description">Noch nicht abgeschlossene Uploads werden beim nächsten Programmstart erneut angezeigt.</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="resumeQueueOnLaunchInput" ${globalSettings.resumeQueueOnLaunch === false ? '' : 'checked'}>
+      </div>
+      <div class="settings-hoster-pointer"><strong>Einstellungen einzelner Hoster</strong> wie Wiederholungen, Geschwindigkeit, Parallelität, Dateigröße und Logging findest du im <strong>Accounts</strong>-Tab direkt beim jeweiligen Hoster.</div>
   `;
 
   pages.automatik.innerHTML = `
+      ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
       <div class="settings-row">
-        <label>Auto-Retry Runden</label>
+        <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
         <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
         <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
       </div>
       <div class="settings-row">
-        <label>Retry-Wartezeit (min)</label>
+        <label for="autoRetryDelayMinInput">Wartezeit zwischen Runden</label>
         <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
-        <span class="hint">Basis-Wartezeit; Runde N wartet N × diesen Wert (lineares Backoff).</span>
-      </div>
-      <div class="settings-row">
-        <label>Webhook-URL</label>
-        <input type="text" class="key-input settings-autosave" id="webhookUrlInput" value="${escapeAttr(globalSettings.webhookUrl || '')}" placeholder="https://discord.com/api/webhooks/… oder eigene URL">
-        <button class="btn btn-xs btn-secondary" id="testWebhookBtn">Test</button>
-        <span class="hint" id="webhookHint">Bei Batch-Ende wird eine Zusammenfassung gepostet (Discord wird automatisch erkannt, sonst generisches JSON).</span>
-      </div>
-      <div class="settings-row">
-        <label>Discord Ping (optional)</label>
-        <input type="text" class="key-input settings-autosave" id="webhookMentionInput" value="${escapeAttr(globalSettings.webhookMention || '')}" placeholder="deine User-ID, role:ROLLEN-ID, @here oder @everyone">
-        <span class="hint">Damit Discord dich wirklich benachrichtigt (Push). User-ID: in Discord Entwicklermodus an → Rechtsklick auf deinen Namen → 'User-ID kopieren'. Leer = nur posten, kein Ping.</span>
+        <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
       </div>
       <div class="settings-section-label">Ordnerüberwachung <span class="panel-status${fm.enabled && fm.folderPath ? ' active' : ''}" id="folderMonitorStatusBadge">${fm.enabled && fm.folderPath ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-row">
@@ -3319,7 +3354,24 @@ function renderSettings() {
       ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Auswahl = Hoster-Modal bei jeder Datei.</p>'}
   `;
 
+  pages.benachrichtigungen.innerHTML = `
+      ${pageHeader('Benachrichtigungen', 'Meldungen nach einem abgeschlossenen Upload-Batch versenden.')}
+      <div class="settings-section-label">Webhook</div>
+      <div class="settings-row settings-row-wide">
+        <label for="webhookUrlInput">Webhook-Adresse</label>
+        <input type="text" class="key-input settings-autosave" id="webhookUrlInput" value="${escapeAttr(globalSettings.webhookUrl || '')}" placeholder="https://discord.com/api/webhooks/… oder eigene URL">
+        <button class="btn btn-xs btn-secondary" id="testWebhookBtn">Test senden</button>
+        <span class="hint" id="webhookHint">Nach Batch-Ende wird eine Zusammenfassung versendet. Discord wird automatisch erkannt, andere Ziele erhalten JSON.</span>
+      </div>
+      <div class="settings-row settings-row-wide">
+        <label for="webhookMentionInput">Discord-Erwähnung</label>
+        <input type="text" class="key-input settings-autosave" id="webhookMentionInput" value="${escapeAttr(globalSettings.webhookMention || '')}" placeholder="User-ID, role:ROLLEN-ID, @here oder @everyone">
+        <span class="hint">Optional · leer lassen, wenn die Nachricht ohne Ping gesendet werden soll</span>
+      </div>
+  `;
+
   pages.logs.innerHTML = `
+      ${pageHeader('Logs & Support', 'Protokollierung verwalten, Log-Dateien öffnen und ein bereinigtes Support-Paket erstellen.')}
       <div class="settings-section-label">Log</div>
       <div class="settings-row">
         <label>FileUploader Log</label>
@@ -3358,6 +3410,7 @@ function renderSettings() {
   `;
 
   pages.remote.innerHTML = `
+      ${pageHeader('Fernsteuerung', 'Upload-Funktionen über einen verbundenen Client steuern.')}
       <div class="settings-section-label">Server <span class="panel-status${remoteSettings.enabled ? ' active' : ''}" id="remoteStatusBadge">${remoteSettings.enabled ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
@@ -3386,9 +3439,10 @@ function renderSettings() {
   `;
 
   pages.diagnose.innerHTML = `
+      ${pageHeader('Diagnose-Zugriff', 'Zeitlich kontrollierter Lesezugriff für Fehleranalyse und Support.')}
       <div class="settings-section-label">Diagnose-Zugriff (nur lesen) <span class="panel-status" id="diagStatusBadge">…</span></div>
       <p class="hint" style="margin:0 0 12px;padding:8px 10px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08)">
-        Erlaubt Claude <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und sanitierte Config (Passwörter/API-Keys/Token werden maskiert). <strong>Kein Bildschirm, keine Eingabe-Steuerung.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> (nur über SSH-/VPN-Tunnel erreichbar).
+        Erlaubt <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und bereinigte Einstellungen. Passwörter, API-Keys und Tokens werden maskiert. <strong>Bildschirm und Eingabesteuerung bleiben gesperrt.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> und damit nur über einen SSH- oder VPN-Tunnel erreichbar.
       </p>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
@@ -3434,7 +3488,8 @@ function renderSettings() {
   `;
 
   pages.backup.innerHTML = `
-      <p class="hint" style="margin:0 0 10px">Alle Accounts und Einstellungen exportieren oder importieren. Der Upload-Verlauf wird nicht übertragen und bleibt auf diesem Gerät.</p>
+      ${pageHeader('Backup & Übertragen', 'Accounts und Einstellungen sichern oder auf ein anderes Gerät übernehmen.')}
+      <p class="hint" style="margin:0 0 10px">Der Upload-Verlauf wird nicht übertragen und bleibt auf diesem Gerät.</p>
       <section class="online-backup-panel" aria-labelledby="onlineBackupHeading">
         <div>
           <h3 id="onlineBackupHeading">Verschlüsseltes Online-Backup</h3>
@@ -3464,16 +3519,59 @@ function renderSettings() {
       </div>
   `;
 
-  subtabBar.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-subtab]');
-    if (!btn) return;
-    const target = btn.dataset.subtab;
-    subtabBar.querySelectorAll('.settings-subtab').forEach((b) => {
-      b.classList.toggle('active', b === btn);
+  const activateSettingsPage = (target, focus = false) => {
+    const activeButton = navigation.querySelector(`[data-settings-page="${target}"]`);
+    if (!activeButton || activeButton.hidden) return;
+    navigation.querySelectorAll('.settings-nav-button').forEach((button) => {
+      const active = button === activeButton;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-current', active ? 'page' : 'false');
     });
-    Object.values(pages).forEach((p) => {
-      p.classList.toggle('active', p.dataset.subpage === target);
+    Object.values(pages).forEach((page) => {
+      page.classList.toggle('active', page.dataset.subpage === target);
     });
+    if (focus) activeButton.focus();
+    content.scrollTop = 0;
+  };
+
+  navigation.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-settings-page]');
+    if (button) activateSettingsPage(button.dataset.settingsPage);
+  });
+
+  navigation.addEventListener('keydown', (event) => {
+    const button = event.target.closest('[data-settings-page]');
+    if (!button || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const visibleButtons = [...navigation.querySelectorAll('.settings-nav-button')].filter((item) => !item.hidden);
+    const currentIndex = visibleButtons.indexOf(button);
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowDown') nextIndex = (currentIndex + 1) % visibleButtons.length;
+    if (event.key === 'ArrowUp') nextIndex = (currentIndex - 1 + visibleButtons.length) % visibleButtons.length;
+    if (event.key === 'Home') nextIndex = 0;
+    if (event.key === 'End') nextIndex = visibleButtons.length - 1;
+    event.preventDefault();
+    activateSettingsPage(visibleButtons[nextIndex].dataset.settingsPage, true);
+  });
+
+  const searchInput = layout.querySelector('#settingsSearchInput');
+  const searchEmpty = layout.querySelector('#settingsSearchEmpty');
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value.trim().toLocaleLowerCase('de-DE');
+    const visibleButtons = [];
+    navigation.querySelectorAll('.settings-nav-button').forEach((button) => {
+      const visible = !query || button.dataset.search.includes(query);
+      button.hidden = !visible;
+      if (visible) visibleButtons.push(button);
+    });
+    searchEmpty.hidden = visibleButtons.length > 0;
+    const activeButton = navigation.querySelector('.settings-nav-button.active');
+    if (visibleButtons.length === 0) {
+      Object.values(pages).forEach((page) => page.classList.remove('active'));
+      return;
+    }
+    if (!activeButton || activeButton.hidden || !content.querySelector('.settings-subpage.active')) {
+      activateSettingsPage((activeButton && !activeButton.hidden ? activeButton : visibleButtons[0]).dataset.settingsPage);
+    }
   });
 
   _renderLogPathsList(document.getElementById('logPathsList'));

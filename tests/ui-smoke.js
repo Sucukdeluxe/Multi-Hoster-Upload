@@ -16,6 +16,7 @@ const fs = require('fs');
 // Create a temp script that the real Electron app will execute via --eval
 const testScript = `
 const { app, BrowserWindow } = require('electron');
+const fs = require('fs');
 
 // Monkey-patch: after the real window loads, run tests
 const origReady = app.whenReady;
@@ -213,8 +214,29 @@ setTimeout(async () => {
     const settingsActive = await wc.executeJavaScript('document.getElementById("settings-view")?.classList.contains("active")');
     check('Settings tab active', settingsActive);
 
-    const settingsSubtabs = await wc.executeJavaScript('document.querySelectorAll(".settings-subtab").length');
-    check('6 settings subtabs exist', settingsSubtabs === 6);
+    const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
+    check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
+
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'uploads\\']")?.click()');
+    const uploadSettingsState = await wc.executeJavaScript('(() => { const activePage = document.querySelector(".settings-subpage.active"); return [activePage?.dataset.subpage, activePage?.querySelector("h3")?.textContent.trim(), document.querySelector("label[for=removeFromQueueOnDoneInput]")?.textContent.trim(), document.getElementById("removeFromQueueOnDoneInput")?.closest(".settings-option")?.querySelector(".settings-option-description")?.textContent.trim()].join("|"); })()');
+    check('Upload completion behavior is immediately findable', uploadSettingsState === 'uploads|Upload-Verhalten|Nach Abschluss aus der Liste entfernen|Erfolgreich hochgeladene Dateien verschwinden automatisch aus der Upload-Liste.');
+
+    if (process.env.MHU_SETTINGS_SCREENSHOT) {
+      const screenshotPage = process.env.MHU_SETTINGS_SCREENSHOT_PAGE;
+      if (screenshotPage) await wc.executeJavaScript('document.querySelector("[data-settings-page=" + ' + JSON.stringify(screenshotPage) + ' + "]")?.click()');
+      await new Promise(resolve => setTimeout(resolve, 150));
+      const screenshot = await wc.capturePage();
+      fs.writeFileSync(process.env.MHU_SETTINGS_SCREENSHOT, screenshot.toPNG());
+    }
+
+    const settingsSearchState = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); if (!search) return "missing"; search.value = "fertig"; search.dispatchEvent(new Event("input", { bubbles: true })); const visible = [...document.querySelectorAll(".settings-nav-button")].filter(button => !button.hidden); return [visible.map(button => button.dataset.settingsPage).join(","), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage].join("|"); })()');
+    check('Settings search routes completion terms to Uploads first', settingsSearchState === 'uploads,benachrichtigungen|uploads');
+
+    const settingsSearchRecovery = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); search.value = "kein-passender-treffer"; search.dispatchEvent(new Event("input", { bubbles: true })); const emptyVisible = !document.getElementById("settingsSearchEmpty").hidden; search.value = ""; search.dispatchEvent(new Event("input", { bubbles: true })); return [emptyVisible, document.querySelector(".settings-subpage.active")?.dataset.subpage, document.getElementById("settingsSearchEmpty").hidden].join("|"); })()');
+    check('Clearing an empty settings search restores the current page', settingsSearchRecovery === 'true|uploads|true');
+
+    const filteredOnlineRestoreNavigation = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); search.value = "fertig"; search.dispatchEvent(new Event("input", { bubbles: true })); _handleMenuAction("online-backup-restore"); return [search.value, document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.activeElement?.id].join("|"); })()');
+    check('Online restore navigation clears filters and opens Backup', filteredOnlineRestoreNavigation === '|backup|onlineBackupKeyInput');
 
     const accountSettingsPointer = await wc.executeJavaScript('document.querySelector(".settings-hoster-pointer")?.textContent');
     check('Hoster settings point to Accounts tab', accountSettingsPointer && accountSettingsPointer.includes('Accounts'));
@@ -222,7 +244,7 @@ setTimeout(async () => {
     const parallel = await wc.executeJavaScript('document.getElementById("parallelUploadCountInput")?.value');
     check('Global parallel uploads default 0', parallel === '0');
 
-    await wc.executeJavaScript('document.querySelector("[data-subtab=\\'backup\\']").click()');
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'backup\\']")?.click()');
     const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "onlineBackupKeyOutput", "copyOnlineBackupKeyBtn", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id)))');
     check('Online backup controls exist', onlineBackupControls);
 
@@ -238,13 +260,17 @@ setTimeout(async () => {
     const validOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-" + "A".repeat(70); document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled');
     check('Valid 75-character online backup keys enable restore', validOnlineBackup === false);
 
-    const onlineRestoreNavigation = await wc.executeJavaScript('_handleMenuAction("online-backup-restore"); document.activeElement?.id + "|" + document.querySelector(".settings-subtab.active")?.dataset.subtab');
+    const onlineRestoreNavigation = await wc.executeJavaScript('_handleMenuAction("online-backup-restore"); document.activeElement?.id + "|" + document.querySelector(".settings-nav-button.active")?.dataset.settingsPage');
     check('Online restore menu opens the backup page and focuses the key', onlineRestoreNavigation === 'onlineBackupKeyInput|backup');
 
     // Test save
     await wc.executeJavaScript('document.getElementById("saveSettingsBtn").click()');
-    await new Promise(r => setTimeout(r, 500));
-    const feedback = await wc.executeJavaScript('document.getElementById("saveFeedback")?.textContent');
+    let feedback = '';
+    for (let attempt = 0; attempt < 50; attempt++) {
+      feedback = await wc.executeJavaScript('document.getElementById("saveFeedback")?.textContent');
+      if (feedback === 'Gespeichert!') break;
+      await new Promise(r => setTimeout(r, 50));
+    }
     check('Save shows Gespeichert!', feedback === 'Gespeichert!');
 
     console.log('\\n=== History View ===');

@@ -307,13 +307,17 @@
 
   <div id="settings-view" class="view" role="tabpanel" aria-labelledby="settings-tab">
     <div class="settings-container">
-      <h2>Upload-Einstellungen</h2>
-      <p class="settings-hint">Hoster-Einstellungen erscheinen erst, sobald ein Account hinterlegt ist. Änderungen werden automatisch gespeichert.</p>
-      <div class="settings-hosters" id="settingsHosters"></div>
-      <div class="settings-save-row">
-        <span class="save-feedback" id="saveFeedback">Änderungen werden automatisch gespeichert.</span>
-        <button class="btn btn-secondary" id="saveSettingsBtn">Jetzt speichern</button>
+      <div class="settings-header">
+        <div>
+          <h2>Einstellungen</h2>
+          <p class="settings-hint">Alle Optionen nach Aufgaben sortiert. Änderungen werden automatisch gespeichert.</p>
+        </div>
+        <div class="settings-save-row">
+          <span class="save-feedback" id="saveFeedback">Automatisch gespeichert</span>
+          <button class="btn btn-secondary" id="saveSettingsBtn">Jetzt speichern</button>
+        </div>
       </div>
+      <div class="settings-hosters" id="settingsHosters"></div>
     </div>
   </div>
 
