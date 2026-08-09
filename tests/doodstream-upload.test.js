@@ -92,44 +92,37 @@ test('_parseUploadFormFields returns {} for markup without a form', () => {
 // --- deriveApiKey: pull + validate the account API key from the web session ---
 test('_extractApiKeyCandidates finds the key in an input value and ranks api-context first', () => {
   const up = new DoodstreamUploader();
-  const csrfCandidate = ['fixture', 'csrf', 'candidate', '00000001'].join('');
-  const apiCandidate = ['fixture', 'api', 'candidate', '0000000001'].join('');
   const html = `
-    <input type="text" name="csrf" value="${csrfCandidate}">
-    <div class="panel">API Key <input readonly value="${apiCandidate}"></div>
+    <input type="text" name="csrf" value="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">
+    <div class="panel">API Key <input readonly value="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"></div>
   `;
   const cands = up._extractApiKeyCandidates(html);
   // The token whose preceding context mentions "API" must rank first.
-  assert.equal(cands[0], apiCandidate);
-  assert.ok(cands.includes(csrfCandidate));
+  assert.equal(cands[0], 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.ok(cands.includes('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'));
 });
 
 test('_extractApiKeyCandidates handles textarea + api_key: "x" shapes and empty input', () => {
   const up = new DoodstreamUploader();
   assert.deepEqual(up._extractApiKeyCandidates(''), []);
-  const textareaCandidate = ['fixture', 'textarea', 'candidate', '000001'].join('');
-  const objectCandidate = ['fixture', 'object', 'candidate', '00000001'].join('');
-  const ta = up._extractApiKeyCandidates(`<textarea id="k">${textareaCandidate}</textarea>`);
-  assert.ok(ta.includes(textareaCandidate));
-  const js = up._extractApiKeyCandidates(`var x = {"api_key":"${objectCandidate}"};`);
-  assert.ok(js.includes(objectCandidate));
+  const ta = up._extractApiKeyCandidates('<textarea id="k">cccccccccccccccccccccccccccccccc</textarea>');
+  assert.ok(ta.includes('cccccccccccccccccccccccccccccccc'));
+  const js = up._extractApiKeyCandidates('var x = {"api_key":"dddddddddddddddddddddddddddddddd"};');
+  assert.ok(js.includes('dddddddddddddddddddddddddddddddd'));
 });
 
 test('deriveApiKey returns the candidate that validates against the API', async () => {
   const up = new DoodstreamUploader();
-  const acceptedCandidate = ['fixture', 'accepted', 'candidate', '1234567890'].join('');
-  const rejectedCandidate = ['fixture', 'rejected', 'candidate', '0987654321'].join('');
-  up._fetch = async () => ({ text: async () => `<div>API Key <input value="${acceptedCandidate}"></div><input value="${rejectedCandidate}">` });
-  up._validateApiKey = async (key) => key === acceptedCandidate;
+  up._fetch = async () => ({ text: async () => '<div>API Key <input value="REALKEY1234567890abcdefGHIJK"></div><input value="notthekey000000000000000000">' });
+  up._validateApiKey = async (key) => key === 'REALKEY1234567890abcdefGHIJK';
   const key = await up.deriveApiKey();
-  assert.equal(key, acceptedCandidate);
-  assert.equal(up.apiKey, acceptedCandidate); // cached on the instance
+  assert.equal(key, 'REALKEY1234567890abcdefGHIJK');
+  assert.equal(up.apiKey, 'REALKEY1234567890abcdefGHIJK'); // cached on the instance
 });
 
 test('deriveApiKey returns null when no candidate validates (→ caller uses web fallback)', async () => {
   const up = new DoodstreamUploader();
-  const rejectedCandidate = ['fixture', 'rejected', 'candidate', '0000000000'].join('');
-  up._fetch = async () => ({ text: async () => `<input value="${rejectedCandidate}">` });
+  up._fetch = async () => ({ text: async () => '<input value="bogustoken0000000000000000000">' });
   up._validateApiKey = async () => false;
   assert.equal(await up.deriveApiKey(), null);
   assert.equal(up.apiKey, '');

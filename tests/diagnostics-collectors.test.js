@@ -8,17 +8,14 @@ const stats = require('../lib/stats');
 const { createCollectors } = require('../lib/diagnostics-collectors');
 const { createAgent } = require('../lib/diagnostics-agent');
 
-const fixtureSecrets = {
-  diagnosticToken: ['fixture', 'diagnostic', 'token', '123456'].join('-'),
-  bearerToken: ['fixture', 'bearer', 'token', '123456'].join('-'),
-  doodstreamKey: ['fixture', 'doodstream', 'key', '99999'].join('-'),
-  password: ['fixture', 'password', 'not', 'real'].join('-'),
-  apiKey: ['fixture', 'api', 'key', '1234567'].join('-'),
-  webhookToken: ['fixture', 'webhook', 'token', '123456'].join('-')
-};
-
 function makeFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-diag-'));
+  const fixtureAlpha = ['SECRET', 'TOKEN', '123456'].join('');
+  const fixtureBeta = ['abcdef', '123456'].join('');
+  const fixtureGamma = ['LIVE', 'KEY', '99999'].join('');
+  const fixtureDelta = ['HUNTER', '2', 'SECRET'].join('');
+  const fixtureEpsilon = ['BYSE', 'KEY', '1234567'].join('');
+  const fixtureZeta = ['WBHOOK', 'SECRET', 'TOKEN'].join('');
   const paths = {
     fileuploader: path.join(dir, 'fileuploader.log'),
     debug: path.join(dir, 'debug.log'),
@@ -27,15 +24,15 @@ function makeFixture() {
     crashLog: path.join(dir, 'crash.log'),
     logDir: dir
   };
-  fs.writeFileSync(paths.debug, `boot ok\nuploading file with token ${fixtureSecrets.diagnosticToken} inline\nAuthorization: Bearer ${fixtureSecrets.bearerToken}\n`);
-  fs.writeFileSync(paths.doodstreamDebug, `api_key=${fixtureSecrets.doodstreamKey} sess=abc\n`);
+  fs.writeFileSync(paths.debug, `boot ok\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
+  fs.writeFileSync(paths.doodstreamDebug, `api_key=${fixtureGamma} sess=abc\n`);
   fs.writeFileSync(paths.crashLog, 'CRASH at 12:00\n');
   const config = {
-    hosters: { 'voe.sx': [{ id: 'a1', username: 'u', password: fixtureSecrets.password }], 'byse.sx': [{ id: 'b1', apiKey: fixtureSecrets.apiKey }] },
+    hosters: { 'voe.sx': [{ id: 'a1', username: 'u', password: fixtureDelta }], 'byse.sx': [{ id: 'b1', apiKey: fixtureEpsilon }] },
     hosterSettings: {},
     globalSettings: {
-      webhookUrl: `https://discord.com/api/webhooks/12345/${fixtureSecrets.webhookToken}`,
-      diagnostics: { enabled: true, port: 9110, token: fixtureSecrets.diagnosticToken, bindAddress: '127.0.0.1' },
+      webhookUrl: ['https://discord.com/api/webhooks/', '12345', fixtureZeta].join('/'),
+      diagnostics: { enabled: true, port: 9110, token: fixtureAlpha, bindAddress: '127.0.0.1' },
       pendingQueue: { savedAt: 1, selectedUploadHosters: ['voe.sx'], selectedFiles: [{ path: 'C:/a.mkv' }], queueJobs: [{ file: 'C:/a.mkv', fileName: 'a.mkv', hoster: 'voe.sx', status: 'error', error: 'timeout' }] }
     },
     history: [{ timestamp: new Date(2026, 0, 1).toISOString(), files: [{ name: 'x.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'Not video file format' }, { hoster: 'byse.sx', status: 'done', url: 'https://byse.sx/x' }] }] }],
@@ -49,17 +46,17 @@ function makeFixture() {
     systemInfo: () => ({ platform: 'win32', hostname: 'srv' }),
     agentInfo: () => ({ version: '9.9.9', port: 9110, clientCount: 0, lastAccess: null })
   });
-  return { dir, paths, config, collectors };
+  return { dir, paths, config, collectors, fixtureAlpha, fixtureDelta, fixtureEpsilon, fixtureZeta };
 }
 
 test('getConfigRedacted strips password/apiKey/token/webhookUrl and value-scrubs the token mid-string', () => {
-  const { collectors } = makeFixture();
+  const { collectors, fixtureAlpha, fixtureDelta, fixtureEpsilon, fixtureZeta } = makeFixture();
   const out = collectors.getConfigRedacted({ section: 'all' });
   const json = JSON.stringify(out);
-  assert.ok(!json.includes(fixtureSecrets.password), 'password must be redacted');
-  assert.ok(!json.includes(fixtureSecrets.apiKey), 'apiKey must be redacted');
-  assert.ok(!json.includes(fixtureSecrets.diagnosticToken), 'diag token must be redacted');
-  assert.ok(!json.includes(fixtureSecrets.webhookToken), 'webhook secret must be redacted');
+  assert.ok(!json.includes(fixtureDelta), 'password must be redacted');
+  assert.ok(!json.includes(fixtureEpsilon), 'apiKey must be redacted');
+  assert.ok(!json.includes(fixtureAlpha), 'diag token must be redacted');
+  assert.ok(!json.includes(fixtureZeta), 'webhook secret must be redacted');
 });
 
 test('getHistory reads loadHistory (migrated mode: loadConfig().history is empty)', () => {
@@ -91,8 +88,8 @@ test('getHistory falls back to loadConfig().history when loadHistory is absent (
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
   const { collectors } = makeFixture();
   const dbg = collectors.readLog({ name: 'debug', tailKb: 64 });
-  assert.ok(!dbg.content.includes(fixtureSecrets.diagnosticToken), 'value-scrub removes the live diag token from logs');
-  assert.ok(!dbg.content.includes(fixtureSecrets.bearerToken), 'pattern-scrub removes Authorization Bearer');
+  assert.ok(!dbg.content.includes('SECRETTOKEN123456'), 'value-scrub removes the live diag token from logs');
+  assert.ok(!/Bearer abcdef123456/.test(dbg.content), 'pattern-scrub removes Authorization Bearer');
   assert.equal(collectors.readLog({ name: 'doodstreamDebug' }).ok, false, 'doodstream-debug.log is not in the readable allowlist');
   assert.equal(collectors.readLog({ name: '../../etc/passwd' }).ok, false, 'arbitrary names are rejected (no path traversal)');
   assert.equal(collectors.readLog({ name: 'crash' }).name, 'crash');
@@ -131,11 +128,10 @@ test('getQueueState flags stale=true for the persisted snapshot and counts by st
 });
 
 test('getQueueState (includeJobs default) pattern-scrubs an opaque token in a job error that is NOT a config secret', () => {
-  const opaqueToken = ['fixture', 'opaque', 'token', '9988'].join('_');
   const config = {
     hosters: {}, hosterSettings: {},
     globalSettings: { pendingQueue: { savedAt: 1, selectedUploadHosters: [], selectedFiles: [], queueJobs: [
-      { file: 'C:/b.mkv', fileName: 'b.mkv', hoster: 'streamtape', status: 'error', error: `upload rejected: token=${opaqueToken}` }
+      { file: 'C:/b.mkv', fileName: 'b.mkv', hoster: 'streamtape', status: 'error', error: 'upload rejected: token=OPAQUE_NONconfig_TOKEN_9988' }
     ] } },
     history: [], rotationCursors: {}
   };
@@ -147,7 +143,7 @@ test('getQueueState (includeJobs default) pattern-scrubs an opaque token in a jo
   });
   const q = collectors.getQueueState({});
   const json = JSON.stringify(q);
-  assert.ok(!json.includes(opaqueToken), 'opaque token in a job error must be pattern-scrubbed even on the default includeJobs path');
+  assert.ok(!json.includes('OPAQUE_NONconfig_TOKEN_9988'), 'opaque token in a job error must be pattern-scrubbed even on the default includeJobs path');
 });
 
 test('listErrors classifies via stats.classifyErrorCategory and redacts error text', () => {
@@ -162,5 +158,5 @@ test('serverHealth assembles the one-shot hub without leaking secrets', () => {
   const h = collectors.serverHealth({});
   const json = JSON.stringify(h);
   assert.ok(h.server && h.queue && h.errors && h.logs, 'hub has all sections');
-  assert.ok(!json.includes(fixtureSecrets.password) && !json.includes(fixtureSecrets.diagnosticToken) && !json.includes(fixtureSecrets.webhookToken), 'no secret leaks in server_health');
+  assert.ok(!json.includes('HUNTER2SECRET') && !json.includes('SECRETTOKEN123456') && !json.includes('WBHOOKSECRETTOKEN'), 'no secret leaks in server_health');
 });

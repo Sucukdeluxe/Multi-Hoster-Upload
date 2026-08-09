@@ -67,6 +67,30 @@ describe('UploadManager', () => {
     assert.ok(events.length > 0, 'should emit at least one progress event');
   });
 
+  it('replaces account pools and clears cached account state after an import', () => {
+    const mgr = new UploadManager({}, {}, {
+      'byse.sx': [{ id: 'old', apiKey: 'old-key' }]
+    });
+    mgr.switchAccount('byse.sx', { id: 'fallback', apiKey: 'fallback-key' });
+    mgr._failedAccounts.set('byse.sx:old', true);
+    mgr._suspectSizeMemo.set('byse.sx:old', { size: 1, count: 2 });
+    mgr._suspectGoodAccounts.set('byse.sx', 'old');
+    mgr._doodApiKeyCache.set('old', 'cached-key');
+    mgr._baselineCache.set('byse.sx:old-key', Promise.resolve(new Set()));
+
+    mgr.replaceAccountPools({
+      'byse.sx': [{ id: 'new', apiKey: 'new-key' }]
+    });
+
+    assert.deepEqual(mgr.accountPools['byse.sx'], [{ id: 'new', apiKey: 'new-key' }]);
+    assert.equal(mgr.getFailedAccountKeys().length, 0);
+    assert.equal(mgr.getOverride('byse.sx'), null);
+    assert.equal(mgr._suspectSizeMemo.size, 0);
+    assert.equal(mgr._suspectGoodAccounts.size, 0);
+    assert.equal(mgr._doodApiKeyCache.size, 0);
+    assert.equal(mgr._baselineCache.size, 0);
+  });
+
   it('emits batch-done with correct summary', async () => {
     const mgr = new UploadManager({});
     let summary = null;

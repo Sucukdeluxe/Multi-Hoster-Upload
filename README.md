@@ -13,6 +13,7 @@ Multi-Hoster-Upload is a Windows desktop app for managing large file batches acr
 - Add files by drag and drop or file selection and monitor live queue progress.
 - Control per-hoster concurrency, bandwidth limits, retries, and folder monitoring.
 - Keep local upload history and copy completed links in bulk.
+- Transfer accounts and settings with a 75-character encrypted online key while encryption and decryption stay on the client.
 
 ## Supported hosters
 
@@ -32,7 +33,7 @@ Multi-Hoster-Upload is a Windows desktop app for managing large file batches acr
 
 ## Local data and credentials
 
-Settings, queue state, and upload history are stored locally in the app's user-data directory. Hoster passwords and API keys are encrypted with Electron safeStorage before being written when operating-system encryption is available; on Windows this uses DPAPI for the current user profile.
+Settings, queue state, and upload history are stored locally in the app's user-data directory. Hoster passwords and API keys are encrypted with Electron safeStorage before being written when operating-system encryption is available; on Windows this uses DPAPI for the current user profile. Online backups are optional, contain accounts and settings only, and are encrypted on the client before the server receives them. Upload history and queue state remain on the original device.
 
 ## Development
 

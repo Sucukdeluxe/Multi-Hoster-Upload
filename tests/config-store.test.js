@@ -254,6 +254,40 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.alwaysOnTop, true);
   });
 
+  it('serializes a complete settings replacement with pending saves', async () => {
+    const originalAtomicWrite = store._atomicWrite.bind(store);
+    let activeWrites = 0;
+    let maximumActiveWrites = 0;
+    store._atomicWrite = async (data) => {
+      activeWrites += 1;
+      maximumActiveWrites = Math.max(maximumActiveWrites, activeWrites);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      try {
+        await originalAtomicWrite(data);
+      } finally {
+        activeWrites -= 1;
+      }
+    };
+
+    const save = store.save({ globalSettings: { alwaysOnTop: true, pendingQueue: { savedAt: 123, queueJobs: [{ id: 'local' }] } } });
+    const replace = store.replaceSettings({
+      hosters: { 'byse.sx': [{ id: 'imported', enabled: true, authType: 'api', apiKey: 'imported-key' }] },
+      hosterSettings: { 'byse.sx': { retries: 9 } },
+      globalSettings: { alwaysOnTop: false, pendingQueue: null },
+      history: [],
+      rotationCursors: {}
+    });
+
+    await Promise.all([save, replace]);
+    const config = store.load();
+    assert.equal(maximumActiveWrites, 1);
+    assert.equal(config.hosters['byse.sx'][0].apiKey, 'imported-key');
+    assert.equal(config.hosterSettings['byse.sx'].retries, 9);
+    assert.equal(config.globalSettings.alwaysOnTop, false);
+    assert.deepEqual(config.globalSettings.pendingQueue, { savedAt: 123, queueJobs: [{ id: 'local' }] });
+    assert.deepEqual(config.rotationCursors, {});
+  });
+
   it('load() returns independent clones — mutating one result must not leak into the cache', () => {
     store.load(); // warm the cache
     const a = store.load();

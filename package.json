@@ -1,11 +1,12 @@
 {
   "name": "multi-hoster-uploader",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Upload files to doodstream, voe, vidmoly, byse simultaneously",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test tests/*.test.js tests/ui-smoke.js",
+    "test:backup-api": "npm --prefix services/backup-api test",
     "dist": "electron-builder --win",
     "release:win": "electron-builder --publish never --win nsis portable",
     "release:gitea": "node scripts/release_gitea.mjs"
@@ -32,6 +33,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "preload-drop-target.js",
       "lib/**/*",
       "renderer/**/*",
       "assets/app_icon.ico",

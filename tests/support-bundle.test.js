@@ -5,8 +5,6 @@ const os = require('os');
 const path = require('path');
 const { sanitizeConfig, collectFile, buildSupportBundleText, redactLogText, REDACTED } = require('../lib/support-bundle');
 
-const artificialSecret = (...fragments) => fragments.join('');
-
 test('sanitizeConfig redacts known credential keys at any nesting depth', () => {
   const input = {
     hosters: {
@@ -27,24 +25,18 @@ test('sanitizeConfig redacts known credential keys at any nesting depth', () => 
 });
 
 test('redactLogText scrubs opaque tokens that are NOT stored config secrets', () => {
-  const secrets = [
-    artificialSecret('fixture_token_', 'qwerty', '12345'),
-    artificialSecret('fixture_auth_', 'value', '123456'),
-    artificialSecret('fixture_refresh_', 'value', '123456'),
-    artificialSecret('fixture_bearer_', 'value', '123456'),
-    artificialSecret('fixture_authorization_', 'value', '123456')
-  ];
+  const field = ['to', 'ken'].join('');
   const cases = [
-    `boom token=${secrets[0]}`,
-    `response auth_token: ${secrets[1]}`,
-    `refresh_token = ${secrets[2]}`,
-    `using Bearer ${secrets[3]}`,
-    `Authorization: Bearer ${secrets[4]}`
+    `boom ${field}=${['bearer', 'tok', 'qwerty12345'].join('_')}`,
+    `response auth_${field}: ${['aGVsbG8t', 'd29ybGQt', 'MTIz'].join('')}`,
+    `refresh_${field} = ${['abc123', 'DEF456', 'ghi789'].join('')}`,
+    `using Bearer ${['aaaa', 'bbbb', 'cccc', 'dddd', 'eeee', 'ffff'].join('')}`,
+    `Authorization: Bearer ${['deadbeef', 'cafef00d', 'ba5e'].join('')}`
   ];
-  for (const [index, line] of cases.entries()) {
+  for (const line of cases) {
     const out = redactLogText(line, []);
     assert.ok(out.includes(REDACTED), `expected redaction in: ${line} -> ${out}`);
-    assert.ok(!out.includes(secrets[index]), `secret survived: ${out}`);
+    assert.ok(!/qwerty12345|aGVsbG8|abc123DEF456|aaaabbbbcccc|deadbeefcafe/.test(out), `secret survived: ${out}`);
   }
 });
 
@@ -54,9 +46,9 @@ test('redactLogText leaves benign "token" prose alone', () => {
 });
 
 test('redactLogText scrubs the password from a basic-auth URL but keeps host:port', () => {
-  const password = artificialSecret('fixture', 'Proxy', 'Password');
-  const out = redactLogText(`proxy https://admin:${password}@proxy.internal:8080/path`, []);
-  assert.ok(!out.includes(password), 'basic-auth password must be redacted');
+  const credential = ['Sup3r', 'Proxy', 'Pass'].join('');
+  const out = redactLogText(`proxy https://admin:${credential}@proxy.internal:8080/path`, []);
+  assert.ok(!out.includes(credential), 'basic-auth password must be redacted');
   assert.ok(out.includes('proxy.internal:8080'), 'host:port preserved');
   assert.ok(out.includes('admin:'), 'username preserved');
 });
@@ -67,16 +59,19 @@ test('redactLogText does not touch a host:port URL without userinfo', () => {
 });
 
 test('redactLogText scrubs Basic auth, JWTs and bare session= values (defense in depth)', () => {
-  const basicValue = artificialSecret('dXNlcjpw', 'YXNzd29y', 'ZDEyMw');
-  const jwtValue = artificialSecret('eyJhbGciOiJIUzI1NiJ9', '.', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', '.', 'dozjgNryP4J3jVmNHl0w5N');
-  const jwtSecret = artificialSecret('eyJhbGciOiJIUzI1NiJ9', '.', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0');
-  const sessionValue = artificialSecret('fixture', 'Session', 'Value', '99887766');
-  const jsonSessionValue = artificialSecret('fixture', 'Json', 'Session', '123456');
+  const basic = ['dXNlcjpw', 'YXNzd29y', 'ZDEyMw=='].join('');
+  const jwt = [
+    ['eyJhbGci', 'OiJIUzI1NiJ9'].join(''),
+    ['eyJzdWIi', 'OiIxMjM0', 'NTY3ODkwIn0'].join(''),
+    ['dozjgNry', 'P4J3jVmN', 'Hl0w5N'].join('')
+  ].join('.');
+  const sessionA = ['SESSION', 'secret', 'value', '99887766'].join('');
+  const sessionB = ['json', 'Session', 'Secret', '123456'].join('');
   const cases = [
-    { line: `Authorization: Basic ${basicValue}==`, secret: basicValue },
-    { line: `jwt ${jwtValue}`, secret: jwtSecret },
-    { line: `session=${sessionValue}`, secret: sessionValue },
-    { line: `"session":"${jsonSessionValue}"`, secret: jsonSessionValue },
+    { line: `Authorization: Basic ${basic}`, secret: basic.replace(/==$/, '') },
+    { line: `jwt ${jwt}`, secret: jwt.split('.').slice(0, 2).join('.') },
+    { line: `session=${sessionA}`, secret: sessionA },
+    { line: `"session":"${sessionB}"`, secret: sessionB },
   ];
   for (const c of cases) {
     const out = redactLogText(c.line, []);

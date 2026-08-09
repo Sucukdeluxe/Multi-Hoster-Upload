@@ -104,6 +104,7 @@ const queuePersistThrottle = (window.ThrottleTimer && window.ThrottleTimer.makeT
     })();
 let _restoredSnapshotSavedAt = null;
 let settingsSaveTimer = null;
+const settingsSaveCoordinator = window.SerializedRunner.createSerializedRunner(performSaveSettings);
 let lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: 0, elapsed: 0, activeJobs: 0 };
 const AUTO_CHECK_PREF_KEY = 'autoHealthCheckBeforeUpload';
 const QUEUE_COL_WIDTHS_KEY = 'queueColumnWidthsPx';
@@ -453,6 +454,8 @@ async function _handleMenuAction(action) {
     case 'add-folder': document.getElementById('addFolderBtn')?.click(); break;
     case 'backup-export': doBackupExport(); break;
     case 'backup-import': doBackupImport(); break;
+    case 'online-backup-create': doOnlineBackupCreate(); break;
+    case 'online-backup-restore': openOnlineBackupRestore(); break;
     case 'restart': if (confirm('Anwendung neu starten?')) window.api.restartApp(); break;
     case 'quit': window.api.quitApp(); break;
     case 'open-settings': document.querySelector('.tab[data-view="settings"]')?.click(); break;
@@ -1829,10 +1832,107 @@ function copySelectedRecentLinks() {
 // --- Backup export / import ---
 async function doBackupExport() {
   try {
+    await flushPendingSettingsSaves();
     const result = await window.api.exportBackup();
     if (result && result.ok) showCopyToast('Backup exportiert');
   } catch (err) {
     alert('Export fehlgeschlagen: ' + (err.message || err));
+  }
+}
+
+function applyImportedConfig(importedConfig, message) {
+  config = importedConfig;
+  hosterSettings = config.hosterSettings || {};
+  ensureAccountStatusEntries();
+  syncSelectedUploadHosters();
+  alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
+  window.api.setAlwaysOnTop(alwaysOnTopState);
+  renderSettings();
+  renderAccounts();
+  renderHosterSummary();
+  renderHosterModal();
+  loadHistory();
+  showCopyToast(message);
+}
+
+function setOnlineBackupStatus(message, state = '') {
+  const status = document.getElementById('onlineBackupStatus');
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.state = state;
+}
+
+function setOnlineBackupBusy(busy) {
+  const createButton = document.getElementById('createOnlineBackupBtn');
+  const restoreButton = document.getElementById('restoreOnlineBackupBtn');
+  if (createButton) createButton.disabled = busy;
+  if (restoreButton) restoreButton.disabled = busy || !/^MHU2-[A-Za-z0-9_-]{70}$/.test(document.getElementById('onlineBackupKeyInput')?.value.trim() || '');
+}
+
+async function doOnlineBackupCreate() {
+  if (doOnlineBackupCreate.busy) return;
+  doOnlineBackupCreate.busy = true;
+  try {
+    await flushPendingSettingsSaves();
+    openOnlineBackupView();
+  } catch (error) {
+    openOnlineBackupView();
+    setOnlineBackupStatus(error.message || String(error), 'error');
+    doOnlineBackupCreate.busy = false;
+    return;
+  }
+  setOnlineBackupBusy(true);
+  setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy');
+  try {
+    const result = await window.api.createOnlineBackup();
+    if (!result || !result.ok) throw new Error(result?.error || 'Online-Sicherung konnte nicht erstellt werden');
+    const output = document.getElementById('onlineBackupKeyOutput');
+    const copyButton = document.getElementById('copyOnlineBackupKeyBtn');
+    if (output) output.value = result.key;
+    if (copyButton) copyButton.disabled = false;
+    setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success');
+    showCopyToast('Online-Schlüssel erstellt');
+  } catch (error) {
+    setOnlineBackupStatus(error.message || String(error), 'error');
+  } finally {
+    setOnlineBackupBusy(false);
+    doOnlineBackupCreate.busy = false;
+  }
+}
+
+function openOnlineBackupView(focusRestore = false) {
+  document.querySelector('.tab[data-view="settings"]')?.click();
+  document.querySelector('[data-subtab="backup"]')?.click();
+  if (focusRestore) document.getElementById('onlineBackupKeyInput')?.focus();
+}
+
+function openOnlineBackupRestore() {
+  openOnlineBackupView(true);
+}
+
+async function doOnlineBackupRestore() {
+  const input = document.getElementById('onlineBackupKeyInput');
+  const key = input?.value.trim() || '';
+  if (!/^MHU2-[A-Za-z0-9_-]{70}$/.test(key)) {
+    setOnlineBackupStatus('Der Schlüssel muss mit MHU2- beginnen und exakt 75 Zeichen lang sein.', 'error');
+    input?.focus();
+    return;
+  }
+  setOnlineBackupBusy(true);
+  setOnlineBackupStatus('Speichere aktuelle Einstellungen…', 'busy');
+  try {
+    await flushPendingSettingsSaves();
+    setOnlineBackupStatus('Lade und entschlüssele Einstellungen…', 'busy');
+    const result = await window.api.restoreOnlineBackup(key);
+    if (!result || !result.ok) throw new Error(result?.error || 'Online-Sicherung konnte nicht importiert werden');
+    applyImportedConfig(result.config, 'Online-Backup importiert');
+    const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+    if (warnings.length) setOnlineBackupStatus(`Einstellungen übernommen. Bitte prüfen: ${warnings.join(', ')}.`, 'warning');
+    else setOnlineBackupStatus('Alle Accounts und Einstellungen wurden übernommen.', 'success');
+  } catch (error) {
+    setOnlineBackupStatus(error.message || String(error), 'error');
+  } finally {
+    setOnlineBackupBusy(false);
   }
 }
 
@@ -1906,6 +2006,7 @@ function askLegacyBackupPassword(hint) {
 async function doBackupImport(legacyPassword) {
   const pw = typeof legacyPassword === 'string' ? legacyPassword : undefined;
   try {
+    await flushPendingSettingsSaves();
     const result = await window.api.importBackup(pw);
     if (!result || result.canceled) return;
     if (result.needsPassword) {
@@ -1914,16 +2015,10 @@ async function doBackupImport(legacyPassword) {
       return;
     }
     if (result.ok) {
-      config = result.config;
-      hosterSettings = config.hosterSettings || {};
-      alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
-      window.api.setAlwaysOnTop(alwaysOnTopState);
-      renderSettings();
-      renderAccounts();
-      renderHosterSummary();
-      renderHosterModal();
-      loadHistory();
-      showCopyToast('Backup importiert');
+      applyImportedConfig(result.config, 'Backup importiert');
+      if (Array.isArray(result.warnings) && result.warnings.length) {
+        alert(`Backup importiert. Bitte prüfen: ${result.warnings.join(', ')}.`);
+      }
     } else if (result.error) {
       alert('Import fehlgeschlagen: ' + result.error);
     }
@@ -3339,10 +3434,33 @@ function renderSettings() {
   `;
 
   pages.backup.innerHTML = `
-      <p class="hint" style="margin:0 0 10px">Alle Accounts und Einstellungen exportieren oder importieren. Der Upload-Verlauf bleibt lokal und wird nicht übertragen; nach einem Import ist der Verlauf-Tab leer.</p>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-secondary" id="exportBackupBtn">Backup exportieren</button>
-        <button class="btn btn-secondary" id="importBackupBtn">Backup importieren</button>
+      <p class="hint" style="margin:0 0 10px">Alle Accounts und Einstellungen exportieren oder importieren. Der Upload-Verlauf wird nicht übertragen und bleibt auf diesem Gerät.</p>
+      <section class="online-backup-panel" aria-labelledby="onlineBackupHeading">
+        <div>
+          <h3 id="onlineBackupHeading">Verschlüsseltes Online-Backup</h3>
+          <p>Die Verschlüsselung findet ausschließlich auf diesem Gerät statt. Der Server speichert nur verschlüsselte Daten.</p>
+        </div>
+        <div class="online-backup-action">
+          <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
+          <span class="hint">Jeder Export erzeugt einen neuen Schlüssel. Ältere Schlüssel bleiben gültig.</span>
+        </div>
+        <div class="online-backup-key-row">
+          <label for="onlineBackupKeyOutput">Dein neuer Schlüssel</label>
+          <input type="text" class="key-input" id="onlineBackupKeyOutput" readonly spellcheck="false" autocomplete="off" placeholder="Nach dem Export erscheint hier der 75-stellige Schlüssel">
+          <button class="btn btn-secondary" id="copyOnlineBackupKeyBtn" disabled>Kopieren</button>
+        </div>
+        <div class="online-backup-key-row">
+          <label for="onlineBackupKeyInput">Vorhandenen Schlüssel importieren</label>
+          <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
+          <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Online importieren</button>
+        </div>
+        <p class="online-backup-warning">Behandle den Schlüssel wie ein Passwort. Wer ihn besitzt, kann die verschlüsselten Einstellungen entschlüsseln.</p>
+        <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
+      </section>
+      <div class="settings-section-label">Lokales Datei-Backup</div>
+      <div class="backup-file-actions">
+        <button class="btn btn-secondary" id="exportBackupBtn">Datei exportieren</button>
+        <button class="btn btn-secondary" id="importBackupBtn">Datei importieren</button>
       </div>
   `;
 
@@ -3574,6 +3692,20 @@ function renderSettings() {
 
   document.getElementById('exportBackupBtn').addEventListener('click', () => doBackupExport());
   document.getElementById('importBackupBtn').addEventListener('click', () => doBackupImport());
+  document.getElementById('createOnlineBackupBtn').addEventListener('click', () => doOnlineBackupCreate());
+  document.getElementById('copyOnlineBackupKeyBtn').addEventListener('click', async () => {
+    const key = document.getElementById('onlineBackupKeyOutput').value;
+    if (!key) return;
+    await window.api.copyToClipboard(key);
+    showCopyToast('Online-Schlüssel kopiert');
+  });
+  document.getElementById('onlineBackupKeyInput').addEventListener('input', (event) => {
+    const valid = /^MHU2-[A-Za-z0-9_-]{70}$/.test(event.target.value.trim());
+    document.getElementById('restoreOnlineBackupBtn').disabled = !valid;
+    if (event.target.value && !valid) setOnlineBackupStatus('Der Schlüssel muss exakt 75 Zeichen lang sein.', '');
+    else setOnlineBackupStatus('', '');
+  });
+  document.getElementById('restoreOnlineBackupBtn').addEventListener('click', () => doOnlineBackupRestore());
 
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
@@ -3613,13 +3745,18 @@ function scheduleSettingsSave() {
   if (feedback) feedback.textContent = 'Speichert...';
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(() => {
+    settingsSaveTimer = null;
     saveSettings({ feedbackText: 'Automatisch gespeichert' }).catch((err) => {
       if (feedback) feedback.textContent = `Speichern fehlgeschlagen: ${err.message}`;
     });
   }, 350);
 }
 
-async function saveSettings(options = {}) {
+function saveSettings(options = {}) {
+  return settingsSaveCoordinator.run(options);
+}
+
+async function performSaveSettings(options = {}) {
   const { feedbackText = 'Gespeichert!' } = options;
   const newHosterSettings = { ...(config.hosterSettings || {}) };
   const cur = config.globalSettings || {};
@@ -3721,6 +3858,7 @@ async function saveSettings(options = {}) {
   config.globalSettings = globalSettings;
   hosterSettings = newHosterSettings;
   clearTimeout(settingsSaveTimer);
+  settingsSaveTimer = null;
 
   // Start/stop folder monitor based on settings
   const fmSettings = globalSettings.folderMonitor;
@@ -3949,12 +4087,20 @@ function _hosterGroupOpenState(name, summary) {
 const _hosterGroupOpenMemory = new Map();
 
 let _hosterSettingsSaveTimer = null;
+const hosterSettingsSaveCoordinator = window.SerializedRunner.createSerializedRunner(performHosterSettingsSave);
 function scheduleHosterSettingsSave() {
   clearTimeout(_hosterSettingsSaveTimer);
-  _hosterSettingsSaveTimer = setTimeout(() => { saveHosterSettingsFromDom().catch(() => {}); }, 350);
+  _hosterSettingsSaveTimer = setTimeout(() => {
+    _hosterSettingsSaveTimer = null;
+    saveHosterSettingsFromDom().catch(() => {});
+  }, 350);
 }
 
-async function saveHosterSettingsFromDom() {
+function saveHosterSettingsFromDom() {
+  return hosterSettingsSaveCoordinator.run();
+}
+
+async function performHosterSettingsSave() {
   const newHosterSettings = { ...(config.hosterSettings || {}) };
   for (const name of HOSTERS) {
     const inputs = document.querySelectorAll(`.account-hoster-settings-body .hs-input[data-hoster="${name}"]`);
@@ -3971,6 +4117,19 @@ async function saveHosterSettingsFromDom() {
   await window.api.saveHosterSettings(newHosterSettings);
   config.hosterSettings = newHosterSettings;
   hosterSettings = newHosterSettings;
+}
+
+async function flushPendingSettingsSaves() {
+  await Promise.all([settingsSaveCoordinator.flush(), hosterSettingsSaveCoordinator.flush()]);
+  const flushSettings = settingsSaveTimer !== null;
+  const flushHosters = _hosterSettingsSaveTimer !== null;
+  clearTimeout(settingsSaveTimer);
+  clearTimeout(_hosterSettingsSaveTimer);
+  settingsSaveTimer = null;
+  _hosterSettingsSaveTimer = null;
+  if (flushSettings) await saveSettings({ feedbackText: 'Automatisch gespeichert' });
+  if (flushHosters) await saveHosterSettingsFromDom();
+  await Promise.all([settingsSaveCoordinator.flush(), hosterSettingsSaveCoordinator.flush()]);
 }
 
 function _buildHosterSettingsHtml(name) {

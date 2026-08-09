@@ -68,6 +68,8 @@ contextBridge.exposeInMainWorld('api', {
   // Backup
   exportBackup: () => ipcRenderer.invoke('export-backup'),
   importBackup: (legacyPassword) => ipcRenderer.invoke('import-backup', legacyPassword),
+  createOnlineBackup: () => ipcRenderer.invoke('online-backup:create'),
+  restoreOnlineBackup: (key) => ipcRenderer.invoke('online-backup:restore', key),
 
   // Folder Monitor
   folderMonitorStart: (settings) => ipcRenderer.invoke('folder-monitor:start', settings),

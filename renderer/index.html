@@ -19,6 +19,8 @@
           <div class="menu-submenu-dropdown" style="display:none">
             <button class="menu-dropdown-item" data-menu-action="backup-export"><span>Exportieren</span></button>
             <button class="menu-dropdown-item" data-menu-action="backup-import"><span>Importieren</span></button>
+            <button class="menu-dropdown-item" data-menu-action="online-backup-create"><span>Online-Schlüssel erstellen</span></button>
+            <button class="menu-dropdown-item" data-menu-action="online-backup-restore"><span>Online-Schlüssel importieren</span></button>
           </div>
         </div>
         <div class="menu-separator"></div>
@@ -421,6 +423,7 @@
   <script src="../lib/throttled-cache.js"></script>
   <script src="../lib/coalesced-set.js"></script>
   <script src="../lib/throttle-timer.js"></script>
+  <script src="../lib/serialized-runner.js"></script>
   <script src="account-submit.js"></script>
   <script src="app.js"></script>
 </body>

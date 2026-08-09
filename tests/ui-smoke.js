@@ -9,7 +9,7 @@ if (!process.env.RUN_UI_SMOKE) {
   return;
 }
 
-const { execSync } = require('child_process');
+const { execFileSync, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -178,6 +178,25 @@ setTimeout(async () => {
     const parallel = await wc.executeJavaScript('document.getElementById("parallelUploadCountInput")?.value');
     check('Global parallel uploads default 0', parallel === '0');
 
+    await wc.executeJavaScript('document.querySelector("[data-subtab=\\'backup\\']").click()');
+    const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "onlineBackupKeyOutput", "copyOnlineBackupKeyBtn", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id)))');
+    check('Online backup controls exist', onlineBackupControls);
+
+    const onlineBackupKeyContract = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput")?.maxLength + "|" + document.getElementById("onlineBackupKeyInput")?.getAttribute("pattern")');
+    check('Online backup input enforces the 75-character MHU key format', onlineBackupKeyContract === '75|MHU2-[A-Za-z0-9_-]{70}');
+
+    const onlineBackupBridge = await wc.executeJavaScript('typeof window.api.createOnlineBackup + "|" + typeof window.api.restoreOnlineBackup');
+    check('Online backup uses a narrow preload bridge', onlineBackupBridge === 'function|function');
+
+    const invalidOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-short"; document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled + "|" + document.getElementById("onlineBackupStatus").textContent');
+    check('Invalid online backup keys stay blocked with visible guidance', invalidOnlineBackup === 'true|Der Schlüssel muss exakt 75 Zeichen lang sein.');
+
+    const validOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-" + "A".repeat(70); document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled');
+    check('Valid 75-character online backup keys enable restore', validOnlineBackup === false);
+
+    const onlineRestoreNavigation = await wc.executeJavaScript('_handleMenuAction("online-backup-restore"); document.activeElement?.id + "|" + document.querySelector(".settings-subtab.active")?.dataset.subtab');
+    check('Online restore menu opens the backup page and focuses the key', onlineRestoreNavigation === 'onlineBackupKeyInput|backup');
+
     // Test save
     await wc.executeJavaScript('document.getElementById("saveSettingsBtn").click()');
     await new Promise(r => setTimeout(r, 500));
@@ -222,6 +241,7 @@ setTimeout(async () => {
 // Write the injection script
 const injectPath = path.join(__dirname, '_ui-inject.tmp.js');
 fs.writeFileSync(injectPath, testScript, 'utf-8');
+execFileSync(process.execPath, ['--check', injectPath], { cwd: path.join(__dirname, '..'), stdio: 'pipe' });
 
 // Run the real app with the injection
 try {

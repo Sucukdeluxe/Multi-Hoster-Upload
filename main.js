@@ -17,6 +17,9 @@ const { createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, installUpdate, abortUpdate } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
+const { createOnlineBackup, downloadOnlineBackup, uploadOnlineBackup } = require('./lib/online-backup');
+const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
+const { createSettingsImportGate } = require('./lib/settings-import-gate');
 const FolderMonitor = require('./lib/folder-monitor');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
@@ -96,6 +99,7 @@ let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
+const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
 let diagnosticAgent = null;
 let _diagHandler = null;
 
@@ -1721,6 +1725,7 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
 });
 
 ipcMain.handle('start-upload', (_event, payload) => {
+  if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
   const config = configStore.load();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
@@ -2207,6 +2212,83 @@ ipcMain.handle('clear-history', async () => {
   return true;
 });
 
+async function syncImportedRuntime(config) {
+  const warnings = [];
+  try {
+    setLogVerbose(!!config.globalSettings.logVerbose);
+    if (uploadManager) {
+      uploadManager.updateSettings(config.hosterSettings, config.globalSettings);
+      uploadManager.replaceAccountPools(buildAccountPools(config));
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(!!config.globalSettings.alwaysOnTop);
+  } catch (error) {
+    debugLog(`backup runtime settings failed: ${error.message}`);
+    warnings.push('allgemeine Laufzeiteinstellungen');
+  }
+  try {
+    folderMonitor.stop();
+    const folderSettings = config.globalSettings.folderMonitor;
+    if (folderSettings && folderSettings.enabled && folderSettings.folderPath) startFolderMonitor(folderSettings);
+  } catch (error) {
+    debugLog(`backup folder monitor sync failed: ${error.message}`);
+    warnings.push('Ordnerüberwachung');
+  }
+  try {
+    const remoteSettings = config.globalSettings.remote;
+    if (remoteSettings && remoteSettings.enabled) await startRemoteServer();
+    else if (remoteServer) {
+      remoteServer.stop();
+      remoteServer = null;
+      destroyCaptureWindow();
+    }
+  } catch (error) {
+    debugLog(`backup remote sync failed: ${error.message}`);
+    warnings.push('Remote-Steuerung');
+  }
+  try {
+    const diagnostics = config.globalSettings.diagnostics;
+    if (diagnostics && diagnostics.enabled) await startDiagnosticAgent();
+    else stopDiagnosticAgent();
+  } catch (error) {
+    debugLog(`backup diagnostics sync failed: ${error.message}`);
+    warnings.push('Diagnose');
+  }
+  try {
+    if (config.globalSettings.showDropTarget) createDropTargetWindow();
+    else destroyDropTargetWindow();
+  } catch (error) {
+    debugLog(`backup drop target sync failed: ${error.message}`);
+    warnings.push('Drop-Target');
+  }
+  return warnings;
+}
+
+async function applyImportedSettings(imported) {
+  settingsImportGate.begin();
+  try {
+    const prepared = prepareImportedSettings(imported);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
+    try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
+    await configStore.replaceSettings(prepared);
+    _rotationCursors = {};
+    _sessionFailedAccounts.clear();
+    _sessionAccountOverrides.clear();
+    _invalidateLogSettings();
+    const config = configStore.load();
+    const warnings = await syncImportedRuntime(config);
+    return { config, warnings };
+  } finally {
+    settingsImportGate.end();
+  }
+}
+
+function readBackupFile(filePath) {
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error('Backup-Datei ist zu groß oder ungültig');
+  return fs.readFileSync(filePath);
+}
+
 // --- Backup export / import ---
 ipcMain.handle('export-backup', async () => {
   const _bd = new Date();
@@ -2220,8 +2302,7 @@ ipcMain.handle('export-backup', async () => {
     ]
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
-  const config = configStore.load();
-  config.history = [];
+  const config = createPortableSettingsSnapshot(configStore.load());
   if (filePath.toLowerCase().endsWith('.json')) {
     fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf-8');
   } else {
@@ -2235,7 +2316,7 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
   let buffer;
   let sourcePath = _lastImportPath;
   if (legacyPassword && sourcePath) {
-    buffer = fs.readFileSync(sourcePath);
+    buffer = readBackupFile(sourcePath);
   } else {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
       title: 'Backup importieren',
@@ -2248,7 +2329,7 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
     });
     if (canceled || !filePaths.length) return { ok: false, canceled: true };
     sourcePath = filePaths[0];
-    buffer = fs.readFileSync(sourcePath);
+    buffer = readBackupFile(sourcePath);
     _lastImportPath = sourcePath;
   }
   let imported;
@@ -2273,40 +2354,33 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
     }
   }
   _lastImportPath = null;
-  // Validate imported data has required structure
-  if (!imported || typeof imported !== 'object' || !imported.hosters || !imported.hosterSettings || !imported.globalSettings) {
-    return { ok: false, error: 'Backup-Datei hat ungültige Struktur (hosters, hosterSettings oder globalSettings fehlt).' };
+  try {
+    return { ok: true, ...await applyImportedSettings(imported) };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
   }
-  // Safety net: timestamped backup so multiple imports don't overwrite each other
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
-  try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
-  // Strip machine-specific state: absolute paths from the source machine will
-  // not exist on this one (e.g. C:\Users\Administrator\... vs \bakeredwin318\...).
-  // Any path that does not resolve locally is cleared so the user can re-set it
-  // instead of hitting silent failures later.
-  const importedGlobal = imported.globalSettings || {};
-  if (importedGlobal.logFilePath && !fs.existsSync(path.dirname(importedGlobal.logFilePath))) {
-    importedGlobal.logFilePath = '';
+});
+
+ipcMain.handle('online-backup:create', async () => {
+  try {
+    const snapshot = createPortableSettingsSnapshot(configStore.load());
+    const created = createOnlineBackup(snapshot, app.getVersion());
+    await uploadOnlineBackup(created.record);
+    return { ok: true, key: created.key };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
   }
-  if (importedGlobal.folderMonitor && typeof importedGlobal.folderMonitor === 'object') {
-    const fm = importedGlobal.folderMonitor;
-    if (fm.folderPath && !fs.existsSync(fm.folderPath)) {
-      fm.folderPath = '';
-      fm.enabled = false;
-    }
+});
+
+ipcMain.handle('online-backup:restore', async (_event, key) => {
+  try {
+    const normalized = String(key || '').trim();
+    if (normalized.length > 128) throw new Error('Online-Sicherungsschlüssel ist ungültig');
+    const payload = await downloadOnlineBackup(normalized);
+    return { ok: true, ...await applyImportedSettings(payload.settings) };
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
   }
-  importedGlobal.pendingQueue = null;
-  // Single atomic write — no split state, no TOCTOU race
-  const merged = {
-    hosters: imported.hosters,
-    hosterSettings: imported.hosterSettings,
-    globalSettings: importedGlobal,
-    history: []
-  };
-  await configStore._atomicWrite(configStore._serializeForDisk(merged));
-  _invalidateLogSettings();
-  return { ok: true, config: configStore.load() };
 });
 
 ipcMain.handle('read-own-upload-log', () => {
