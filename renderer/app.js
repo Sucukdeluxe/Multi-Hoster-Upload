@@ -3920,13 +3920,12 @@ function getCredentialLabel(name, account) {
   return 'Keine Zugangsdaten';
 }
 
-const _STATUS_LABELS = { ok: 'Bereit', warn: 'Warnung', checking: 'Prüfe...', error: 'Fehler', unchecked: 'Nicht geprüft' };
-
 function _buildAccountCardHtml(name, account, idx) {
   const isDisabled = account.enabled === false;
   const st = accountStatuses[account.id] || { status: 'unchecked', message: '' };
-  const statusLabel = isDisabled ? 'Deaktiviert' : (_STATUS_LABELS[st.status] || 'Nicht geprüft');
-  const statusClass = isDisabled ? 'disabled' : st.status;
+  const statusPresentation = window.AccountStatus.getAccountStatusPresentation(isDisabled ? 'disabled' : st.status);
+  const statusLabel = statusPresentation.label;
+  const statusClass = statusPresentation.statusClass;
   const credLabel = getCredentialLabel(name, account);
   const userLabel = account.label && String(account.label).trim();
   // Subtitle: "Label: XYZ • API: ABC… • <status>" — the user-set label is the
@@ -3940,6 +3939,12 @@ function _buildAccountCardHtml(name, account, idx) {
   const sessionPausedBadge = isSessionPaused
     ? `<span class="account-session-paused" title="Account wurde diese Session als fehlerhaft markiert. Klick = Wieder als aktiv markieren.">Pausiert (Session) <button class="account-session-reactivate" data-account-reactivate="${account.id}" data-account-reactivate-hoster="${name}" title="Wieder aktivieren">↻</button></span>`
     : '';
+  const otpAction = !isDisabled && statusPresentation.requiresOtp
+    ? `<div class="account-otp-action">
+        <input class="key-input account-otp-input" data-account-otp-input="${escapeAttr(account.id)}" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" placeholder="Code aus E-Mail">
+        <button class="btn btn-xs btn-primary" data-account-otp-submit="${escapeAttr(account.id)}">Prüfen und speichern</button>
+      </div>`
+    : '';
 
   return `
     <div class="account-card${isDisabled ? ' account-disabled' : ''}${isSessionPaused ? ' account-session-paused-card' : ''}" data-account-id="${account.id}" data-account-hoster="${name}" draggable="true">
@@ -3947,6 +3952,7 @@ function _buildAccountCardHtml(name, account, idx) {
       <div class="account-card-info">
         <div class="account-card-title">${escapeHtml(getAccountDisplayName(name, account))} <span class="account-priority-badge">${priorityLabel}</span> ${sessionPausedBadge}</div>
         <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}</div>
+        ${otpAction}
       </div>
       <span class="account-status status-${statusClass}">
         <span class="account-status-dot"></span>
@@ -3987,10 +3993,7 @@ function _refreshHosterGroupHeader(name) {
   if (!group) return;
   const accounts = config.hosters[name] || [];
   const summary = _summarizeHosterGroup(accounts);
-  let dot = 'unchecked';
-  if (summary.error > 0) dot = 'error';
-  else if (summary.checking > 0) dot = 'checking';
-  else if (summary.ok > 0 && summary.unchecked === 0) dot = 'ok';
+  const dot = window.AccountStatus.getAccountGroupStatus(summary);
   const dotEl = group.querySelector('.account-hoster-group-header .account-status-dot');
   if (dotEl) dotEl.className = `account-status-dot status-${dot}`;
   const countEl = group.querySelector('.account-hoster-group-count');
@@ -4060,16 +4063,17 @@ function renderAccounts() {
 }
 
 function _summarizeHosterGroup(accounts) {
-  let ok = 0, error = 0, checking = 0, unchecked = 0, disabled = 0;
+  let ok = 0, warn = 0, error = 0, checking = 0, unchecked = 0, disabled = 0;
   for (const a of accounts) {
     if (a.enabled === false) { disabled++; continue; }
     const s = (accountStatuses[a.id] && accountStatuses[a.id].status) || 'unchecked';
-    if (s === 'ok' || s === 'warn') ok++;
+    if (s === 'ok') ok++;
+    else if (s === 'warn' || s === 'otp_required') warn++;
     else if (s === 'error') error++;
     else if (s === 'checking') checking++;
     else unchecked++;
   }
-  return { ok, error, checking, unchecked, disabled, total: accounts.length };
+  return { ok, warn, error, checking, unchecked, disabled, total: accounts.length };
 }
 
 function _hosterGroupOpenState(name, summary) {
@@ -4192,10 +4196,7 @@ function _buildHosterSettingsHtml(name) {
 function _buildAccountHosterGroupHtml(name, accounts) {
   const summary = _summarizeHosterGroup(accounts);
   const isOpen = _hosterGroupOpenState(name, summary);
-  let dot = 'unchecked';
-  if (summary.error > 0) dot = 'error';
-  else if (summary.checking > 0) dot = 'checking';
-  else if (summary.ok > 0 && summary.unchecked === 0) dot = 'ok';
+  const dot = window.AccountStatus.getAccountGroupStatus(summary);
   const countLabel = `${summary.ok}/${summary.total}`;
   const arrow = isOpen ? '&#9660;' : '&#9654;';
   let cardsHtml = '';
@@ -4299,6 +4300,7 @@ function bindAccountListeners(container) {
     if (btn.dataset.accountEdit) return openAccountModal(btn.dataset.accountEdit);
     if (btn.dataset.accountDelete) return openDeleteAccountModal(btn.dataset.accountDelete);
     if (btn.dataset.accountCheck) return checkSingleAccount(btn.dataset.accountCheck);
+    if (btn.dataset.accountOtpSubmit) return submitAccountOtp(btn.dataset.accountOtpSubmit);
     if (btn.dataset.accountReactivate) {
       const accountId = btn.dataset.accountReactivate;
       const hoster = btn.dataset.accountReactivateHoster;
@@ -4411,6 +4413,46 @@ async function checkSingleAccount(accountId) {
     healthCheckRunning = false;
   }
   updateAccountCard(accountId);
+}
+
+async function submitAccountOtp(accountId) {
+  if (!accountId || healthCheckRunning) return;
+  const found = findAccountById(accountId);
+  if (!found || found.account.enabled === false) return;
+  const card = Array.from(document.querySelectorAll('.account-card')).find(el => el.dataset.accountId === accountId);
+  const otpInput = card?.querySelector('[data-account-otp-input]');
+  const otp = otpInput?.value.trim() || '';
+  if (otpInput) otpInput.setCustomValidity('');
+  if (!otp) {
+    if (otpInput) {
+      otpInput.setCustomValidity('Bitte den OTP-Code eingeben.');
+      otpInput.reportValidity();
+    }
+    return;
+  }
+  const submitButton = card?.querySelector('[data-account-otp-submit]');
+  healthCheckRunning = true;
+  accountStatuses[accountId] = { status: 'checking', message: 'OTP wird geprüft…' };
+  if (otpInput) otpInput.disabled = true;
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = 'Prüfe…';
+  }
+  try {
+    const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId, otp }] });
+    const row = result && Array.isArray(result.results)
+      ? result.results.find(item => item.accountId === accountId)
+      : null;
+    accountStatuses[accountId] = row
+      ? { status: row.status || 'error', message: row.message || '' }
+      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten' };
+  } catch (err) {
+    accountStatuses[accountId] = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen' };
+  } finally {
+    healthCheckRunning = false;
+    updateAccountCard(accountId);
+    renderHosterModal();
+  }
 }
 
 // Per-hoster overrides for the login form. VOE only accepts emails — the

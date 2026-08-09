@@ -7,9 +7,9 @@ const {
 } = require('../renderer/account-submit');
 
 test('account submit labels stay exact for add, edit, and OTP retries', () => {
-  assert.equal(getAccountSubmitLabel({ isEdit: false, hasOtp: false }), 'Prüfen und anlegen');
+  assert.equal(getAccountSubmitLabel({ isEdit: false, hasOtp: false }), 'Prüfen und speichern');
   assert.equal(getAccountSubmitLabel({ isEdit: true, hasOtp: false }), 'Prüfen und speichern');
-  assert.equal(getAccountSubmitLabel({ isEdit: false, hasOtp: true }), 'Prüfen und anlegen');
+  assert.equal(getAccountSubmitLabel({ isEdit: false, hasOtp: true }), 'Prüfen und speichern');
   assert.equal(getAccountSubmitLabel({ isEdit: true, hasOtp: true }), 'Prüfen und speichern');
 });
 

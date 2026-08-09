@@ -1,6 +1,6 @@
 (function (scope) {
-  function getAccountSubmitLabel({ isEdit } = {}) {
-    return isEdit ? 'Prüfen und speichern' : 'Prüfen und anlegen';
+  function getAccountSubmitLabel() {
+    return 'Prüfen und speichern';
   }
 
   async function submitValidatedAccount({ validate, commit, afterCommit, isCurrent }) {

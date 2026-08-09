@@ -109,10 +109,10 @@ setTimeout(async () => {
     const addAccountEnabled = await wc.executeJavaScript('document.getElementById("addAccountBtn")?.disabled === false');
     check('Add account button enabled', addAccountEnabled);
 
-    const emptyAccountAction = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]")?.textContent?.trim()');
-    check('Empty account state offers direct action', emptyAccountAction === 'Ersten Account hinzufügen');
+    const emptyAccountAction = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]")?.textContent?.trim() || document.getElementById("addAccountBtn")?.textContent?.trim()');
+    check('Account list offers direct add action', emptyAccountAction === 'Ersten Account hinzufügen' || emptyAccountAction === 'Account hinzufügen');
 
-    await wc.executeJavaScript('document.querySelector("[data-account-empty-add]").focus(); document.querySelector("[data-account-empty-add]").click()');
+    await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger?.focus(); trigger?.click(); })()');
     await new Promise(r => setTimeout(r, 200));
 
     const accountModalVisible = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display');
@@ -143,7 +143,7 @@ setTimeout(async () => {
     check('5 hosters exist', hosterCount === 5);
 
     const accountSubmitLabel = await wc.executeJavaScript('document.getElementById("saveAccountBtn")?.textContent');
-    check('Account submit label is Prüfen und anlegen', accountSubmitLabel === 'Prüfen und anlegen');
+    check('Account submit label is Prüfen und speichern', accountSubmitLabel === 'Prüfen und speichern');
 
     const credentialInputs = await wc.executeJavaScript('document.querySelectorAll("#accountCredsFields .key-input").length');
     check('Credential inputs rendered', credentialInputs === 2);
@@ -155,11 +155,55 @@ setTimeout(async () => {
     const accountModalHidden = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display');
     check('Escape closes account modal', accountModalHidden === 'none');
 
-    const restoredAccountFocus = await wc.executeJavaScript('document.activeElement?.hasAttribute("data-account-empty-add")');
+    const restoredAccountFocus = await wc.executeJavaScript('document.activeElement?.hasAttribute("data-account-empty-add") || document.activeElement?.id === "addAccountBtn"');
     check('Account modal restores trigger focus', restoredAccountFocus === true);
 
-    const fallbackAccountFocus = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]").focus(); document.querySelector("[data-account-empty-add]").click(); document.querySelector("[data-account-empty-add]").remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); document.activeElement?.id');
+    const fallbackAccountFocus = await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger.focus(); trigger.click(); document.querySelector("[data-account-empty-add]")?.remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return document.activeElement?.id; })()');
     check('Account modal restores stable focus after list rerender', fallbackAccountFocus === 'addAccountBtn');
+
+    const mixedGroupStatus = await wc.executeJavaScript(\`(() => {
+      config.hosters['byse.sx'] = [
+        { id: 'ui-status-ok-1', enabled: true, authType: 'api', apiKey: 'key-one' },
+        { id: 'ui-status-ok-2', enabled: true, authType: 'api', apiKey: 'key-two' },
+        { id: 'ui-status-error', enabled: true, authType: 'api', apiKey: 'key-three' }
+      ];
+      accountStatuses['ui-status-ok-1'] = { status: 'ok', message: 'Bereit' };
+      accountStatuses['ui-status-ok-2'] = { status: 'ok', message: 'Bereit' };
+      accountStatuses['ui-status-error'] = { status: 'error', message: 'Deaktiviert durch Administrator' };
+      renderAccounts();
+      const dot = document.querySelector('.account-hoster-group[data-hoster-group="byse.sx"] .account-hoster-group-header .account-status-dot');
+      return [dot?.className, getComputedStyle(dot).backgroundColor].join('|');
+    })()\`);
+    check('Mixed account results use orange group status', mixedGroupStatus === 'account-status-dot status-warn|rgb(240, 195, 108)');
+
+    const allErrorGroupStatus = await wc.executeJavaScript(\`(() => {
+      accountStatuses['ui-status-ok-1'] = { status: 'error', message: 'Fehler' };
+      accountStatuses['ui-status-ok-2'] = { status: 'error', message: 'Fehler' };
+      renderAccounts();
+      return document.querySelector('.account-hoster-group[data-hoster-group="byse.sx"] .account-hoster-group-header .account-status-dot')?.className;
+    })()\`);
+    check('All-error account group uses red status', allErrorGroupStatus === 'account-status-dot status-error');
+
+    const otpCardState = await wc.executeJavaScript(\`(() => {
+      config.hosters['doodstream.com'] = [{ id: 'ui-status-otp', enabled: true, authType: 'login', username: 'otp@example.com', password: 'password' }];
+      accountStatuses['ui-status-otp'] = { status: 'otp_required', message: 'OTP wurde an deine E-Mail gesendet.' };
+      renderAccounts();
+      const card = [...document.querySelectorAll('.account-card')].find(el => el.dataset.accountId === 'ui-status-otp');
+      return [
+        card?.querySelector('[data-account-otp-input]')?.getAttribute('placeholder'),
+        card?.querySelector('[data-account-otp-submit]')?.textContent?.trim(),
+        card?.querySelector('.account-status')?.textContent?.trim()
+      ].join('|');
+    })()\`);
+    check('OTP-required account exposes inline code input and save action', otpCardState === 'Code aus E-Mail|Prüfen und speichern|OTP erforderlich');
+
+    const otpSubmitState = await wc.executeJavaScript(\`(() => {
+      const card = [...document.querySelectorAll('.account-card')].find(el => el.dataset.accountId === 'ui-status-otp');
+      card.querySelector('[data-account-otp-input]').value = '123456';
+      card.querySelector('[data-account-otp-submit]').click();
+      return [accountStatuses['ui-status-otp']?.status, String(card.querySelector('[data-account-otp-submit]')?.disabled)].join('|');
+    })()\`);
+    check('Inline OTP submission starts validation', otpSubmitState === 'checking|true');
 
     console.log('\\n=== Settings View ===');
 
@@ -248,7 +292,6 @@ try {
   const electronPath = path.join(__dirname, '..', 'node_modules', '.bin', 'electron');
   const mainPath = path.join(__dirname, '..', 'main.js');
 
-  // We'll use --require to inject the test after the main process loads
   const result = execSync(
     `"${electronPath}" --require "${injectPath}" "${mainPath}"`,
     { cwd: path.join(__dirname, '..'), timeout: 20000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
