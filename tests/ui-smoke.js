@@ -457,6 +457,9 @@ setTimeout(async () => {
     const accountsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
     check('Accounts view and statusbar fit inside the viewport', accountsFrameFit === true);
 
+    const accountHeaderControlHeights = await wc.executeJavaScript('(() => [document.getElementById("accountsRunHealthCheckBtn"), document.querySelector(".accounts-auto-check"), document.getElementById("addAccountBtn")].map(element => element?.getBoundingClientRect().height || 0))()');
+    check('Accounts header actions share one rendered height', accountHeaderControlHeights.every(height => height > 0 && Math.abs(height - accountHeaderControlHeights[0]) <= 0.5));
+
     await captureVisual('02-accounts.png');
 
     const accountListValid = await wc.executeJavaScript('Boolean(document.querySelector("#accountsList .accounts-empty") || document.querySelectorAll("#accountsList .account-hoster-group").length)');
@@ -536,6 +539,39 @@ setTimeout(async () => {
     check('Empty account state remains contained at 1280x720', emptyAccountsGeometry.emptyVisible && emptyAccountsGeometry.contained);
     await captureVisual('02-accounts-empty-1280x720.png');
 
+    const accountCollapseMotion = await wc.executeJavaScript(\`(async () => {
+      const hoster = HOSTERS[0];
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters[hoster] = [{ id: 'ui-collapse-account', label: 'Animated account', enabled: true, authType: 'login', username: 'animated@example.invalid', password: 'fictional-password' }];
+      accountStatuses = { 'ui-collapse-account': { status: 'ok', message: 'Bereit' } };
+      _hosterGroupOpenMemory.set(hoster, { state: 'closed', errorsAtClose: 0 });
+      renderAccounts();
+      const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const sample = async (trigger, body) => {
+        const closedStart = body.getBoundingClientRect().height;
+        trigger.click();
+        await wait(70);
+        const opening = body.getBoundingClientRect().height;
+        const openingState = body.classList.contains('is-open');
+        const duration = parseFloat(getComputedStyle(body).transitionDuration) * 1000;
+        await wait(240);
+        const opened = body.getBoundingClientRect().height;
+        trigger.click();
+        await wait(70);
+        const closing = body.getBoundingClientRect().height;
+        const closingState = !body.classList.contains('is-open');
+        await wait(240);
+        const closedEnd = body.getBoundingClientRect().height;
+        return { closedStart, opening, opened, closing, closedEnd, openingState, closingState, duration };
+      };
+      const hosterMotion = await sample(document.querySelector('[data-hoster-toggle]'), document.querySelector('.account-hoster-group-body'));
+      const settingsMotion = await sample(document.querySelector('[data-hoster-settings-toggle]'), document.querySelector('.account-hoster-settings-body'));
+      return { hosterMotion, settingsMotion };
+    })()\`);
+    const hasSmoothAccountCollapse = motion => motion.closedStart <= 1 && motion.opening > 1 && motion.opening < motion.opened - 1 && motion.closing > 1 && motion.closing < motion.opened - 1 && motion.closedEnd <= 1 && motion.openingState && motion.closingState && motion.duration >= 180;
+    check('Hoster groups visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.hosterMotion));
+    check('Hoster upload settings visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.settingsMotion));
+
     const tallAccountGroupGeometry = await wc.executeJavaScript(\`(() => {
       const hoster = HOSTERS[0];
       HOSTERS.forEach(name => { config.hosters[name] = []; });
@@ -582,7 +618,7 @@ setTimeout(async () => {
       });
       renderAccounts();
       document.querySelectorAll('[data-hoster-toggle]').forEach(header => {
-        if (header.nextElementSibling?.style.display === 'none') header.click();
+        if (!header.nextElementSibling?.classList.contains('is-open')) header.click();
       });
       [...document.querySelectorAll('[data-hoster-settings-toggle]')].slice(0, 3).forEach(header => header.click());
       const list = document.getElementById('accountsList');
@@ -590,8 +626,8 @@ setTimeout(async () => {
       if (list) list.scrollTop = list.scrollHeight;
       return {
         groupCount: groups.length,
-        openGroupCount: groups.filter(group => group.querySelector('.account-hoster-group-body')?.style.display !== 'none').length,
-        openSettingsCount: groups.filter(group => group.querySelector('.account-hoster-settings-body')?.style.display !== 'none').length,
+        openGroupCount: groups.filter(group => group.querySelector('.account-hoster-group-body')?.classList.contains('is-open')).length,
+        openSettingsCount: groups.filter(group => group.querySelector('.account-hoster-settings-body')?.classList.contains('is-open')).length,
         listClientHeight: list?.clientHeight || 0,
         listScrollHeight: list?.scrollHeight || 0,
         listScrollTop: list?.scrollTop || 0,

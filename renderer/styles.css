@@ -1275,7 +1275,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 .account-hoster-settings-header:hover { background: var(--bg-card-hover); color: var(--text); }
 .account-hoster-settings-header .panel-arrow { font-size: 10px; color: var(--text-dim); }
-.account-hoster-settings-body { padding: 4px 12px 10px; }
+.account-hoster-settings-body-inner { padding: 4px 12px 10px; }
 
 .settings-hoster-pointer {
   margin-top: 12px;
@@ -1374,7 +1374,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .batch-cat-tag.retryable { background: rgba(76, 175, 80, 0.18); color: #a5d6a7; }
 .batch-cat-list { margin: 0; padding-left: 18px; font-size: 11px; color: var(--text-muted); }
 .batch-cat-list em { color: var(--text-muted); font-style: italic; }
-.account-hoster-group-body {
+.account-hoster-group-body-inner {
   padding: 8px;
   border-top: 1px solid var(--border);
 }
@@ -1390,6 +1390,38 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   height: 8px;
   border-radius: 50%;
   display: inline-block;
+}
+
+.account-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 220ms cubic-bezier(.2, .8, .2, 1), opacity 160ms ease, visibility 0s linear 220ms;
+}
+
+.account-collapse.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.account-collapse-content {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.account-hoster-group-header .panel-arrow,
+.account-hoster-settings-header .panel-arrow {
+  display: inline-block;
+  transform-origin: center;
+  transition: transform 180ms cubic-bezier(.2, .8, .2, 1);
+}
+
+.account-hoster-group-header[aria-expanded="true"] .panel-arrow,
+.account-hoster-settings-header[aria-expanded="true"] .panel-arrow {
+  transform: rotate(90deg);
 }
 
 .accounts-empty {
@@ -1715,6 +1747,15 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
   .menu-closing {
     animation-duration: 160ms !important;
+  }
+
+  .account-collapse {
+    transition-duration: 220ms, 160ms, 0s !important;
+  }
+
+  .account-hoster-group-header .panel-arrow,
+  .account-hoster-settings-header .panel-arrow {
+    transition-duration: 180ms !important;
   }
 }
 
@@ -3186,10 +3227,17 @@ input[type="checkbox"] {
 }
 
 .accounts-auto-check {
-  min-height: 38px;
+  min-height: 34px;
+  height: 34px;
   padding: 0 12px;
   border-radius: 6px;
   background: var(--bg-raised);
+  box-sizing: border-box;
+}
+
+.accounts-header-actions > .btn {
+  min-height: 34px;
+  height: 34px;
 }
 
 .account-health-results {

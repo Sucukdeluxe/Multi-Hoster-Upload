@@ -4936,12 +4936,13 @@ function _buildHosterSettingsHtml(name) {
   const hs = (config.hosterSettings && config.hosterSettings[name]) || {};
   const maxSpeedMbs = hs.maxSpeedKbs > 0 ? String(+(hs.maxSpeedKbs / 1024).toFixed(2)) : '0';
   return `<div class="account-hoster-settings">
-    <div class="account-hoster-settings-header" data-hoster-settings-toggle="${name}">
+    <div class="account-hoster-settings-header" data-hoster-settings-toggle="${name}" aria-expanded="false">
       <span class="panel-arrow">&#9654;</span>
       <span>Upload-Einstellungen</span>
     </div>
-    <div class="account-hoster-settings-body" style="display:none">
-      <div class="settings-grid-mini">
+    <div class="account-hoster-settings-body account-collapse" aria-hidden="true" inert>
+      <div class="account-collapse-content">
+        <div class="account-hoster-settings-body-inner settings-grid-mini">
         <div class="settings-row">
           <label>Retries</label>
           <input type="number" class="hs-input" data-hoster="${name}" data-hs="retries" value="${hs.retries ?? 3}" min="0" max="500">
@@ -4984,6 +4985,7 @@ function _buildHosterSettingsHtml(name) {
           <input type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
           <span class="hint">Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.</span>
         </div>
+        </div>
       </div>
     </div>
   </div>`;
@@ -4994,17 +4996,15 @@ function _buildAccountHosterGroupHtml(name, accounts) {
   const isOpen = _hosterGroupOpenState(name, summary);
   const dot = window.AccountStatus.getAccountGroupStatus(summary);
   const countLabel = `${summary.ok}/${summary.total}`;
-  const arrow = isOpen ? '&#9660;' : '&#9654;';
   let cardsHtml = '';
   accounts.forEach((account, idx) => { cardsHtml += _buildAccountCardHtml(name, account, idx); });
-  const bodyStyle = isOpen ? '' : 'style="display:none"';
   const lifeStat = _hosterLifetimeStat(name);
   const lifeMeta = lifeStat && lifeStat.total > 0
     ? `<span class="account-hoster-group-meta" title="Erfolgsrate aus den letzten ${lifeStat.total} Uploads dieses Hosters">${Math.round(lifeStat.rate * 100)}% ok (${lifeStat.total})</span>`
     : '';
   return `<div class="account-hoster-group" data-hoster-group="${name}">
-    <div class="account-hoster-group-header" data-hoster-toggle="${name}">
-      <span class="panel-arrow">${arrow}</span>
+    <div class="account-hoster-group-header" data-hoster-toggle="${name}" aria-expanded="${isOpen}">
+      <span class="panel-arrow">&#9654;</span>
       <span class="account-status-dot status-${dot}"></span>
       <span class="account-hoster-group-title">${escapeHtml(getHosterLabel(name))}</span>
       <span class="account-hoster-group-count">${countLabel}</span>
@@ -5012,7 +5012,9 @@ function _buildAccountHosterGroupHtml(name, accounts) {
       ${summary.error ? `<span class="account-hoster-group-meta error">${summary.error} Fehler</span>` : ''}
       ${lifeMeta}
     </div>
-    <div class="account-hoster-group-body" ${bodyStyle}>${cardsHtml}</div>
+    <div class="account-hoster-group-body account-collapse${isOpen ? ' is-open' : ''}" aria-hidden="${!isOpen}" ${isOpen ? '' : 'inert'}>
+      <div class="account-collapse-content"><div class="account-hoster-group-body-inner">${cardsHtml}</div></div>
+    </div>
     ${_buildHosterSettingsHtml(name)}
   </div>`;
 }
@@ -5029,8 +5031,16 @@ function _invalidateHosterLifetimeCache() { _hosterLifetimeCache = null; }
 function _allAccountGroupsOpen() {
   const bodies = document.querySelectorAll('#accountsList .account-hoster-group-body');
   if (!bodies.length) return false;
-  for (const b of bodies) if (b.style.display === 'none') return false;
+  for (const body of bodies) if (!body.classList.contains('is-open')) return false;
   return true;
+}
+
+function _setAccountCollapseOpen(trigger, body, open) {
+  if (!body) return;
+  body.classList.toggle('is-open', open);
+  body.setAttribute('aria-hidden', String(!open));
+  body.toggleAttribute('inert', !open);
+  if (trigger) trigger.setAttribute('aria-expanded', String(open));
 }
 
 function _setAllAccountGroupsOpen(open) {
@@ -5038,9 +5048,8 @@ function _setAllAccountGroupsOpen(open) {
   groups.forEach(group => {
     const name = group.dataset.hosterGroup;
     const body = group.querySelector('.account-hoster-group-body');
-    const arrow = group.querySelector('.panel-arrow');
-    if (body) body.style.display = open ? '' : 'none';
-    if (arrow) arrow.innerHTML = open ? '&#9660;' : '&#9654;';
+    const header = group.querySelector('[data-hoster-toggle]');
+    _setAccountCollapseOpen(header, body, open);
     if (name) {
       const summary = _summarizeHosterGroup(config.hosters[name] || []);
       _hosterGroupOpenMemory.set(name, { state: open ? 'open' : 'closed', errorsAtClose: summary.error });
@@ -5068,11 +5077,9 @@ function bindAccountListeners(container) {
       const name = header.dataset.hosterToggle;
       const group = header.closest('.account-hoster-group');
       const body = group && group.querySelector('.account-hoster-group-body');
-      const arrow = header.querySelector('.panel-arrow');
       if (body) {
-        const willOpen = body.style.display === 'none';
-        body.style.display = willOpen ? '' : 'none';
-        if (arrow) arrow.innerHTML = willOpen ? '&#9660;' : '&#9654;';
+        const willOpen = !body.classList.contains('is-open');
+        _setAccountCollapseOpen(header, body, willOpen);
         const summary = _summarizeHosterGroup(config.hosters[name] || []);
         _hosterGroupOpenMemory.set(name, { state: willOpen ? 'open' : 'closed', errorsAtClose: summary.error });
       }
@@ -5081,11 +5088,9 @@ function bindAccountListeners(container) {
     const settingsHeader = e.target.closest('[data-hoster-settings-toggle]');
     if (settingsHeader) {
       const body = settingsHeader.nextElementSibling;
-      const arrow = settingsHeader.querySelector('.panel-arrow');
       if (body) {
-        const isOpen = body.style.display !== 'none';
-        body.style.display = isOpen ? 'none' : '';
-        if (arrow) arrow.innerHTML = isOpen ? '&#9654;' : '&#9660;';
+        const willOpen = !body.classList.contains('is-open');
+        _setAccountCollapseOpen(settingsHeader, body, willOpen);
       }
       return;
     }
