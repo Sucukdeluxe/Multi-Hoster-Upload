@@ -10,8 +10,9 @@ module.exports = async function afterPack(context) {
   }
 
   const productFilename = context.packager?.appInfo?.productFilename;
-  if (!productFilename) {
-    console.warn("  rcedit: skipped - productFilename not available");
+  const version = context.packager?.appInfo?.version;
+  if (!productFilename || !version) {
+    console.warn("  rcedit: skipped - application metadata not available");
     return;
   }
 
@@ -24,8 +25,18 @@ module.exports = async function afterPack(context) {
       console.warn("  rcedit: skipped - app_icon.ico not found");
       return;
     }
-    console.log(`  rcedit: patching icon -> ${exePath}`);
-    await rcedit(exePath, { icon: iconPath });
+    console.log(`  rcedit: branding executable -> ${exePath}`);
+    await rcedit(exePath, {
+      icon: iconPath,
+      "file-version": version,
+      "product-version": version,
+      "version-string": {
+        FileDescription: "Multi Hoster Uploader",
+        InternalName: productFilename,
+        OriginalFilename: `${productFilename}.exe`,
+        ProductName: "Multi Hoster Uploader"
+      }
+    });
   } catch (error) {
     console.warn(`  rcedit: failed - ${String(error)}`);
   }

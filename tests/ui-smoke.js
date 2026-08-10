@@ -1423,7 +1423,7 @@ setTimeout(async () => {
     check('Sidebar indicator stays aligned at the minimum window size', queueProgressVisibility.minimum.sidebarIndicatorAligned);
     check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
 
-    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "Added live language switching.\\\\nImproved settings layout." }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "\\\\n\\\\n\\\\n## New in this version\\\\n\\\\n\\\\n### Menus and navigation\\\\n\\\\n- Added live language switching.\\\\n- Improved settings layout.\\\\n\\\\n\\\\n" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
     check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');
 
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -1450,8 +1450,8 @@ setTimeout(async () => {
 
     const updateDialogActions = await wc.executeJavaScript('[document.getElementById("dismissUpdateBtn")?.textContent?.trim(), document.getElementById("installUpdateBtn")?.textContent?.trim()].join("|")');
     check('Update dialog offers cancel and install actions', updateDialogActions === 'Abbrechen|Jetzt installieren');
-    const updateDialogChangelog = await wc.executeJavaScript('document.getElementById("updateReleaseNotes")?.hidden + "|" + document.querySelector(".update-release-notes-title")?.textContent?.trim() + "|" + document.getElementById("updateReleaseNotesBody")?.textContent');
-    check('Update dialog shows the GitHub changelog with real line breaks', updateDialogChangelog === 'false|Changelog|Added live language switching.\\nImproved settings layout.');
+    const updateDialogChangelog = await wc.executeJavaScript('(() => { const title = document.querySelector(".update-release-notes-title"); const body = document.getElementById("updateReleaseNotesBody"); const titleRect = title?.getBoundingClientRect(); const bodyRect = body?.getBoundingClientRect(); return { hidden: document.getElementById("updateReleaseNotes")?.hidden, title: title?.textContent?.trim(), body: body?.textContent, gap: bodyRect && titleRect ? bodyRect.top - titleRect.bottom : null }; })()');
+    check('Update dialog renders a compact normalized changelog', updateDialogChangelog.hidden === false && updateDialogChangelog.title === 'Changelog' && updateDialogChangelog.body === 'New in this version\\n\\nMenus and navigation\\n\\n• Added live language switching.\\n• Improved settings layout.' && updateDialogChangelog.gap <= 10);
 
     const updateHeaderHint = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.textContent?.trim(), button?.getAttribute("aria-label"), button?.dataset.tooltip].join("|"); })()');
     check('Available update gives the header action a matching hint', updateHeaderHint === 'Update verfügbar|Update v9.9.9 verfügbar. Klicken zum Installieren.|Update v9.9.9 verfügbar. Klicken zum Installieren.');
@@ -1475,12 +1475,15 @@ setTimeout(async () => {
         closeDisabled: document.getElementById('updateCloseBtn').disabled,
         dismissDisabled: document.getElementById('dismissUpdateBtn').disabled,
         headerHidden: header.hidden,
+        messageHidden: document.getElementById('updateMessage').hidden,
+        messageText: document.getElementById('updateMessage').textContent,
         progressLabel: progress.getAttribute('aria-label'),
         progressText: progress.getAttribute('aria-valuetext')
       };
     })()\`);
     check('Busy update keeps its progress dialog open', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === true && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
+    check('Busy update shows progress only below the bar', busyUpdateState.messageHidden === true && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
 
     const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden');
     check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false|false');

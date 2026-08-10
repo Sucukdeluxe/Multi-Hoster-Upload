@@ -2286,7 +2286,6 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 .update-release-notes-title {

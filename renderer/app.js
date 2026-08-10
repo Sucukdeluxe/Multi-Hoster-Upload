@@ -6545,6 +6545,28 @@ function setupListeners() {
 }
 
 // --- Update UI ---
+function _formatUpdateReleaseNotes(value) {
+  const output = [];
+  let pendingBlank = false;
+  for (const rawLine of String(value || '').replace(/\r\n?/g, '\n').split('\n')) {
+    let line = rawLine.trim();
+    if (!line) {
+      if (output.length > 0) pendingBlank = true;
+      continue;
+    }
+    line = line
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^[-*+]\s+/, '• ')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    if (pendingBlank && output.at(-1) !== '') output.push('');
+    output.push(line);
+    pendingBlank = false;
+  }
+  return output.join('\n');
+}
+
 function showUpdateBanner(info) {
   if (!info) return;
   _knownUpdateInfo = { ...info, available: true };
@@ -6561,9 +6583,12 @@ function showUpdateBanner(info) {
   const notesBody = document.getElementById('updateReleaseNotesBody');
   const installButton = document.getElementById('installUpdateBtn');
   if (title) title.textContent = 'Eine neue Version ist verfügbar';
-  if (message) message.textContent = `Update v${version} verfügbar`;
+  if (message) {
+    message.textContent = `Update v${version} verfügbar`;
+    message.hidden = false;
+  }
   if (notes && notesBody) {
-    const releaseNotes = String(info.releaseNotes || '').trim();
+    const releaseNotes = _formatUpdateReleaseNotes(info.releaseNotes);
     notesBody.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
     notes.hidden = !releaseNotes;
   }
@@ -6585,38 +6610,41 @@ function handleUpdateProgress(data) {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(0, 'Download 0%');
-    if (message) message.textContent = 'Download wird vorbereitet…';
+    if (message) message.hidden = true;
     if (button) button.textContent = 'Download 0%';
   } else if (progress.stage === 'downloading') {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(percent, `Download ${percent}%`);
-    if (message) message.textContent = `Update wird heruntergeladen… ${percent}%`;
+    if (message) message.hidden = true;
     if (button) button.textContent = `Download ${percent}%`;
   } else if (progress.stage === 'verifying') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Prüfen…');
-    if (message) message.textContent = 'Download wird geprüft…';
+    if (message) message.hidden = true;
     if (button) button.textContent = 'Prüfen…';
   } else if (progress.stage === 'prepared') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Neustart…');
-    if (message) message.textContent = 'Update ist bereit. Einstellungen werden gespeichert…';
+    if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'launching' || progress.stage === 'done') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Neustart…');
-    if (message) message.textContent = progress.stage === 'done' ? 'Update installiert. Die Anwendung startet neu…' : 'Update wird installiert. Die Anwendung startet neu…';
+    if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'error') {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
     _setUpdateProgress(0, 'Update fehlgeschlagen');
-    if (message) message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
+    if (message) {
+      message.hidden = false;
+      message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
+    }
     if (button) {
       button.disabled = false;
       button.textContent = 'Wiederholen';
@@ -6761,7 +6789,7 @@ async function installKnownUpdate() {
   _setUpdateProgress(0, 'Download 0%');
   const message = document.getElementById('updateMessage');
   const button = document.getElementById('installUpdateBtn');
-  if (message) message.textContent = 'Download wird vorbereitet…';
+  if (message) message.hidden = true;
   if (button) button.textContent = 'Download 0%';
   try {
     await persistQueueStateNow();

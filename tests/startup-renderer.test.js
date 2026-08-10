@@ -29,10 +29,16 @@ class TestBrowserWindow extends EventEmitter {
   }
 }
 
-test('configureStartupRenderer leaves hardware acceleration enabled', () => {
+test('configureStartupRenderer leaves hardware acceleration enabled for a local Windows session', () => {
   let calls = 0;
-  configureStartupRenderer({ disableHardwareAcceleration() { calls++; } });
+  configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'Console' }, 'win32');
   assert.equal(calls, 0);
+});
+
+test('configureStartupRenderer disables hardware acceleration for a Windows Remote Desktop session', () => {
+  let calls = 0;
+  configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'RDP-Tcp#12' }, 'win32');
+  assert.equal(calls, 1);
 });
 
 test('createStartupWindow forces the main window to start hidden', () => {
