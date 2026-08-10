@@ -32,7 +32,13 @@ const ConfigStore = require(path.join(process.cwd(), 'lib', 'config-store'));
 const updaterModule = require(path.join(process.cwd(), 'lib', 'updater'));
 let preparedUpdateMockCalls = 0;
 let launchedUpdateMockCalls = 0;
-updaterModule.checkForUpdate = async () => ({ available: false });
+let updateCheckMockCalls = 0;
+updaterModule.checkForUpdate = async () => {
+  updateCheckMockCalls++;
+  return updateCheckMockCalls === 1
+    ? { available: true, remoteVersion: '9.9.8' }
+    : { available: false };
+};
 updaterModule.prepareUpdate = async (onProgress) => {
   preparedUpdateMockCalls++;
   if (onProgress) onProgress({ stage: 'prepared', percent: 100 });
@@ -44,9 +50,20 @@ updaterModule.launchPreparedUpdate = () => {
 };
 const initialIpcHandlers = new Map();
 const registerIpcHandler = ipcMain.handle.bind(ipcMain);
+let initialConfigReadDelayed = false;
 ipcMain.handle = (channel, listener) => {
-  if (!initialIpcHandlers.has(channel)) initialIpcHandlers.set(channel, listener);
-  return registerIpcHandler(channel, listener);
+  const registeredListener = channel === 'get-config'
+    ? async (...args) => {
+        const result = await listener(...args);
+        if (!initialConfigReadDelayed) {
+          initialConfigReadDelayed = true;
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
+        return result;
+      }
+    : listener;
+  if (!initialIpcHandlers.has(channel)) initialIpcHandlers.set(channel, registeredListener);
+  return registerIpcHandler(channel, registeredListener);
 };
 function restoreInitialIpcHandler(channel) {
   ipcMain.removeHandler(channel);
@@ -132,6 +149,10 @@ setTimeout(async () => {
   }
 
   try {
+    const startupUpdateState = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [_knownUpdateInfo?.remoteVersion, button?.hidden, getComputedStyle(button).display, document.getElementById("updateBanner")?.style.display].join("|"); })()');
+    check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
+    await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
+
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
 
@@ -149,6 +170,9 @@ setTimeout(async () => {
 
     const headerUpdateButtonExists = await wc.executeJavaScript('Boolean(document.getElementById("headerUpdateBtn"))');
     check('App header exposes the update action', headerUpdateButtonExists);
+
+    const initialHeaderUpdateVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    check('Header update action stays hidden until an update is available', initialHeaderUpdateVisibility === 'true|none');
 
     const initialUpdateLabel = await wc.executeJavaScript('document.querySelector("#headerUpdateBtn .header-update-label")?.textContent?.trim()');
     check('App header uses the compact update label', initialUpdateLabel === 'Update');
@@ -492,13 +516,20 @@ setTimeout(async () => {
       document.getElementById('headerUpdateBtn').click();
     })()\`);
     await new Promise(resolve => setTimeout(resolve, 100));
-    const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy")].join("|"); })()');
-    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true');
+    const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy"), header?.hidden].join("|"); })()');
+    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true|true');
     updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false, error: 'Simulierter Netzwerkfehler' }));
     await new Promise(resolve => setTimeout(resolve, 150));
-    const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, header?.disabled, manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
-    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|Nach Updates suchen|Updateprüfung fehlgeschlagen');
+    const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, header?.disabled, header?.hidden, manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
+    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|true|Nach Updates suchen|Updateprüfung fehlgeschlagen');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
+
+    await wc.executeJavaScript('requestUpdateCheck(); true');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const noUpdateHeaderVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    check('Successful no-update result keeps the header action hidden', noUpdateHeaderVisibility === 'true|none');
 
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
@@ -1043,8 +1074,8 @@ setTimeout(async () => {
     check('Responsive queue keeps the fixed virtual row height', queueProgressVisibility.standard.rowHeight === 28 && queueProgressVisibility.minimum.rowHeight === 28);
     check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
 
-    const updateOverlayState = await wc.executeJavaScript('document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal")].join("|"); })()');
-    check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true');
+    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');
 
     await new Promise(resolve => setTimeout(resolve, 100));
     const updateModalKeyboard = await wc.executeJavaScript(\`(() => {
@@ -1086,20 +1117,22 @@ setTimeout(async () => {
       overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       const progress = document.getElementById('updateProgressBar');
+      const header = document.getElementById('headerUpdateBtn');
       return {
         display: overlay.style.display,
         hidden: overlay.getAttribute('aria-hidden'),
         closeDisabled: document.getElementById('updateCloseBtn').disabled,
         dismissDisabled: document.getElementById('dismissUpdateBtn').disabled,
+        headerHidden: header.hidden,
         progressLabel: progress.getAttribute('aria-label'),
         progressText: progress.getAttribute('aria-valuetext')
       };
     })()\`);
-    check('Busy update keeps its progress dialog open', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === true);
+    check('Busy update keeps its progress dialog open', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === true && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
 
-    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled');
-    check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false');
+    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden');
+    check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false|false');
 
     const initialInstallUpdateHandler = initialIpcHandlers.get('app:install-update');
     const initialUpdateQueueHandler = initialIpcHandlers.get('save-pending-queue');
@@ -1267,7 +1300,7 @@ try {
   const result = execFileSync(
     electronPath,
     [`--user-data-dir=${userDataPath}`, '--require', injectPath, mainPath],
-    { cwd: path.join(__dirname, '..'), timeout: 45000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    { cwd: path.join(__dirname, '..'), timeout: 60000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
   );
   console.log(result);
   const isolatedConfigPath = path.join(userDataPath, 'electron-config.json');

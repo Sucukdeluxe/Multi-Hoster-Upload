@@ -1772,6 +1772,10 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   transition: background-color .14s, transform .14s;
 }
 
+.header-update-button[hidden] {
+  display: none;
+}
+
 .header-update-button::after {
   content: attr(data-tooltip);
   position: absolute;

@@ -15,7 +15,7 @@ Multi-Hoster-Upload is a Windows desktop app for managing large file batches acr
 - Control per-hoster concurrency, bandwidth limits, retries, folder monitoring, notifications, and completed-item cleanup.
 - Keep local upload history and copy completed links in bulk.
 - Transfer accounts and settings with a 75-character encrypted online key while encryption and decryption stay on the client.
-- Check for updates from the header and install available releases from an accessible update dialog.
+- Check for updates from Settings or Help; when a newer release is available, install it from the header update action and accessible update dialog.
 
 ## Supported hosters
 

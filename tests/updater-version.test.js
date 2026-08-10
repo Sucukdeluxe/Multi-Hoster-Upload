@@ -83,7 +83,7 @@ test('a prepared installer launches at most once', () => {
 
 test('release plan keeps product artifacts separate from the transport tag', async () => {
   const { createReleasePlan, parseReleaseArgs, renderLatestYml } = await import(releasePlanUrl);
-  const plan = createReleasePlan(parseReleaseArgs(['2.0.6', '--transport-tag', 'v3.3.114', 'Interface', 'redesign']));
+  const plan = createReleasePlan(parseReleaseArgs(['2.0.7', '--transport-tag', 'v3.3.115', 'Update', 'visibility']));
   const latestYml = renderLatestYml(plan, 'abc123', 456, '2026-08-07T12:00:00.000Z');
   assert.deepEqual({
     version: plan.version,
@@ -93,17 +93,17 @@ test('release plan keeps product artifacts separate from the transport tag', asy
     expectedArtifacts: plan.expectedArtifacts,
     latestYml
   }, {
-    version: '2.0.6',
-    transportTag: 'v3.3.114',
-    releaseTitle: 'Multi-Hoster-Upload v2.0.6',
-    releaseBody: 'Interface redesign',
+    version: '2.0.7',
+    transportTag: 'v3.3.115',
+    releaseTitle: 'Multi-Hoster-Upload v2.0.7',
+    releaseBody: 'Update visibility',
     expectedArtifacts: [
-      'Multi-Hoster-Upload Setup 2.0.6.exe',
-      'Multi-Hoster-Upload 2.0.6.exe',
-      'Multi-Hoster-Upload Setup 2.0.6.exe.blockmap',
+      'Multi-Hoster-Upload Setup 2.0.7.exe',
+      'Multi-Hoster-Upload 2.0.7.exe',
+      'Multi-Hoster-Upload Setup 2.0.7.exe.blockmap',
       'latest.yml'
     ],
-    latestYml: "version: 2.0.6\nfiles:\n  - url: Multi-Hoster-Upload Setup 2.0.6.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload Setup 2.0.6.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
+    latestYml: "version: 2.0.7\nfiles:\n  - url: Multi-Hoster-Upload Setup 2.0.7.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload Setup 2.0.7.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
   });
 });
 

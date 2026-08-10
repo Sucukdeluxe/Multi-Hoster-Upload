@@ -48,7 +48,7 @@ function createStage() {
   return stage;
 }
 
-function verify(stage, version = '2.0.6') {
+function verify(stage, version = '2.0.7') {
   return spawnSync(process.execPath, ['scripts/verify-public-release.mjs', '--source-only', '--version', version], {
     cwd: stage,
     encoding: 'utf8'

@@ -369,10 +369,6 @@ async function init() {
     if (versionLabel) versionLabel.textContent = `v${version}`;
   } catch {}
 
-  // Update listeners
-  window.api.onUpdateAvailable(showUpdateBanner);
-  window.api.onUpdateProgress(handleUpdateProgress);
-
   window.api.onUploadProgress((data) => {
     handleProgress(data);
   });
@@ -660,6 +656,7 @@ function _syncHeaderUpdateState() {
       ? `Update v${version || 'unbekannt'} verfügbar. Klicken zum Installieren.`
       : 'Nach Aktualisierungen suchen';
   if (button) {
+    button.hidden = !available;
     button.classList.toggle('update-available', available);
     button.classList.toggle('is-checking', _updateCheckBusy);
     button.disabled = _updateCheckBusy;
@@ -6734,6 +6731,8 @@ function updateStatsPanel() {
 }
 
 // --- Start ---
+window.api.onUpdateAvailable(showUpdateBanner);
+window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
 init().then(() => {
   window.api.signalCloseHandshakeReady();
