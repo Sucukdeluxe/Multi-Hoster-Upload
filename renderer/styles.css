@@ -514,8 +514,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   height: 100%;
   border-radius: 2px;
   will-change: width;
+  transition: width 220ms ease-out;
 }
-.progress-bar-fill.status-uploading { background: linear-gradient(90deg, #4a90d9, #5dabf7); }
+.progress-bar-fill.status-uploading { background: linear-gradient(90deg, var(--success), var(--success-end)); }
 .progress-bar-fill.status-getting-server { background: var(--accent); }
 .progress-bar-fill.status-retrying { background: var(--warning); }
 .progress-bar-fill.status-done { background: linear-gradient(90deg, var(--success), var(--success-end)); }
@@ -1739,6 +1740,10 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
   .language-picker-indicator {
     transition-duration: 240ms !important;
+  }
+
+  .progress-bar-fill {
+    transition-duration: 220ms !important;
   }
 
   .menu-opening {

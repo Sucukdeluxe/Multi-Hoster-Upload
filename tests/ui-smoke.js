@@ -380,6 +380,30 @@ setTimeout(async () => {
     check('Upload sidebar exposes one pressed filter and handles empty matches', uploadFilterState.active.pressed.join('|') === 'active' && uploadFilterState.active.active.join('|') === 'active' && uploadFilterState.error.pressed.join('|') === 'error' && uploadFilterState.error.active.join('|') === 'error' && uploadFilterState.emptySafe);
     check('Upload sidebar drops hidden selections when changing filters', uploadFilterState.active.selected.join('|') === 'ui-active-z');
 
+    const uploadProgressMotion = await wc.executeJavaScript(\`(async () => {
+      const track = document.createElement('div');
+      track.className = 'progress-bar-bg';
+      track.style.cssText = 'position:fixed;left:20px;top:20px;width:300px;';
+      const fill = document.createElement('div');
+      fill.className = 'progress-bar-fill status-uploading';
+      fill.style.width = '10%';
+      track.append(fill);
+      document.body.append(track);
+      const ratio = () => fill.getBoundingClientRect().width / track.getBoundingClientRect().width;
+      const background = getComputedStyle(fill).backgroundImage;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const start = ratio();
+      fill.style.width = '80%';
+      await new Promise(resolve => setTimeout(resolve, 70));
+      const middle = ratio();
+      await new Promise(resolve => setTimeout(resolve, 260));
+      const end = ratio();
+      track.remove();
+      return { background, start, middle, end };
+    })()\`);
+    check('Active upload progress uses the green success gradient', uploadProgressMotion.background === 'linear-gradient(90deg, rgb(117, 211, 155), rgb(156, 226, 184))');
+    check('Active upload progress visibly interpolates percentage changes', uploadProgressMotion.start > 0.08 && uploadProgressMotion.start < 0.12 && uploadProgressMotion.middle > uploadProgressMotion.start + 0.02 && uploadProgressMotion.middle < 0.78 && uploadProgressMotion.end > 0.78 && uploadProgressMotion.end < 0.82);
+
     const uploadSelectionScope = await wc.executeJavaScript(\`(() => {
       const makeJob = (id, status) => ({ id, file: 'C:/ui/' + id + '.bin', fileName: id + '.bin', hoster: 'byse.sx', status, bytesUploaded: 0, bytesTotal: 1024, speedKbs: 0, elapsed: 0, remaining: 0, progress: status === 'done' ? 1 : 0 });
       const activeA = makeJob('scope-active-a', 'uploading');
