@@ -127,6 +127,7 @@
     ['Hoster-Zugangsdaten verwalten und prüfen', 'Manage and verify host account credentials'],
     ['Accounts prüfen', 'Check accounts'],
     ['Account hinzufügen', 'Add account'],
+    ['Noch keine Hoster', 'No hosts yet'],
     ['Füge deinen ersten Hoster-Account hinzu. Die Zugangsdaten werden vor dem Speichern geprüft.', 'Add your first host account. Credentials are verified before saving.'],
     ['Alle ausklappen', 'Expand all'],
     ['Alle einklappen', 'Collapse all'],
@@ -510,7 +511,7 @@
     const textSources = new WeakMap();
     const textRendered = new WeakMap();
     const attributeSources = new WeakMap();
-    const attributes = ['aria-label', 'placeholder', 'title', 'data-tooltip'];
+    const attributes = ['aria-label', 'placeholder', 'title', 'data-tooltip', 'data-empty-label'];
     let language = 'en';
     let observer = null;
 

@@ -2083,7 +2083,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .menu-opening {
-  animation: menu-unfold 180ms cubic-bezier(.2, .8, .2, 1) both;
+  animation: menu-unfold 180ms cubic-bezier(.2, .8, .2, 1);
 }
 
 .menu-closing {
@@ -3201,6 +3201,7 @@ input[type="checkbox"] {
   min-height: 0;
   padding: 12px 16px 16px;
   gap: 8px;
+  grid-auto-rows: max-content;
   overflow: auto;
 }
 
@@ -3244,7 +3245,7 @@ input[type="checkbox"] {
 }
 
 .view-sidebar-hosters:empty::after {
-  content: "Noch keine Hoster";
+  content: attr(data-empty-label);
   color: var(--text-dim);
   font-size: 10px;
 }

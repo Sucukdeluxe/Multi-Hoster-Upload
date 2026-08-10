@@ -178,6 +178,10 @@ setTimeout(async () => {
     check('English sidebar hierarchy uses distinct translated kickers', englishSidebarHeadings.join('::') === 'Workspace|Uploads::Manage accounts|Accounts::Archive|History');
     const englishLayoutFits = await wc.executeJavaScript('(() => { const states = [...document.querySelectorAll(".tab")].map(tab => { tab.click(); const view = document.querySelector(".view.active"); return view && view.scrollWidth <= view.clientWidth + 1; }); document.querySelector(".tab[data-view=upload]")?.click(); return states.every(Boolean) && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1; })()');
     check('English labels fit every main view without horizontal overflow', englishLayoutFits === true);
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=accounts]")?.click()');
+    const englishEmptyAccountHosterLabel = await wc.executeJavaScript('(() => { const container = document.getElementById("accountsSidebarHosters"); return [container?.getAttribute("data-empty-label"), getComputedStyle(container, "::after").content].join("|"); })()');
+    check('Empty account hoster sidebar renders its localized English label', englishEmptyAccountHosterLabel === 'No hosts yet|"No hosts yet"');
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click()');
     const liveLanguageSwitch = await wc.executeJavaScript('(() => { const input = document.getElementById("languageInput"); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); const german = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "en"; input.dispatchEvent(new Event("change", { bubbles: true })); const english = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); return [german, english, document.documentElement.lang].join("|"); })()');
     check('Language changes apply immediately in both directions', liveLanguageSwitch === 'Upload,Accounts,Einstellungen,Verlauf|Upload,Accounts,Settings,History|de');
     const germanSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
@@ -241,6 +245,16 @@ setTimeout(async () => {
     const submenuOpeningMotion = await wc.executeJavaScript('(() => { const menu = document.querySelector(".menu-submenu-dropdown"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip), style.transform !== "none", parseFloat(style.animationDuration) >= .12].join("|"); })()');
     check('Nested header menu visibly unfolds from top to bottom', submenuOpeningMotion === 'true|true|true|true');
     await new Promise(resolve => setTimeout(resolve, 160));
+    const menuWindowBounds = win.getBounds();
+    const submenuReachability = {};
+    for (const [label, width, height] of [['standard', 1100, 750], ['minimum', 800, 550]]) {
+      win.setSize(width, height);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      submenuReachability[label] = await wc.executeJavaScript('(() => { const parent = document.querySelector("[data-menu-dropdown=datei]"); const target = document.querySelector(".menu-submenu-dropdown [data-menu-action=backup-export]"); if (!parent || !target) return "missing"; const rect = target.getBoundingClientRect(); const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return [getComputedStyle(parent).clipPath, hit === target || target.contains(hit)].join("|"); })()');
+    }
+    win.setBounds(menuWindowBounds);
+    check('Backup submenu is painted and reachable at the standard window size', submenuReachability.standard === 'none|true');
+    check('Backup submenu is painted and reachable at the minimum window size', submenuReachability.minimum === 'none|true');
     await wc.executeJavaScript('document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))');
     await new Promise(resolve => setTimeout(resolve, 60));
     const mainMenuClosingMotion = await wc.executeJavaScript('(() => { const menu = document.querySelector("[data-menu-dropdown=datei]"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", menu.classList.contains("menu-closing"), clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip)].join("|"); })()');
@@ -505,6 +519,108 @@ setTimeout(async () => {
 
     const fallbackAccountFocus = await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger.focus(); trigger.click(); document.querySelector("[data-account-empty-add]")?.remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return document.activeElement?.id; })()');
     check('Account modal restores stable focus after list rerender', fallbackAccountFocus === 'addAccountBtn');
+
+    win.setSize(1280, 720);
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    const emptyAccountsGeometry = await wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      accountStatuses = {};
+      renderAccounts();
+      const list = document.getElementById('accountsList');
+      return {
+        emptyVisible: Boolean(list?.querySelector('.accounts-empty')),
+        contained: Boolean(list && list.scrollHeight <= list.clientHeight + 1)
+      };
+    })()\`);
+    check('Empty account state remains contained at 1280x720', emptyAccountsGeometry.emptyVisible && emptyAccountsGeometry.contained);
+    await captureVisual('02-accounts-empty-1280x720.png');
+
+    const tallAccountGroupGeometry = await wc.executeJavaScript(\`(() => {
+      const hoster = HOSTERS[0];
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters[hoster] = [1, 2, 3, 4].map(index => ({
+        id: 'ui-overflow-tall-' + index,
+        label: 'Fictional account ' + index,
+        enabled: true,
+        authType: 'login',
+        username: 'tall-' + index + '@example.invalid',
+        password: 'fictional-password-' + index
+      }));
+      accountStatuses = Object.fromEntries(config.hosters[hoster].map(account => [account.id, { status: 'ok', message: 'Bereit' }]));
+      renderAccounts();
+      document.querySelector('[data-hoster-toggle]')?.click();
+      document.querySelector('[data-hoster-settings-toggle]')?.click();
+      const list = document.getElementById('accountsList');
+      const group = list?.querySelector('.account-hoster-group');
+      if (list) list.scrollTop = list.scrollHeight;
+      return {
+        groupCount: list?.querySelectorAll('.account-hoster-group').length || 0,
+        listOverflows: Boolean(list && list.scrollHeight > list.clientHeight),
+        listScrolls: Boolean(list && list.scrollTop > 0),
+        groupContained: Boolean(group && group.scrollHeight <= group.clientHeight + 1)
+      };
+    })()\`);
+    check('One tall account group overflows through the Accounts list', tallAccountGroupGeometry.groupCount === 1 && tallAccountGroupGeometry.listOverflows && tallAccountGroupGeometry.listScrolls && tallAccountGroupGeometry.groupContained);
+    await captureVisual('02-accounts-tall-1280x720.png');
+
+    const expandedAccountsGeometry = await wc.executeJavaScript(\`(() => {
+      const hosters = HOSTERS.slice(0, 4);
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      accountStatuses = {};
+      hosters.forEach((hoster, index) => {
+        const account = {
+          id: 'ui-overflow-account-' + (index + 1),
+          label: 'Fictional account ' + (index + 1),
+          enabled: true,
+          authType: 'login',
+          username: 'account-' + (index + 1) + '@example.invalid',
+          password: 'fictional-password-' + (index + 1)
+        };
+        config.hosters[hoster] = [account];
+        accountStatuses[account.id] = { status: index === 0 ? 'error' : 'ok', message: index === 0 ? 'Fictional error' : 'Bereit' };
+      });
+      renderAccounts();
+      document.querySelectorAll('[data-hoster-toggle]').forEach(header => {
+        if (header.nextElementSibling?.style.display === 'none') header.click();
+      });
+      [...document.querySelectorAll('[data-hoster-settings-toggle]')].slice(0, 3).forEach(header => header.click());
+      const list = document.getElementById('accountsList');
+      const groups = [...list.querySelectorAll('.account-hoster-group')].filter(group => !group.hidden);
+      if (list) list.scrollTop = list.scrollHeight;
+      return {
+        groupCount: groups.length,
+        openGroupCount: groups.filter(group => group.querySelector('.account-hoster-group-body')?.style.display !== 'none').length,
+        openSettingsCount: groups.filter(group => group.querySelector('.account-hoster-settings-body')?.style.display !== 'none').length,
+        listClientHeight: list?.clientHeight || 0,
+        listScrollHeight: list?.scrollHeight || 0,
+        listScrollTop: list?.scrollTop || 0,
+        bottomReachable: Boolean(list && list.scrollTop + list.clientHeight >= list.scrollHeight - 1),
+        groupsContained: groups.every(group => group.scrollHeight <= group.clientHeight + 1)
+      };
+    })()\`);
+    console.log('Accounts overflow geometry:', JSON.stringify(expandedAccountsGeometry));
+    check('Expanded account fixtures render four open hoster groups and three open settings sections', expandedAccountsGeometry.groupCount === 4 && expandedAccountsGeometry.openGroupCount === 4 && expandedAccountsGeometry.openSettingsCount >= 3);
+    check('Expanded account groups overflow through the Accounts list', expandedAccountsGeometry.listScrollHeight > expandedAccountsGeometry.listClientHeight);
+    check('Expanded Accounts list accepts a positive scrollTop and reaches its bottom', expandedAccountsGeometry.listScrollTop > 0 && expandedAccountsGeometry.bottomReachable);
+    check('Expanded account hoster groups do not clip their own content', expandedAccountsGeometry.groupsContained);
+    await captureVisual('02-accounts-expanded-1280x720.png');
+
+    const filteredAccountsGeometry = await wc.executeJavaScript(\`(() => {
+      document.querySelector('[data-accounts-sidebar-filter="error"]')?.click();
+      const groups = [...document.querySelectorAll('#accountsList .account-hoster-group')];
+      const visibleGroups = groups.filter(group => !group.hidden);
+      const result = {
+        visibleGroupCount: visibleGroups.length,
+        hiddenGroupCount: groups.filter(group => group.hidden).length,
+        groupsContained: visibleGroups.every(group => group.scrollHeight <= group.clientHeight + 1)
+      };
+      return result;
+    })()\`);
+    check('Filtered account state hides unmatched groups without clipping the visible group', filteredAccountsGeometry.visibleGroupCount === 1 && filteredAccountsGeometry.hiddenGroupCount === 3 && filteredAccountsGeometry.groupsContained);
+    await captureVisual('02-accounts-filtered-1280x720.png');
+    await wc.executeJavaScript('document.querySelector("[data-accounts-sidebar-filter=all]")?.click()');
+    win.setBounds(originalBounds);
 
     const mixedGroupStatus = await wc.executeJavaScript(\`(() => {
       config.hosters['byse.sx'] = [
@@ -1512,11 +1628,12 @@ setTimeout(async () => {
     console.log('\\nTotal: ' + (passed + failed) + ' | Passed: ' + passed + ' | Failed: ' + failed);
   };
   if (realAppQuit) {
-    app.once('will-quit', () => {
+    app.once('will-quit', event => {
+      event.preventDefault();
       check('Lost restart intent does not relaunch during the later normal quit', relaunchCalls === 0);
       check('Approved update launches its prepared installer exactly once', preparedUpdateMockCalls === 2 && launchedUpdateMockCalls === 1);
       printResults();
-      process.exitCode = failed > 0 ? 1 : 0;
+      app.exit(failed > 0 ? 1 : 0);
     });
     realAppQuit();
     return;

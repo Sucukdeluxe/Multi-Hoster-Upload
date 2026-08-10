@@ -124,8 +124,14 @@ const sourceFiles = [
   'tests/validate-credentials.test.js',
   'tests/webhook-notify.test.js'
 ];
-const screenshotFile = 'assets/product-overview.png';
-const allowedFiles = new Set([...sourceFiles, screenshotFile]);
+const screenshotFiles = [
+  'assets/product-overview.png',
+  'docs/screenshots/upload-workspace.png',
+  'docs/screenshots/account-management.png',
+  'docs/screenshots/automation-settings.png',
+  'docs/screenshots/history.png'
+];
+const allowedFiles = new Set([...sourceFiles, ...screenshotFiles]);
 const textExtensions = new Set(['.cjs', '.css', '.html', '.js', '.json', '.md', '.mjs', '.txt', '.yaml', '.yml']);
 const binaryExtensions = new Set(['.ico', '.png']);
 const expectedScripts = {
@@ -354,18 +360,20 @@ function validateServicePackage(packageJson, packageLock) {
   }
 }
 
-async function validateScreenshot(sourceOnly) {
+async function validateScreenshots(sourceOnly) {
   if (sourceOnly) return;
-  try {
-    const data = await readFile(path.join(root, screenshotFile));
-    const signature = data.subarray(0, 8).toString('hex');
-    const width = data.length >= 24 ? data.readUInt32BE(16) : 0;
-    const height = data.length >= 24 ? data.readUInt32BE(20) : 0;
-    if (signature !== '89504e470d0a1a0a' || width < 1000 || height < 650) {
-      addFailure(screenshotFile, 'product-screenshot');
+  for (const screenshotFile of screenshotFiles) {
+    try {
+      const data = await readFile(path.join(root, screenshotFile));
+      const signature = data.subarray(0, 8).toString('hex');
+      const width = data.length >= 24 ? data.readUInt32BE(16) : 0;
+      const height = data.length >= 24 ? data.readUInt32BE(20) : 0;
+      if (signature !== '89504e470d0a1a0a' || width < 1000 || height < 650) {
+        addFailure(screenshotFile, 'product-screenshot');
+      }
+    } catch {
+      addFailure(screenshotFile, 'required-screenshot');
     }
-  } catch {
-    addFailure(screenshotFile, 'required-screenshot');
   }
 }
 
@@ -380,7 +388,7 @@ function printFailures() {
 async function main() {
   const { sourceOnly, expectedVersion } = parseArguments();
   const files = await enumerate();
-  const requiredFiles = sourceOnly ? sourceFiles : [...sourceFiles, screenshotFile];
+  const requiredFiles = sourceOnly ? sourceFiles : [...sourceFiles, ...screenshotFiles];
   for (const requiredFile of requiredFiles) {
     if (!files.includes(requiredFile)) addFailure(requiredFile, 'required-source-file');
   }
@@ -392,7 +400,7 @@ async function main() {
   const serviceLock = await readJson('services/backup-api/package-lock.json', 'service-package-lock-json');
   validatePackage(packageJson, packageLock, files, expectedVersion);
   validateServicePackage(servicePackage, serviceLock);
-  await validateScreenshot(sourceOnly);
+  await validateScreenshots(sourceOnly);
 
   if (failures.size > 0) {
     printFailures();
