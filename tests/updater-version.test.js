@@ -1,10 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
-const { isNewer, resolveReleaseVersion } = require('../lib/updater');
+const { isNewer, resolveReleaseVersion, prepareUpdate, launchPreparedUpdate } = require('../lib/updater');
+const releasePlanUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release-plan.mjs')).href;
 
 test('bridge title resolves product version instead of transport tag', () => {
   assert.equal(resolveReleaseVersion({ name: 'Multi-Hoster-Upload v2.0.1', tag_name: 'v3.3.109' }), '2.0.1');
@@ -12,57 +14,101 @@ test('bridge title resolves product version instead of transport tag', () => {
   assert.equal(isNewer('2.0.2', '2.0.1'), true);
 });
 
-test('release CLI rejects a malformed transport tag before release work', () => {
-  const script = path.resolve(__dirname, '../scripts/release_gitea.mjs');
-  const result = spawnSync(process.execPath, [script, '2.0.1', '--transport-tag', '3.3.109', 'Bridge', '--dry-run'], {
-    cwd: path.resolve(__dirname, '..'),
-    encoding: 'utf8'
-  });
-
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /--transport-tag must match vX\.Y\.Z/);
-  assert.doesNotMatch(result.stdout, /npm run release:win/);
+test('release arguments reject a malformed transport tag', async () => {
+  const { parseReleaseArgs } = await import(releasePlanUrl);
+  assert.throws(
+    () => parseReleaseArgs(['2.0.1', '--transport-tag', '3.3.109', 'Bridge', '--dry-run']),
+    /--transport-tag must match vX\.Y\.Z/
+  );
 });
 
-test('release plan keeps product artifacts separate from the transport tag', () => {
-  const script = path.resolve(__dirname, '../scripts/release_gitea.mjs');
-  const moduleUrl = pathToFileURL(script).href;
-  const source = `
-    import { createReleasePlan, parseReleaseArgs, renderLatestYml } from ${JSON.stringify(moduleUrl)};
-    const plan = createReleasePlan(parseReleaseArgs(['2.0.1', '--transport-tag', 'v3.3.109', 'Bridge', 'notes']));
-    const latestYml = renderLatestYml(plan, 'abc123', 456, '2026-08-07T12:00:00.000Z');
-    process.stdout.write(JSON.stringify({
-      version: plan.version,
-      transportTag: plan.transportTag,
-      releaseTitle: plan.releaseTitle,
-      releaseBody: plan.releaseBody,
-      expectedArtifacts: plan.expectedArtifacts,
-      latestYml
-    }));
-  `;
-  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
-    cwd: path.resolve(__dirname, '..'),
-    encoding: 'utf8'
-  });
+test('update preparation writes a verified installer without launching it', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-updater-test-'));
+  const installer = Buffer.alloc(128 * 1024, 0);
+  installer[0] = 0x4d;
+  installer[1] = 0x5a;
+  let reads = 0;
+  const progress = [];
+  try {
+    const prepared = await prepareUpdate(value => progress.push(value), {
+      checkResult: {
+        available: true,
+        assetUrl: 'https://update.invalid/setup.exe',
+        assetName: 'setup.exe',
+        assetSize: installer.length,
+        latestYmlUrl: null
+      },
+      tempDir,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              reads++;
+              return reads === 1 ? { done: false, value: installer } : { done: true };
+            }
+          })
+        }
+      })
+    });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    version: '2.0.1',
-    transportTag: 'v3.3.109',
-    releaseTitle: 'Multi-Hoster-Upload v2.0.1',
-    releaseBody: 'Bridge notes',
+    assert.equal(prepared.installerPath, path.join(tempDir, 'setup.exe'));
+    assert.deepEqual(fs.readFileSync(prepared.installerPath), installer);
+    assert.equal(progress.at(-1).stage, 'prepared');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('a prepared installer launches at most once', () => {
+  const calls = [];
+  const child = { unrefCalls: 0, unref() { this.unrefCalls++; } };
+  const prepared = { installerPath: 'C:\\Temp\\mhu-setup.exe' };
+  const spawnImpl = (...args) => {
+    calls.push(args);
+    return child;
+  };
+
+  assert.equal(launchPreparedUpdate(prepared, { spawnImpl }), true);
+  assert.equal(launchPreparedUpdate(prepared, { spawnImpl }), false);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], [
+    prepared.installerPath,
+    ['/S', '--updated', '--force-run'],
+    { detached: true, stdio: 'ignore' }
+  ]);
+  assert.equal(child.unrefCalls, 1);
+});
+
+test('release plan keeps product artifacts separate from the transport tag', async () => {
+  const { createReleasePlan, parseReleaseArgs, renderLatestYml } = await import(releasePlanUrl);
+  const plan = createReleasePlan(parseReleaseArgs(['2.0.6', '--transport-tag', 'v3.3.114', 'Interface', 'redesign']));
+  const latestYml = renderLatestYml(plan, 'abc123', 456, '2026-08-07T12:00:00.000Z');
+  assert.deepEqual({
+    version: plan.version,
+    transportTag: plan.transportTag,
+    releaseTitle: plan.releaseTitle,
+    releaseBody: plan.releaseBody,
+    expectedArtifacts: plan.expectedArtifacts,
+    latestYml
+  }, {
+    version: '2.0.6',
+    transportTag: 'v3.3.114',
+    releaseTitle: 'Multi-Hoster-Upload v2.0.6',
+    releaseBody: 'Interface redesign',
     expectedArtifacts: [
-      'Multi-Hoster-Upload Setup 2.0.1.exe',
-      'Multi-Hoster-Upload 2.0.1.exe',
+      'Multi-Hoster-Upload Setup 2.0.6.exe',
+      'Multi-Hoster-Upload 2.0.6.exe',
+      'Multi-Hoster-Upload Setup 2.0.6.exe.blockmap',
       'latest.yml'
     ],
-    latestYml: "version: 2.0.1\nfiles:\n  - url: Multi-Hoster-Upload Setup 2.0.1.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload Setup 2.0.1.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
+    latestYml: "version: 2.0.6\nfiles:\n  - url: Multi-Hoster-Upload Setup 2.0.6.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload Setup 2.0.6.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
   });
 });
 
 test('compatible existing release preserves the recovery id', async () => {
-  const moduleUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release_gitea.mjs')).href;
-  const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(moduleUrl);
+  const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(releasePlanUrl);
   const plan = createReleasePlan(parseReleaseArgs(['2.0.1', '--transport-tag', 'v3.3.109', 'Bridge notes']));
   const release = {
     id: 81,
@@ -78,8 +124,7 @@ test('compatible existing release preserves the recovery id', async () => {
 });
 
 test('incompatible existing release title fails closed', async () => {
-  const moduleUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release_gitea.mjs')).href;
-  const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(moduleUrl);
+  const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(releasePlanUrl);
   const plan = createReleasePlan(parseReleaseArgs(['2.0.1', '--transport-tag', 'v3.3.109', 'Bridge notes']));
   const release = {
     id: 81,

@@ -9,14 +9,79 @@ if (!process.env.RUN_UI_SMOKE) {
   return;
 }
 
-const { execFileSync, execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const uiRunId = `${process.pid}-${Date.now()}`;
+const visualScreenshotDir = process.env.MHU_UI_SCREENSHOT_DIR
+  ? path.resolve(process.env.MHU_UI_SCREENSHOT_DIR)
+  : '';
+const injectPath = path.join(__dirname, `_ui-inject.${uiRunId}.tmp.js`);
+const userDataPath = path.join(os.tmpdir(), `mhu-ui-smoke-${uiRunId}`);
+
+if (visualScreenshotDir) fs.mkdirSync(visualScreenshotDir, { recursive: true });
 
 // Create a temp script that the real Electron app will execute via --eval
 const testScript = `
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const fs = require('fs');
+const net = require('net');
+const path = require('path');
+const ConfigStore = require(path.join(process.cwd(), 'lib', 'config-store'));
+const updaterModule = require(path.join(process.cwd(), 'lib', 'updater'));
+let preparedUpdateMockCalls = 0;
+let launchedUpdateMockCalls = 0;
+updaterModule.checkForUpdate = async () => ({ available: false });
+updaterModule.prepareUpdate = async (onProgress) => {
+  preparedUpdateMockCalls++;
+  if (onProgress) onProgress({ stage: 'prepared', percent: 100 });
+  return { installerPath: path.join(app.getPath('temp'), 'mhu-ui-update-' + preparedUpdateMockCalls + '.exe') };
+};
+updaterModule.launchPreparedUpdate = () => {
+  launchedUpdateMockCalls++;
+  return true;
+};
+const initialIpcHandlers = new Map();
+const registerIpcHandler = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => {
+  if (!initialIpcHandlers.has(channel)) initialIpcHandlers.set(channel, listener);
+  return registerIpcHandler(channel, listener);
+};
+function restoreInitialIpcHandler(channel) {
+  ipcMain.removeHandler(channel);
+  const listener = initialIpcHandlers.get(channel);
+  if (listener) registerIpcHandler(channel, listener);
+}
+const originalAtomicWrite = ConfigStore.prototype._atomicWrite;
+const originalHistoryAtomicWrite = ConfigStore.prototype._writeHistoryFileAtomic;
+let activeConfigStore = null;
+let blockedWriteMarker = '';
+let blockedWriteStarted = false;
+let releaseBlockedWrite = null;
+let blockedHistoryWriteMarker = '';
+let blockedHistoryWriteStarted = false;
+let releaseBlockedHistoryWrite = null;
+ConfigStore.prototype._atomicWrite = function (data) {
+  activeConfigStore = this;
+  if (blockedWriteMarker && !blockedWriteStarted && String(data).includes(blockedWriteMarker)) {
+    blockedWriteStarted = true;
+    return new Promise((resolve, reject) => {
+      releaseBlockedWrite = () => originalAtomicWrite.call(this, data).then(resolve, reject);
+    });
+  }
+  return originalAtomicWrite.call(this, data);
+};
+ConfigStore.prototype._writeHistoryFileAtomic = function (history) {
+  activeConfigStore = this;
+  if (blockedHistoryWriteMarker && !blockedHistoryWriteStarted && JSON.stringify(history).includes(blockedHistoryWriteMarker)) {
+    blockedHistoryWriteStarted = true;
+    return new Promise((resolve, reject) => {
+      releaseBlockedHistoryWrite = () => originalHistoryAtomicWrite.call(this, history).then(resolve, reject);
+    });
+  }
+  return originalHistoryAtomicWrite.call(this, history);
+};
 
 // Monkey-patch: after the real window loads, run tests
 const origReady = app.whenReady;
@@ -26,12 +91,31 @@ async function runAfterDelay(win, delayMs) {
   return win;
 }
 
+async function waitUntil(read, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return null;
+}
+
 // Wait for app to be ready, then wait for the real window to load
 setTimeout(async () => {
   const windows = BrowserWindow.getAllWindows();
   if (windows.length === 0) { console.log('ERROR: No windows found'); process.exit(1); }
   const win = windows[0];
   const wc = win.webContents;
+  const originalBounds = win.getBounds();
+  const visualScreenshotDir = ${JSON.stringify(visualScreenshotDir)};
+
+  async function captureVisual(name) {
+    if (!visualScreenshotDir) return;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const screenshot = await wc.capturePage();
+    fs.writeFileSync(path.join(visualScreenshotDir, name), screenshot.toPNG());
+  }
 
   // Wait for renderer init
   await new Promise(r => setTimeout(r, 2000));
@@ -39,6 +123,8 @@ setTimeout(async () => {
   let passed = 0;
   let failed = 0;
   const results = [];
+  let realAppQuit = null;
+  let relaunchCalls = 0;
 
   function check(name, condition) {
     if (condition) { passed++; results.push('  PASS: ' + name); }
@@ -46,10 +132,32 @@ setTimeout(async () => {
   }
 
   try {
+    await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
 
     const tabCount = await wc.executeJavaScript('document.querySelectorAll(".tab").length');
     check('4 tabs exist', tabCount === 4);
+
+    const appHeaderExists = await wc.executeJavaScript('Boolean(document.querySelector(".app-header"))');
+    check('App shell exposes the primary header', appHeaderExists);
+
+    const appBrandText = await wc.executeJavaScript('document.querySelector(".app-brand-name")?.textContent?.trim()');
+    check('App header shows the Multi-Hoster Upload brand', appBrandText === 'MULTI-HOSTER UPLOAD');
+
+    const topbarIconCount = await wc.executeJavaScript('document.querySelectorAll(".app-header .tab .top-nav-icon").length');
+    check('App header exposes exactly four topbar icons', topbarIconCount === 4);
+
+    const headerUpdateButtonExists = await wc.executeJavaScript('Boolean(document.getElementById("headerUpdateBtn"))');
+    check('App header exposes the update action', headerUpdateButtonExists);
+
+    const initialUpdateLabel = await wc.executeJavaScript('document.querySelector("#headerUpdateBtn .header-update-label")?.textContent?.trim()');
+    check('App header uses the compact update label', initialUpdateLabel === 'Update');
+
+    const bodyBackground = await wc.executeJavaScript('getComputedStyle(document.body).backgroundColor');
+    check('App shell uses the dark reference canvas', bodyBackground === 'rgb(15, 15, 15)');
+
+    const shellDensity = await wc.executeJavaScript('(() => ({ header: document.querySelector(".app-header")?.getBoundingClientRect().height, status: document.getElementById("statusbar")?.getBoundingClientRect().height, sidebar: document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect().width }))()');
+    check('App shell keeps a compact desktop density', shellDensity.header <= 50 && shellDensity.status <= 30 && shellDensity.sidebar <= 230);
 
     const tabLabels = await wc.executeJavaScript('[...document.querySelectorAll(".tab")].map(el => el.textContent.trim()).join("|")');
     check('Current tab labels present', tabLabels === 'Upload|Accounts|Einstellungen|Verlauf');
@@ -90,6 +198,108 @@ setTimeout(async () => {
     const toolbarLabels = await wc.executeJavaScript('[...document.querySelectorAll("#queueCommandBar .toolbar-btn")].map(el => el.getAttribute("aria-label")).join("|")');
     check('Upload toolbar actions have German accessible names', toolbarLabels === 'Alle Uploads starten|Ausgewählte Uploads starten|Ausgewählte Datei erneut hochladen|Ausgewählten Upload abbrechen|Aktive Uploads beenden und stoppen|Alle Uploads abbrechen|Ganz nach oben|Nach oben|Nach unten|Ganz nach unten');
 
+    const uploadWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
+    check('Upload view separates sidebar and main workspace', uploadWorkspaceLayout === true);
+
+    const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#upload-view .view-sidebar-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && document.getElementById("uploadSidebarAccountsCount")); })()');
+    check('Upload sidebar keeps availability information in its lower area', uploadSidebarInformation === true);
+
+    const uploadFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
+    check('Upload view and statusbar fit inside the viewport', uploadFrameFit === true);
+
+    await captureVisual('01-upload.png');
+
+    const uploadFilterState = await wc.executeJavaScript(\`(() => {
+      const makeJob = (id, fileName, status) => ({ id, file: 'C:/ui/' + fileName, fileName, hoster: 'byse.sx', status, bytesUploaded: 0, bytesTotal: 1024, speedKbs: 0, elapsed: 0, remaining: 0, progress: status === 'done' ? 1 : 0 });
+      const waiting = Array.from({ length: 201 }, (_, index) => makeJob('ui-wait-' + index, 'wait-' + String(index).padStart(3, '0') + '.bin', 'queued'));
+      queueJobs = [makeJob('ui-active-z', 'active-z.bin', 'uploading'), ...waiting, makeJob('ui-error', 'error.bin', 'error'), makeJob('ui-done', 'done.bin', 'done'), makeJob('ui-active-a', 'active-a.bin', 'retrying')];
+      queueSortState.key = 'filename';
+      queueSortState.direction = 'asc';
+      selectedJobIds.clear();
+      selectedJobIds.add('ui-active-z');
+      selectedJobIds.add('ui-error');
+      const sourceOrder = queueJobs.map(job => job.id).join(',');
+      document.getElementById('queueContainer').scrollTop = 0;
+      renderQueueTable();
+      const allState = {
+        working: _sortedJobsCache.length,
+        rendered: document.querySelectorAll('#queueBody .queue-row').length,
+        spacer: Boolean(document.querySelector('#queueBody .virtual-spacer')),
+        height: document.querySelector('#queueBody .queue-row')?.style.height
+      };
+      const inspect = (value) => {
+        document.querySelector('[data-upload-sidebar-target="' + value + '"]').click();
+        return {
+          working: _sortedJobsCache.length,
+          ids: [...document.querySelectorAll('#queueBody .queue-row')].map(row => row.dataset.jobId),
+          names: [...document.querySelectorAll('#queueBody .queue-row .col-filename')].map(cell => cell.textContent),
+          spacer: Boolean(document.querySelector('#queueBody .virtual-spacer')),
+          selected: [...selectedJobIds],
+          pressed: [...document.querySelectorAll('[data-upload-sidebar-target]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.uploadSidebarTarget),
+          active: [...document.querySelectorAll('[data-upload-sidebar-target].active')].map(button => button.dataset.uploadSidebarTarget)
+        };
+      };
+      const active = inspect('active');
+      const waitingState = inspect('waiting');
+      const done = inspect('done');
+      const error = inspect('error');
+      const restored = inspect('all');
+      const sourceUnchanged = sourceOrder === queueJobs.map(job => job.id).join(',');
+      queueJobs = [makeJob('ui-only-waiting', 'only-waiting.bin', 'queued')];
+      const emptyError = inspect('error');
+      const emptySafe = queueJobs.length === 1 && emptyError.working === 0 && emptyError.ids.length === 0;
+      queueJobs = [];
+      document.querySelector('[data-upload-sidebar-target="all"]').click();
+      updateStatusBar();
+      return { allState, active, waitingState, done, error, restored, sourceUnchanged, emptySafe };
+    })()\`);
+    check('Upload sidebar filters the visible queue without mutating source order', uploadFilterState.active.working === 2 && uploadFilterState.active.names.join('|') === 'active-a.bin|active-z.bin' && uploadFilterState.waitingState.working === 201 && uploadFilterState.done.ids.join('|') === 'ui-done' && uploadFilterState.error.ids.join('|') === 'ui-error' && uploadFilterState.restored.working === 205 && uploadFilterState.sourceUnchanged);
+    check('Upload sidebar retains 28px virtual rows for large filtered queues', uploadFilterState.allState.working === 205 && uploadFilterState.allState.rendered > 0 && uploadFilterState.allState.rendered < 205 && uploadFilterState.allState.spacer && uploadFilterState.allState.height === '28px' && uploadFilterState.waitingState.spacer);
+    check('Upload sidebar exposes one pressed filter and handles empty matches', uploadFilterState.active.pressed.join('|') === 'active' && uploadFilterState.active.active.join('|') === 'active' && uploadFilterState.error.pressed.join('|') === 'error' && uploadFilterState.error.active.join('|') === 'error' && uploadFilterState.emptySafe);
+    check('Upload sidebar drops hidden selections when changing filters', uploadFilterState.active.selected.join('|') === 'ui-active-z');
+
+    const uploadSelectionScope = await wc.executeJavaScript(\`(() => {
+      const makeJob = (id, status) => ({ id, file: 'C:/ui/' + id + '.bin', fileName: id + '.bin', hoster: 'byse.sx', status, bytesUploaded: 0, bytesTotal: 1024, speedKbs: 0, elapsed: 0, remaining: 0, progress: status === 'done' ? 1 : 0 });
+      const activeA = makeJob('scope-active-a', 'uploading');
+      const activeZ = makeJob('scope-active-z', 'retrying');
+      const error = makeJob('scope-error', 'error');
+      const done = makeJob('scope-done', 'done');
+      queueJobs = [activeZ, error, done, activeA];
+      rebuildJobIndex();
+      selectedJobIds.clear();
+      selectedRecentIds.clear();
+      setUploadSidebarFilter('active');
+      document.getElementById('queueContainer').dispatchEvent(new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true }));
+      const ctrlASelected = [...selectedJobIds].sort();
+      selectedJobIds.clear();
+      selectedJobIds.add(activeA.id);
+      activeA.status = 'done';
+      renderQueueTable();
+      const statusChangeSelected = [...selectedJobIds];
+      const statusChangeVisible = _sortedJobsCache.map(job => job.id);
+      queueJobs = [activeZ, error, done, activeA];
+      activeA.status = 'uploading';
+      rebuildJobIndex();
+      setUploadSidebarFilter('active');
+      selectedJobIds.clear();
+      selectedJobIds.add(error.id);
+      updateQueueActionButtons();
+      const hiddenAction = {
+        selected: [...selectedJobIds],
+        retryDisabled: document.getElementById('reuploadSelectedBtn').disabled,
+        moveDisabled: document.getElementById('moveTopBtn').disabled
+      };
+      queueJobs = [];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      setUploadSidebarFilter('all');
+      updateStatusBar();
+      return { ctrlASelected, statusChangeSelected, statusChangeVisible, hiddenAction };
+    })()\`);
+    check('Ctrl+A selects only jobs visible in the upload filter', uploadSelectionScope.ctrlASelected.join('|') === 'scope-active-a|scope-active-z');
+    check('Status changes drop selections that leave the upload filter', uploadSelectionScope.statusChangeSelected.length === 0 && uploadSelectionScope.statusChangeVisible.join('|') === 'scope-active-z');
+    check('Selected upload actions ignore hidden stale selections', uploadSelectionScope.hiddenAction.selected.length === 0 && uploadSelectionScope.hiddenAction.retryDisabled && uploadSelectionScope.hiddenAction.moveDisabled);
+
     const keyboardTab = await wc.executeJavaScript('document.getElementById("upload-tab").focus(); document.getElementById("upload-tab").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); document.querySelector(".tab.active")?.textContent?.trim() + "|" + document.activeElement?.id');
     check('Arrow keys move and activate main tabs', keyboardTab === 'Accounts|accounts-tab');
 
@@ -104,6 +314,17 @@ setTimeout(async () => {
     const accountsActive = await wc.executeJavaScript('document.getElementById("accounts-view")?.classList.contains("active")');
     check('Accounts tab active', accountsActive);
 
+    const accountsWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
+    check('Accounts view separates sidebar and main workspace', accountsWorkspaceLayout === true);
+
+    const accountSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#accounts-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#accounts-view .view-sidebar-hoster-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55); })()');
+    check('Account sidebar keeps hoster information in its lower area', accountSidebarInformation === true);
+
+    const accountsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
+    check('Accounts view and statusbar fit inside the viewport', accountsFrameFit === true);
+
+    await captureVisual('02-accounts.png');
+
     const accountListValid = await wc.executeJavaScript('Boolean(document.querySelector("#accountsList .accounts-empty") || document.querySelectorAll("#accountsList .account-hoster-group").length)');
     check('Account manager list structure rendered', accountListValid);
 
@@ -112,6 +333,9 @@ setTimeout(async () => {
 
     const emptyAccountAction = await wc.executeJavaScript('document.querySelector("[data-account-empty-add]")?.textContent?.trim() || document.getElementById("addAccountBtn")?.textContent?.trim()');
     check('Account list offers direct add action', emptyAccountAction === 'Ersten Account hinzufügen' || emptyAccountAction === 'Account hinzufügen');
+
+    const accountEmptyStateActionCount = await wc.executeJavaScript('document.querySelectorAll("#accountsList [data-account-empty-add]").length');
+    check('Account empty state avoids a duplicate primary action', accountEmptyStateActionCount === 0);
 
     await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger?.focus(); trigger?.click(); })()');
     await new Promise(r => setTimeout(r, 200));
@@ -206,6 +430,43 @@ setTimeout(async () => {
     })()\`);
     check('Inline OTP submission starts validation', otpSubmitState === 'checking|true');
 
+    const accountFilterState = await wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters['doodstream.com'] = [
+        { id: 'ui-filter-no-creds', enabled: true, authType: 'login', username: '', password: '' }
+      ];
+      config.hosters['byse.sx'] = [
+        { id: 'ui-filter-ready', enabled: true, authType: 'api', apiKey: 'ready-key' },
+        { id: 'ui-filter-disabled', enabled: false, authType: 'api', apiKey: 'disabled-key' },
+        { id: 'ui-filter-error', enabled: true, authType: 'api', apiKey: 'error-key' }
+      ];
+      accountStatuses = {
+        'ui-filter-no-creds': { status: 'ok', message: 'Bereit' },
+        'ui-filter-ready': { status: 'ok', message: 'Bereit' },
+        'ui-filter-disabled': { status: 'ok', message: 'Bereit' },
+        'ui-filter-error': { status: 'error', message: 'Fehler' }
+      };
+      renderAccounts();
+      const inspect = (value) => {
+        document.querySelector('[data-accounts-sidebar-filter="' + value + '"]').click();
+        return {
+          cards: [...document.querySelectorAll('#accountsList .account-card')].filter(card => !card.hidden).map(card => card.dataset.accountId).sort(),
+          groups: [...document.querySelectorAll('#accountsList .account-hoster-group')].filter(group => !group.hidden).map(group => group.dataset.hosterGroup).sort(),
+          pressed: [...document.querySelectorAll('[data-accounts-sidebar-filter]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.accountsSidebarFilter),
+          active: [...document.querySelectorAll('[data-accounts-sidebar-filter].active')].map(button => button.dataset.accountsSidebarFilter)
+        };
+      };
+      const ready = inspect('ready');
+      const warning = inspect('warning');
+      const error = inspect('error');
+      const all = inspect('all');
+      const counters = ['accountsSidebarAllCount', 'accountsSidebarReadyCount', 'accountsSidebarWarningCount', 'accountsSidebarErrorCount'].map(id => document.getElementById(id)?.textContent);
+      return { ready, warning, error, all, counters };
+    })()\`);
+    check('Account sidebar filters cards and hides hoster groups without matches', accountFilterState.ready.cards.join('|') === 'ui-filter-ready' && accountFilterState.ready.groups.join('|') === 'byse.sx' && accountFilterState.warning.cards.join('|') === 'ui-filter-disabled|ui-filter-no-creds' && accountFilterState.warning.groups.join('|') === 'byse.sx|doodstream.com' && accountFilterState.error.cards.join('|') === 'ui-filter-error' && accountFilterState.error.groups.join('|') === 'byse.sx' && accountFilterState.all.cards.length === 4);
+    check('Account sidebar classifies disabled and credential-less accounts as action needed', accountFilterState.counters.join('|') === '4|1|2|1');
+    check('Account sidebar exposes exactly one pressed filter', accountFilterState.error.pressed.join('|') === 'error' && accountFilterState.error.active.join('|') === 'error' && accountFilterState.all.pressed.join('|') === 'all' && accountFilterState.all.active.join('|') === 'all');
+
     console.log('\\n=== Settings View ===');
 
     await wc.executeJavaScript('document.querySelector(".tab[data-view=\\'settings\\']").click()');
@@ -214,12 +475,48 @@ setTimeout(async () => {
     const settingsActive = await wc.executeJavaScript('document.getElementById("settings-view")?.classList.contains("active")');
     check('Settings tab active', settingsActive);
 
+    let updateCheckCallCount = 0;
+    const updateCheckResolvers = [];
+    ipcMain.removeHandler('app:check-updates');
+    ipcMain.handle('app:check-updates', () => {
+      updateCheckCallCount++;
+      return new Promise(resolve => updateCheckResolvers.push(resolve));
+    });
+    await wc.executeJavaScript(\`(() => {
+      _knownUpdateInfo = null;
+      _updateCheckBusy = false;
+      closeUpdateDialog();
+      _syncHeaderUpdateState();
+      document.getElementById('manualUpdateCheckBtn').click();
+      _handleMenuAction('check-updates');
+      document.getElementById('headerUpdateBtn').click();
+    })()\`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy")].join("|"); })()');
+    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true');
+    updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false, error: 'Simulierter Netzwerkfehler' }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, header?.disabled, manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
+    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|Nach Updates suchen|Updateprüfung fehlgeschlagen');
+    await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
+
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
+
+    const settingsSidebarInformation = await wc.executeJavaScript('(() => { const feedback = document.getElementById("saveFeedback"); const sidebar = document.querySelector(".settings-sidebar"); const status = document.querySelector(".settings-sidebar-status"); return Boolean(feedback && sidebar?.contains(feedback) && status && !document.querySelector(".settings-header #saveFeedback")); })()');
+    check('Settings sidebar owns the persistent save information', settingsSidebarInformation === true);
+
+    await captureVisual('03-settings.png');
 
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'uploads\\']")?.click()');
     const uploadSettingsState = await wc.executeJavaScript('(() => { const activePage = document.querySelector(".settings-subpage.active"); return [activePage?.dataset.subpage, activePage?.querySelector("h3")?.textContent.trim(), document.querySelector("label[for=removeFromQueueOnDoneInput]")?.textContent.trim(), document.getElementById("removeFromQueueOnDoneInput")?.closest(".settings-option")?.querySelector(".settings-option-description")?.textContent.trim()].join("|"); })()');
     check('Upload completion behavior is immediately findable', uploadSettingsState === 'uploads|Upload-Verhalten|Nach Abschluss aus der Liste entfernen|Erfolgreich hochgeladene Dateien verschwinden automatisch aus der Upload-Liste.');
+
+    const settingsReadingWidth = await wc.executeJavaScript('(() => { const activePage = document.querySelector(".settings-subpage.active"); if (!activePage) return 0; return activePage.getBoundingClientRect().width; })()');
+    check('Active settings page keeps a readable content width', settingsReadingWidth > 0 && settingsReadingWidth <= 640);
+
+    const settingsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("settings-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
+    check('Settings view and statusbar fit inside the viewport', settingsFrameFit === true);
 
     if (process.env.MHU_SETTINGS_SCREENSHOT) {
       const screenshotPage = process.env.MHU_SETTINGS_SCREENSHOT_PAGE;
@@ -273,16 +570,429 @@ setTimeout(async () => {
     }
     check('Save shows Gespeichert!', feedback === 'Gespeichert!');
 
+    const originalShowSaveDialog = dialog.showSaveDialog;
+    const originalShowOpenDialog = dialog.showOpenDialog;
+    const exportRacePath = path.join(app.getPath('userData'), 'ui-export-race.json');
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportRacePath });
+    const exportRaceConfig = await wc.executeJavaScript('window.api.getConfig()');
+    const exportRaceSettings = { ...(exportRaceConfig.globalSettings || {}), webhookUrl: 'https://export-race.invalid/current' };
+    blockedWriteMarker = 'https://export-race.invalid/current';
+    blockedWriteStarted = false;
+    releaseBlockedWrite = null;
+    const delayedExportSave = wc.executeJavaScript('window.api.saveGlobalSettings(' + JSON.stringify(exportRaceSettings) + ')');
+    for (let attempt = 0; attempt < 100 && !blockedWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    let exportSettled = false;
+    const pendingFileExport = wc.executeJavaScript('window.api.exportBackup()').then(result => { exportSettled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const exportSettledBeforeWrite = exportSettled;
+    releaseBlockedWrite?.();
+    const [exportSaveResult, exportResult] = await Promise.all([delayedExportSave, pendingFileExport]);
+    const exportedRaceConfig = JSON.parse(fs.readFileSync(exportRacePath, 'utf-8'));
+    check('File backup waits for the ConfigStore write queue', exportSaveResult === true && exportResult?.ok === true && exportSettledBeforeWrite === false && exportedRaceConfig.globalSettings.webhookUrl === 'https://export-race.invalid/current');
+    blockedWriteMarker = '';
+    try { fs.unlinkSync(exportRacePath); } catch {}
+
+    const historyExportRacePath = path.join(app.getPath('userData'), 'ui-history-export-race.json');
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: historyExportRacePath });
+    activeConfigStore._historyMigrated = true;
+    fs.writeFileSync(activeConfigStore.historyPath, '[]', 'utf-8');
+    blockedHistoryWriteMarker = 'ui-history-export-race';
+    blockedHistoryWriteStarted = false;
+    releaseBlockedHistoryWrite = null;
+    const delayedHistoryExportWrite = activeConfigStore.appendHistory({ id: 'ui-history-export-race', files: [] });
+    for (let attempt = 0; attempt < 100 && !blockedHistoryWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    let historyExportSettled = false;
+    const pendingHistoryExport = wc.executeJavaScript('window.api.exportBackup()').then(result => { historyExportSettled = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const historyExportSettledBeforeWrite = historyExportSettled;
+    releaseBlockedHistoryWrite?.();
+    const [historyExportWriteResult, historyExportResult] = await Promise.all([delayedHistoryExportWrite.then(() => true), pendingHistoryExport]);
+    check('File backup waits for the ConfigStore history queue', historyExportWriteResult === true && historyExportResult?.ok === true && historyExportSettledBeforeWrite === false);
+    blockedHistoryWriteMarker = '';
+    try { fs.unlinkSync(historyExportRacePath); } catch {}
+
+    const importRaceConfig = await wc.executeJavaScript('window.api.getConfig()');
+    for (const hoster of Object.keys(importRaceConfig.hosters || {})) importRaceConfig.hosters[hoster] = [];
+    importRaceConfig.hosters['byse.sx'] = [{ id: 'ui-imported-race-account', enabled: true, authType: 'api', apiKey: 'ui-imported-key' }];
+    importRaceConfig.globalSettings = { ...(importRaceConfig.globalSettings || {}), alwaysOnTop: false, webhookUrl: 'https://import-race.invalid/imported' };
+    const importRacePath = path.join(app.getPath('userData'), 'ui-import-race.json');
+    fs.writeFileSync(importRacePath, JSON.stringify(importRaceConfig), 'utf-8');
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [importRacePath] });
+    blockedHistoryWriteMarker = 'ui-history-import-race';
+    blockedHistoryWriteStarted = false;
+    releaseBlockedHistoryWrite = null;
+    const delayedHistoryImportWrite = activeConfigStore.appendHistory({ id: 'ui-history-import-race', files: [] });
+    for (let attempt = 0; attempt < 100 && !blockedHistoryWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    blockedWriteMarker = 'ui-imported-race-account';
+    blockedWriteStarted = false;
+    releaseBlockedWrite = null;
+    const pendingImport = wc.executeJavaScript('window.api.importBackup()');
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const importStartedBeforeHistoryWrite = blockedWriteStarted;
+    releaseBlockedHistoryWrite?.();
+    await delayedHistoryImportWrite;
+    for (let attempt = 0; attempt < 100 && !blockedWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    const dryRunPruneResult = await wc.executeJavaScript('window.api.pruneHistory("all", { dryRun: true }).then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    const staleSettings = { ...(importRaceConfig.globalSettings || {}), alwaysOnTop: true, webhookUrl: 'https://import-race.invalid/stale' };
+    const staleSave = wc.executeJavaScript('window.api.saveGlobalSettings(' + JSON.stringify(staleSettings) + ').then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    const stalePrune = wc.executeJavaScript('window.api.pruneHistory("all").then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    await new Promise(resolve => setTimeout(resolve, 80));
+    releaseBlockedWrite?.();
+    const [importResult, staleSaveResult, stalePruneResult] = await Promise.all([pendingImport, staleSave, stalePrune]);
+    const configAfterImportRace = await wc.executeJavaScript('window.api.getConfig()');
+    check('Import drains the ConfigStore history queue before replacement', importStartedBeforeHistoryWrite === false && importResult?.ok === true);
+    check('Import allows dry history previews but rejects mutating prune calls', dryRunPruneResult?.ok === true && stalePruneResult?.ok === false);
+    check('Import rejects stale config saves for the complete transition', staleSaveResult?.ok === false && configAfterImportRace.hosters['byse.sx']?.[0]?.id === 'ui-imported-race-account' && configAfterImportRace.globalSettings.alwaysOnTop === false && configAfterImportRace.globalSettings.webhookUrl === 'https://import-race.invalid/imported');
+
+    blockedWriteMarker = '';
+    blockedHistoryWriteMarker = '';
+    const importEpochWrites = await wc.executeJavaScript(\`(async () => {
+      beginConfigImport();
+      let releaseB;
+      const barrier = new Promise(resolve => { releaseB = resolve; });
+      const base = { ...(config.globalSettings || {}) };
+      const first = saveGlobalSettingsTracked({ ...base, webhookUrl: 'https://import-epoch.invalid/a' }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }));
+      const between = enqueueConfigWriteOperation(() => barrier).promise;
+      const second = saveGlobalSettingsTracked({ ...base, webhookUrl: 'https://import-epoch.invalid/b' }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }));
+      const firstResult = await first;
+      endConfigImport();
+      releaseB();
+      await between;
+      const secondResult = await second;
+      return { firstResult, secondResult, gateOpen: configImportInProgress === false };
+    })()\`);
+    check('Import epoch rejects queued writes even when the gate ends between them', importEpochWrites.firstResult?.code === 'CONFIG_WRITE_SUPERSEDED' && importEpochWrites.secondResult?.code === 'CONFIG_WRITE_SUPERSEDED' && importEpochWrites.gateOpen === true);
+
+    const importEpochConfig = structuredClone(configAfterImportRace);
+    for (const hoster of Object.keys(importEpochConfig.hosters || {})) importEpochConfig.hosters[hoster] = [];
+    importEpochConfig.hosters['byse.sx'] = [{ id: 'ui-import-epoch-account', enabled: true, authType: 'api', apiKey: 'ui-import-epoch-key' }];
+    importEpochConfig.globalSettings = { ...(importEpochConfig.globalSettings || {}), webhookUrl: 'https://import-epoch.invalid/imported' };
+    const importEpochPath = path.join(app.getPath('userData'), 'ui-import-epoch.json');
+    fs.writeFileSync(importEpochPath, JSON.stringify(importEpochConfig), 'utf-8');
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [importEpochPath] });
+    blockedWriteMarker = 'ui-import-epoch-account';
+    blockedWriteStarted = false;
+    releaseBlockedWrite = null;
+    const initialPendingQueueHandler = initialIpcHandlers.get('save-pending-queue');
+    let finalImportQueueStarted = false;
+    let releaseFinalImportQueue = null;
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', (event, pendingQueue) => {
+      if (!finalImportQueueStarted) {
+        finalImportQueueStarted = true;
+        return new Promise((resolve, reject) => {
+          releaseFinalImportQueue = () => Promise.resolve(initialPendingQueueHandler(event, pendingQueue)).then(resolve, reject);
+        });
+      }
+      return initialPendingQueueHandler(event, pendingQueue);
+    });
+    const pendingImportEpoch = wc.executeJavaScript('doBackupImport()');
+    for (let attempt = 0; attempt < 100 && !blockedWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    releaseBlockedWrite?.();
+    for (let attempt = 0; attempt < 100 && !finalImportQueueStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    const importStateDuringFinalQueuePersist = await wc.executeJavaScript('({ gateClosed: configImportInProgress, webhookUrl: config.globalSettings.webhookUrl, accountId: config.hosters["byse.sx"]?.[0]?.id })');
+    const staleImportSettings = wc.executeJavaScript('saveGlobalSettingsTracked({ ...(config.globalSettings || {}), webhookUrl: "https://import-epoch.invalid/stale-after-commit" }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }))');
+    const staleImportAccounts = wc.executeJavaScript('saveConfigTracked({ hosters: { ...(config.hosters || {}), "byse.sx": [{ id: "ui-stale-account", enabled: true, authType: "api", apiKey: "stale" }] } }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }))');
+    releaseFinalImportQueue?.();
+    const [staleImportSettingsResult, staleImportAccountsResult] = await Promise.all([staleImportSettings, staleImportAccounts]);
+    await pendingImportEpoch;
+    const configAfterImportEpoch = await wc.executeJavaScript('window.api.getConfig()');
+    check('Import keeps its gate closed through apply and final queue persistence', importStateDuringFinalQueuePersist.gateClosed === true && importStateDuringFinalQueuePersist.webhookUrl === 'https://import-epoch.invalid/imported' && importStateDuringFinalQueuePersist.accountId === 'ui-import-epoch-account');
+    check('Import rejects stale settings and account writes until the full transition finishes', staleImportSettingsResult.code === 'CONFIG_WRITE_SUPERSEDED' && staleImportAccountsResult.code === 'CONFIG_WRITE_SUPERSEDED' && configAfterImportEpoch.hosters['byse.sx']?.[0]?.id === 'ui-import-epoch-account' && configAfterImportEpoch.globalSettings.webhookUrl === 'https://import-epoch.invalid/imported');
+
+    restoreInitialIpcHandler('save-pending-queue');
+    const importPersistFailureConfig = structuredClone(configAfterImportEpoch);
+    importPersistFailureConfig.globalSettings = { ...(importPersistFailureConfig.globalSettings || {}), webhookUrl: 'https://import-persist-failure.invalid/imported' };
+    const importPersistFailurePath = path.join(app.getPath('userData'), 'ui-import-persist-failure.json');
+    fs.writeFileSync(importPersistFailurePath, JSON.stringify(importPersistFailureConfig), 'utf-8');
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [importPersistFailurePath] });
+    let importQueueFailureAttempts = 0;
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', (event, pendingQueue) => {
+      importQueueFailureAttempts++;
+      if (importQueueFailureAttempts === 1) throw new Error('final queue persistence failed');
+      return initialPendingQueueHandler(event, pendingQueue);
+    });
+    await wc.executeJavaScript('doBackupImport()');
+    const importAfterQueueFailure = await wc.executeJavaScript('({ webhookUrl: config.globalSettings.webhookUrl, gateOpen: configImportInProgress === false, toast: document.getElementById("copyToast")?.textContent || "" })');
+    await wc.executeJavaScript('flushConfigWrites()');
+    check('Committed import remains applied when final queue persistence fails', importAfterQueueFailure.webhookUrl === 'https://import-persist-failure.invalid/imported' && importAfterQueueFailure.gateOpen === true && importAfterQueueFailure.toast.includes('Warteschlange') && importQueueFailureAttempts >= 2);
+    restoreInitialIpcHandler('save-pending-queue');
+
+    blockedWriteMarker = '';
+    blockedHistoryWriteMarker = '';
+    dialog.showSaveDialog = originalShowSaveDialog;
+    dialog.showOpenDialog = originalShowOpenDialog;
+    try { fs.unlinkSync(importRacePath); } catch {}
+    try { fs.unlinkSync(importEpochPath); } catch {}
+    try { fs.unlinkSync(importPersistFailurePath); } catch {}
+
+    const occupiedRemotePortServer = net.createServer();
+    await new Promise((resolve, reject) => {
+      occupiedRemotePortServer.once('error', reject);
+      occupiedRemotePortServer.listen(0, resolve);
+    });
+    const occupiedRemotePort = occupiedRemotePortServer.address().port;
+    const configBeforeRemoteFailure = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    const alwaysOnTopAfterRemoteFailure = !Boolean(configBeforeRemoteFailure.globalSettings.alwaysOnTop);
+    const occupiedRemoteSettings = {
+      ...(configBeforeRemoteFailure.globalSettings.remote || {}),
+      enabled: true,
+      allowInput: true,
+      port: occupiedRemotePort,
+      token: 'ui-occupied-port-token'
+    };
+    const remoteSaveOutcome = await wc.executeJavaScript('saveRemoteSettingsTracked(' + JSON.stringify(occupiedRemoteSettings) + ').then(value => ({ resolved: true, value }), error => ({ resolved: false, error: error.message }))');
+    const configAfterRemoteFailure = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    const followUpRemoteWrite = await wc.executeJavaScript('setAlwaysOnTopTracked(' + JSON.stringify(alwaysOnTopAfterRemoteFailure) + ').then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    const configAfterRemoteFollowUp = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    const reportedRemoteRuntimeFailure = remoteSaveOutcome.resolved === true
+      && remoteSaveOutcome.value?.saved === true
+      && typeof remoteSaveOutcome.value.runtimeError === 'string'
+      && remoteSaveOutcome.value.runtimeError.length > 0;
+    check('Remote runtime activation failure preserves settings without poisoning later writes', configAfterRemoteFailure.globalSettings.remote?.enabled === true && configAfterRemoteFailure.globalSettings.remote?.port === occupiedRemotePort && reportedRemoteRuntimeFailure === true && followUpRemoteWrite.ok === true && configAfterRemoteFollowUp.globalSettings.alwaysOnTop === alwaysOnTopAfterRemoteFailure);
+    await new Promise(resolve => occupiedRemotePortServer.close(resolve));
+    const restoredRemoteSettings = { ...occupiedRemoteSettings, enabled: false };
+    await wc.executeJavaScript('saveRemoteSettingsTracked(' + JSON.stringify(restoredRemoteSettings) + ').catch(() => {})');
+    await wc.executeJavaScript('setAlwaysOnTopTracked(' + JSON.stringify(Boolean(configBeforeRemoteFailure.globalSettings.alwaysOnTop)) + ').catch(() => {})');
+
+    const generatedRemoteSettings = await wc.executeJavaScript('saveRemoteSettingsTracked(' + JSON.stringify({ ...restoredRemoteSettings, enabled: true, token: '' }) + ')');
+    const generatedRemoteToken = generatedRemoteSettings?.settings?.token || '';
+    const canonicalRemoteAfterFullSave = await wc.executeJavaScript('(async () => { config.globalSettings = { ...(config.globalSettings || {}), remote: { ...' + JSON.stringify(restoredRemoteSettings) + ', enabled: false, token: "" } }; renderSettings(); const tokenInput = document.getElementById("remoteTokenInput"); if (tokenInput) tokenInput.value = ""; await saveSettings({ feedbackText: "Gespeichert" }); return config.globalSettings.remote?.token || ""; })()');
+    const configAfterGeneratedTokenSave = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    check('Full settings save preserves the canonical remote token', generatedRemoteToken.length > 0 && canonicalRemoteAfterFullSave === generatedRemoteToken && configAfterGeneratedTokenSave.globalSettings.remote?.token === generatedRemoteToken);
+    await wc.executeJavaScript('saveRemoteSettingsTracked(' + JSON.stringify({ ...restoredRemoteSettings, enabled: false, token: generatedRemoteToken }) + ').catch(() => {})');
+
+    let directConfigWriteRelease = null;
+    let directConfigWriteStarted = false;
+    let rendererExportCalls = 0;
+    ipcMain.removeHandler('save-config');
+    ipcMain.handle('save-config', () => {
+      directConfigWriteStarted = true;
+      return new Promise(resolve => { directConfigWriteRelease = () => resolve(true); });
+    });
+    ipcMain.removeHandler('export-backup');
+    ipcMain.handle('export-backup', () => { rendererExportCalls++; return { ok: true, path: 'ui-renderer-export.mhu' }; });
+    await wc.executeJavaScript('(() => { HOSTERS.forEach(name => { config.hosters[name] = []; }); config.hosters["byse.sx"] = [{ id: "ui-tracked-account", enabled: true, authType: "api", apiKey: "tracked-key" }]; accountStatuses = { "ui-tracked-account": { status: "ok", message: "Bereit" } }; renderAccounts(); toggleAccount("ui-tracked-account"); })()');
+    for (let attempt = 0; attempt < 100 && !directConfigWriteStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    const pendingRendererExport = wc.executeJavaScript('doBackupExport()');
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const rendererExportBeforeWrite = rendererExportCalls;
+    directConfigWriteRelease?.();
+    await pendingRendererExport;
+    check('Renderer export awaits direct account writes', directConfigWriteStarted === true && rendererExportBeforeWrite === 0 && rendererExportCalls === 1);
+
+    const failedSaveRepairOrder = [];
+    const failedSavePayloads = [];
+    let failedSaveAttempts = 0;
+    let fullSnapshotRepairCalls = 0;
+    ipcMain.removeHandler('save-global-settings');
+    ipcMain.handle('save-global-settings', (_event, payload) => {
+      failedSavePayloads.push(payload);
+      failedSaveAttempts++;
+      if (failedSaveAttempts === 1) {
+        failedSaveRepairOrder.push('failed-save');
+        throw new Error('tracked settings save failed');
+      }
+      failedSaveRepairOrder.push('retry-same-save');
+      return true;
+    });
+    ipcMain.removeHandler('save-config');
+    ipcMain.handle('save-config', () => {
+      fullSnapshotRepairCalls++;
+      failedSaveRepairOrder.push('full-snapshot');
+      return true;
+    });
+    ipcMain.removeHandler('export-backup');
+    ipcMain.handle('export-backup', () => {
+      failedSaveRepairOrder.push('export');
+      return { ok: true, path: 'ui-repaired-export.mhu' };
+    });
+    const failedSaveRepairAlert = await wc.executeJavaScript('(() => { const originalSettingsPayload = { ...(config.globalSettings || {}), alwaysOnTop: true, webhookUrl: "https://repair-export.invalid/original" }; config.globalSettings = originalSettingsPayload; window.__failedSaveRepairAlert = ""; window.alert = message => { window.__failedSaveRepairAlert = String(message); }; return saveGlobalSettingsTracked(originalSettingsPayload).catch(() => {}).then(() => { originalSettingsPayload.alwaysOnTop = false; originalSettingsPayload.webhookUrl = "https://repair-export.invalid/newer"; config.globalSettings = { ...originalSettingsPayload }; return doBackupExport(); }).then(() => window.__failedSaveRepairAlert); })()');
+    const failedSavePayloadRetriedExactly = failedSavePayloads.length === 2
+      && JSON.stringify(failedSavePayloads[0]) === JSON.stringify(failedSavePayloads[1])
+      && failedSavePayloads[1].alwaysOnTop === true
+      && failedSavePayloads[1].webhookUrl === 'https://repair-export.invalid/original';
+    check('Renderer retries the exact failed settings save before export without a full snapshot', failedSavePayloadRetriedExactly && fullSnapshotRepairCalls === 0 && failedSaveRepairOrder.join('|') === 'failed-save|retry-same-save|export' && failedSaveRepairAlert === '');
+
+    restoreInitialIpcHandler('save-global-settings');
+    restoreInitialIpcHandler('save-pending-queue');
+    const initialSaveGlobalSettingsHandler = initialIpcHandlers.get('save-global-settings');
+    const settingsRunnerMarker = 'https://runner-recovery.invalid/current';
+    let settingsRunnerAttempts = 0;
+    ipcMain.removeHandler('save-global-settings');
+    ipcMain.handle('save-global-settings', (event, payload) => {
+      if (payload?.webhookUrl === settingsRunnerMarker) {
+        settingsRunnerAttempts++;
+        if (settingsRunnerAttempts === 1) throw new Error('transient settings runner failure');
+      }
+      return initialSaveGlobalSettingsHandler(event, payload);
+    });
+    const settingsRunnerRecovery = await wc.executeJavaScript('(() => { const input = document.getElementById("webhookUrlInput"); input.value = "' + settingsRunnerMarker + '"; return saveSettings({ feedbackText: "Gespeichert" }).then(() => ({ firstFailed: false }), () => ({ firstFailed: true })).then(async result => { try { await flushPendingSettingsSaves(); result.flushOk = true; } catch (error) { result.flushOk = false; result.error = error.message; } return result; }); })()');
+    const configAfterSettingsRunnerRecovery = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    check('Close flush recovers a rejected serialized settings runner', settingsRunnerRecovery.firstFailed === true && settingsRunnerRecovery.flushOk === true && settingsRunnerAttempts >= 2 && configAfterSettingsRunnerRecovery.globalSettings.webhookUrl === settingsRunnerMarker);
+    restoreInitialIpcHandler('save-global-settings');
+
+    const retainedWriteOrder = [];
+    let retainedOldAttempts = 0;
+    ipcMain.removeHandler('save-global-settings');
+    ipcMain.handle('save-global-settings', (_event, payload) => {
+      if (payload.webhookUrl === 'https://retry-queue.invalid/old') {
+        retainedOldAttempts++;
+        retainedWriteOrder.push('old-' + retainedOldAttempts);
+        if (retainedOldAttempts < 3) throw new Error('old write still failing');
+      } else if (payload.webhookUrl === 'https://retry-queue.invalid/new') {
+        retainedWriteOrder.push('new');
+      }
+      return true;
+    });
+    ipcMain.removeHandler('export-backup');
+    ipcMain.handle('export-backup', () => {
+      retainedWriteOrder.push('export');
+      return { ok: true, path: 'ui-retained-write-export.mhu' };
+    });
+    await wc.executeJavaScript('(() => { const oldSettings = { ...(config.globalSettings || {}), webhookUrl: "https://retry-queue.invalid/old" }; const newSettings = { ...oldSettings, webhookUrl: "https://retry-queue.invalid/new" }; return saveGlobalSettingsTracked(oldSettings).catch(() => {}).then(() => saveGlobalSettingsTracked(newSettings).catch(() => {})).then(() => doBackupExport()); })()');
+    check('Renderer retains newer writes when an older retry fails again', retainedWriteOrder.join('|') === 'old-1|old-2|old-3|new|export');
+
+    const importGateRetryOrder = [];
+    let importGateActive = true;
+    ipcMain.removeHandler('save-global-settings');
+    ipcMain.handle('save-global-settings', () => {
+      if (importGateActive) {
+        importGateRetryOrder.push('blocked-stale');
+        throw new Error('Einstellungen werden gerade importiert');
+      }
+      importGateRetryOrder.push('replayed-stale');
+      return true;
+    });
+    ipcMain.removeHandler('set-always-on-top');
+    ipcMain.handle('set-always-on-top', () => {
+      importGateRetryOrder.push('imported-state');
+      return true;
+    });
+    await wc.executeJavaScript('saveGlobalSettingsTracked({ ...(config.globalSettings || {}), webhookUrl: "https://import-gate.invalid/stale" }).catch(() => {})');
+    importGateActive = false;
+    await wc.executeJavaScript('setAlwaysOnTopTracked(false)');
+    check('Renderer never retries a settings write rejected by the import gate', importGateRetryOrder.join('|') === 'blocked-stale|imported-state');
+
+    const queueImportOrder = [];
+    const queueImportSnapshots = [];
+    let queueImportStarted = false;
+    let releaseQueueImport = null;
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', (_event, pendingQueue) => {
+      queueImportOrder.push('queue-save');
+      queueImportSnapshots.push(pendingQueue);
+      return true;
+    });
+    ipcMain.removeHandler('import-backup');
+    ipcMain.handle('import-backup', () => {
+      queueImportOrder.push('import');
+      queueImportStarted = true;
+      return new Promise(resolve => { releaseQueueImport = () => resolve({ ok: false, canceled: true }); });
+    });
+    const pendingQueueImport = wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-queue-flush", file: "C:/ui/queue-flush.bin", fileName: "queue-flush.bin", hoster: "byse.sx", status: "preview", bytesTotal: 1 }]; rebuildJobIndex(); persistQueueStateSoon(false); return doBackupImport(); })()');
+    for (let attempt = 0; attempt < 100 && !queueImportStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    const queueWriteDuringImport = await wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-import-dialog-terminal", file: "C:/ui/import-dialog-terminal.bin", fileName: "import-dialog-terminal.bin", hoster: "byse.sx", status: "done", bytesTotal: 10, bytesUploaded: 10, result: { download_url: "https://example.invalid/done" } }]; rebuildJobIndex(); return persistQueueStateNow().then(() => ({ ok: true }), error => ({ ok: false, error: error.message })); })()');
+    const terminalClearedBeforeImportFinished = queueImportSnapshots.some(snapshot => snapshot === null);
+    releaseQueueImport?.();
+    await pendingQueueImport;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const terminalClearedAfterCancel = queueImportSnapshots.some(snapshot => snapshot === null);
+    check('Import flushes the throttled queue save before invoking main', queueImportOrder[0] === 'queue-save' && queueImportOrder[1] === 'import');
+    check('Queue progress stays persistable while an import dialog is open', queueWriteDuringImport.ok === true && terminalClearedBeforeImportFinished === true && terminalClearedAfterCancel === true);
+
+    const importedQueueMerge = await wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-live-queue-after-import", file: "C:/ui/live-after-import.bin", fileName: "live-after-import.bin", hoster: "byse.sx", status: "queued", bytesTotal: 12 }]; rebuildJobIndex(); const imported = structuredClone(config); imported.globalSettings = { ...(imported.globalSettings || {}), webhookUrl: "https://queue-merge.invalid/imported", pendingQueue: { savedAt: 1, queueJobs: [{ id: "ui-stale-import-queue" }] } }; applyImportedConfig(imported, "Importiert"); return { webhookUrl: config.globalSettings.webhookUrl, ids: config.globalSettings.pendingQueue?.queueJobs?.map(job => job.id) || [] }; })()');
+    check('Imported settings keep the live local queue in renderer memory', importedQueueMerge.webhookUrl === 'https://queue-merge.invalid/imported' && importedQueueMerge.ids.join('|') === 'ui-live-queue-after-import');
+    await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
+
     console.log('\\n=== History View ===');
 
-    await wc.executeJavaScript('document.querySelector(".tab[data-view=\\'history\\']").click()');
+    ipcMain.removeHandler('get-history');
+    ipcMain.handle('get-history', () => [{
+      timestamp: '2026-08-10T10:00:00.000Z',
+      files: [
+        { name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] },
+        { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] },
+        { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }
+      ]
+    }]);
+
+    await wc.executeJavaScript('_historyDirty = true; document.querySelector(".tab[data-view=\\'history\\']").click()');
     await new Promise(r => setTimeout(r, 1000)); // Wait for async loadHistory
 
     const historyActive = await wc.executeJavaScript('document.getElementById("history-view")?.classList.contains("active")');
     check('History tab active', historyActive);
 
+    const historyWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
+    check('History view separates sidebar and main workspace', historyWorkspaceLayout === true);
+
+    const historySidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#history-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#history-view .view-sidebar-section")?.getBoundingClientRect(); const retention = document.getElementById("historySidebarRetention")?.textContent?.trim(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && retention === "Alles behalten"); })()');
+    check('History sidebar shows the active retention in its lower area', historySidebarInformation === true);
+
+    const historyFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
+    check('History view and statusbar fit inside the viewport', historyFrameFit === true);
+
+    await captureVisual('04-history.png');
+
     const emptyState = await wc.executeJavaScript('document.querySelector("#historyContainer .empty-state")?.textContent');
     check('Empty state or history table shown', emptyState === 'Noch keine Uploads.' || emptyState === undefined);
+
+    const historyFilterState = await wc.executeJavaScript(\`(() => {
+      const inspect = (value) => {
+        document.querySelector('[data-history-filter="' + value + '"]').click();
+        return {
+          rows: [...document.querySelectorAll('#historyBody .history-row')].map(row => row.querySelector('.col-filename')?.textContent).sort(),
+          errors: document.querySelectorAll('#historyBody .history-row.error').length,
+          pressed: [...document.querySelectorAll('[data-history-filter]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.historyFilter),
+          active: [...document.querySelectorAll('[data-history-filter].active')].map(button => button.dataset.historyFilter)
+        };
+      };
+      const initial = {
+        data: historyRowsData.length,
+        rows: [...document.querySelectorAll('#historyBody .history-row')].map(row => row.querySelector('.col-filename')?.textContent).sort(),
+        errors: document.querySelectorAll('#historyBody .history-row.error').length,
+        counts: ['historySidebarAllCount', 'historySidebarSuccessCount', 'historySidebarErrorCount'].map(id => document.getElementById(id)?.textContent)
+      };
+      const success = inspect('success');
+      const error = inspect('error');
+      const all = inspect('all');
+      return { initial, success, error, all, sourceLength: historyRowsData.length };
+    })()\`);
+    check('History keeps failed results in the renderer data model and All view', historyFilterState.initial.data === 3 && historyFilterState.initial.rows.join('|') === 'bad.bin|ok.bin|stopped.bin' && historyFilterState.initial.errors === 2 && historyFilterState.initial.counts.join('|') === '3|1|2');
+    check('History sidebar filters successful and failed rows without dropping source data', historyFilterState.success.rows.join('|') === 'ok.bin' && historyFilterState.success.errors === 0 && historyFilterState.error.rows.join('|') === 'bad.bin|stopped.bin' && historyFilterState.error.errors === 2 && historyFilterState.all.rows.length === 3 && historyFilterState.sourceLength === 3);
+    check('History sidebar exposes exactly one pressed filter', historyFilterState.success.pressed.join('|') === 'success' && historyFilterState.success.active.join('|') === 'success' && historyFilterState.error.pressed.join('|') === 'error' && historyFilterState.error.active.join('|') === 'error' && historyFilterState.all.pressed.join('|') === 'all' && historyFilterState.all.active.join('|') === 'all');
+
+    const historyErrorContrast = await wc.executeJavaScript(\`(() => {
+      document.querySelector('[data-history-filter="error"]').click();
+      const row = document.querySelector('#historyBody .history-row.error');
+      if (!row) return 0;
+      const parse = value => (value.match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+      const foreground = parse(getComputedStyle(row).color);
+      let node = row;
+      let background = [32, 32, 32];
+      while (node) {
+        const value = getComputedStyle(node).backgroundColor;
+        if (value && value !== 'rgba(0, 0, 0, 0)' && value !== 'transparent') {
+          background = parse(value);
+          break;
+        }
+        node = node.parentElement;
+      }
+      const opacity = Number(getComputedStyle(row).opacity);
+      const effective = foreground.map((channel, index) => channel * opacity + background[index] * (1 - opacity));
+      const luminance = rgb => {
+        const values = rgb.map(channel => {
+          const value = channel / 255;
+          return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * values[0] + 0.7152 * values[1] + 0.0722 * values[2];
+      };
+      const foregroundLuminance = luminance(effective);
+      const backgroundLuminance = luminance(background);
+      return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
+    })()\`);
+    check('Failed history rows keep readable text contrast (' + historyErrorContrast.toFixed(2) + ':1)', historyErrorContrast >= 4.5);
 
     console.log('\\n=== Global UI ===');
 
@@ -295,34 +1005,273 @@ setTimeout(async () => {
     const updateHidden = await wc.executeJavaScript('document.getElementById("updateBanner")?.style.display');
     check('Update banner hidden', updateHidden === 'none');
 
+    const queueProgressVisibility = {};
+    for (const [label, width, height] of [['standard', 1100, 750], ['minimum', 800, 550]]) {
+      win.setSize(width, height);
+      await new Promise(resolve => setTimeout(resolve, 150));
+      queueProgressVisibility[label] = await wc.executeJavaScript(\`(() => {
+        document.querySelector('.tab[data-view="upload"]').click();
+        selectedFiles = [];
+        queueJobs = [{ id: 'ui-responsive', file: 'C:/ui/responsive.bin', fileName: 'responsive.bin', hoster: 'byse.sx', status: 'uploading', bytesUploaded: 512, bytesTotal: 1024, speedKbs: 64, elapsed: 5, remaining: 5, progress: 0.5 }];
+        rebuildJobIndex();
+        setUploadSidebarFilter('all');
+        updateUploadView();
+        renderQueueTable();
+        const container = document.getElementById('queueContainer');
+        container.scrollLeft = 0;
+        const header = document.querySelector('#queueTable thead .col-progress');
+        const cell = document.querySelector('#queueBody .queue-row .col-progress');
+        const row = document.querySelector('#queueBody .queue-row');
+        const containerRect = container.getBoundingClientRect();
+        const headerRect = header?.getBoundingClientRect();
+        const cellRect = cell?.getBoundingClientRect();
+        return {
+          headerVisible: Boolean(headerRect && headerRect.width > 0 && headerRect.left >= containerRect.left - 1 && headerRect.right <= containerRect.right + 1),
+          cellVisible: Boolean(cellRect && cellRect.width > 0 && cellRect.left >= containerRect.left - 1 && cellRect.right <= containerRect.right + 1),
+          headerHeight: headerRect?.height,
+          rowHeight: row?.getBoundingClientRect().height
+        };
+      })()\`);
+    }
+    const compactSettingsHeader = await wc.executeJavaScript('document.querySelector(".tab[data-view=settings]").click(); document.querySelector(".settings-header")?.getBoundingClientRect().height');
+    win.setBounds(originalBounds);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await wc.executeJavaScript('queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable(); updateStatusBar();');
+    check('Upload progress stays visible at the standard window size', queueProgressVisibility.standard.headerVisible && queueProgressVisibility.standard.cellVisible);
+    check('Upload progress stays visible at the minimum window size', queueProgressVisibility.minimum.headerVisible && queueProgressVisibility.minimum.cellVisible);
+    check('Responsive queue keeps a compact table header', queueProgressVisibility.standard.headerHeight <= 34 && queueProgressVisibility.minimum.headerHeight <= 34);
+    check('Responsive queue keeps the fixed virtual row height', queueProgressVisibility.standard.rowHeight === 28 && queueProgressVisibility.minimum.rowHeight === 28);
+    check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
+
+    const updateOverlayState = await wc.executeJavaScript('document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal")].join("|"); })()');
+    check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true');
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const updateModalKeyboard = await wc.executeJavaScript(\`(() => {
+      const close = document.getElementById('updateCloseBtn');
+      const install = document.getElementById('installUpdateBtn');
+      const initialFocus = document.activeElement?.id;
+      const backgroundInert = document.querySelector('.app-header')?.inert === true && document.querySelector('.view.active')?.inert === true && document.getElementById('statusbar')?.inert === true;
+      install.focus();
+      install.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      const forwardFocus = document.activeElement?.id;
+      close.focus();
+      close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      const backwardFocus = document.activeElement?.id;
+      return { initialFocus, backgroundInert, forwardFocus, backwardFocus };
+    })()\`);
+    check('Update dialog receives and traps keyboard focus', updateModalKeyboard.initialFocus === 'updateCloseBtn' && updateModalKeyboard.forwardFocus === 'updateCloseBtn' && updateModalKeyboard.backwardFocus === 'installUpdateBtn');
+    check('Update dialog makes the background inert', updateModalKeyboard.backgroundInert === true);
+
+    await captureVisual('05-update.png');
+
+    const updateDialogCopy = await wc.executeJavaScript('(() => { const title = document.getElementById("updateDialogTitle")?.textContent?.trim(); const message = document.getElementById("updateMessage")?.textContent?.trim(); return [title, message].join("|"); })()');
+    check('Update dialog names the available version', updateDialogCopy === 'Eine neue Version ist verfügbar|Update v9.9.9 verfügbar');
+
+    const updateDialogActions = await wc.executeJavaScript('[document.getElementById("dismissUpdateBtn")?.textContent?.trim(), document.getElementById("installUpdateBtn")?.textContent?.trim()].join("|")');
+    check('Update dialog offers later and install actions', updateDialogActions === 'Später erinnern|Jetzt updaten');
+
+    const updateHeaderHint = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.textContent?.trim(), button?.getAttribute("aria-label"), button?.dataset.tooltip].join("|"); })()');
+    check('Available update gives the header action a matching hint', updateHeaderHint === 'Update verfügbar|Update v9.9.9 verfügbar. Klicken zum Installieren.|Update v9.9.9 verfügbar. Klicken zum Installieren.');
+
+    const updateDialogDismissed = await wc.executeJavaScript('document.getElementById("dismissUpdateBtn")?.click(); (() => { const overlay = document.getElementById("updateBanner"); return [overlay?.style.display, overlay?.getAttribute("aria-hidden"), document.activeElement?.id, document.querySelector(".app-header")?.inert, document.querySelector(".view.active")?.inert, document.getElementById("statusbar")?.inert].join("|"); })()');
+    check('Update dialog closes and restores focus and background', updateDialogDismissed === 'none|true|headerUpdateBtn|false|false|false');
+
+    const busyUpdateState = await wc.executeJavaScript(\`(() => {
+      showUpdateBanner({ remoteVersion: '9.9.9' });
+      handleUpdateProgress({ stage: 'downloading', percent: 50 });
+      const overlay = document.getElementById('updateBanner');
+      document.getElementById('updateCloseBtn').click();
+      document.getElementById('dismissUpdateBtn').click();
+      overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const progress = document.getElementById('updateProgressBar');
+      return {
+        display: overlay.style.display,
+        hidden: overlay.getAttribute('aria-hidden'),
+        closeDisabled: document.getElementById('updateCloseBtn').disabled,
+        dismissDisabled: document.getElementById('dismissUpdateBtn').disabled,
+        progressLabel: progress.getAttribute('aria-label'),
+        progressText: progress.getAttribute('aria-valuetext')
+      };
+    })()\`);
+    check('Busy update keeps its progress dialog open', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === true);
+    check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
+
+    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled');
+    check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false');
+
+    const initialInstallUpdateHandler = initialIpcHandlers.get('app:install-update');
+    const initialUpdateQueueHandler = initialIpcHandlers.get('save-pending-queue');
+    let installUpdateIpcCalls = 0;
+    ipcMain.removeHandler('app:install-update');
+    ipcMain.handle('app:install-update', () => {
+      installUpdateIpcCalls++;
+      return { started: true };
+    });
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', () => { throw new Error('update queue save failed'); });
+    const updateSaveFailure = await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate().then(() => ({ busy: _updateInstallBusy, message: document.getElementById("updateMessage")?.textContent || "" }))');
+    check('Update preparation stops before install IPC when queue persistence fails', installUpdateIpcCalls === 0 && updateSaveFailure.busy === false && updateSaveFailure.message.includes('update queue save failed'));
+    await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Test cleanup" }); closeUpdateDialog()');
+    ipcMain.removeHandler('app:install-update');
+    if (initialInstallUpdateHandler) registerIpcHandler('app:install-update', initialInstallUpdateHandler);
+    ipcMain.removeHandler('save-pending-queue');
+    if (initialUpdateQueueHandler) registerIpcHandler('save-pending-queue', initialUpdateQueueHandler);
+    await wc.executeJavaScript('flushConfigWrites()');
+
+    const stackedDialogState = await wc.executeJavaScript(\`(() => {
+      openAccountModal(null);
+      showUpdateBanner({ remoteVersion: '9.9.9' });
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const state = document.getElementById('updateBanner').style.display + '|' + document.getElementById('accountModal').style.display;
+      if (document.getElementById('updateBanner').style.display !== 'none') closeUpdateDialog();
+      if (document.getElementById('accountModal').style.display !== 'none') closeAccountModal();
+      return state;
+    })()\`);
+    check('Escape closes only the topmost update dialog', stackedDialogState === 'none|flex');
+
+    if (visualScreenshotDir) {
+      win.setSize(800, 550);
+      await wc.executeJavaScript('document.querySelector(".tab[data-view=\\\'settings\\\']").click(); document.querySelector("[data-settings-page=\\\'allgemein\\\']")?.click(); (() => { const search = document.getElementById("settingsSearchInput"); if (search) { search.value = ""; search.dispatchEvent(new Event("input", { bubbles: true })); } document.querySelector(".settings-content")?.scrollTo(0, 0); })()');
+      await captureVisual('06-settings-800x550.png');
+      win.setBounds(originalBounds);
+    }
+
+    restoreInitialIpcHandler('save-global-settings');
+    restoreInitialIpcHandler('save-pending-queue');
+    const keepaliveWindow = new BrowserWindow({ show: false });
+    realAppQuit = app.quit.bind(app);
+    app.relaunch = () => { relaunchCalls++; };
+    app.quit = () => {
+      if (!win.isDestroyed()) win.close();
+    };
+    await wc.executeJavaScript('window.api.removeAllListeners()');
+    await wc.executeJavaScript('window.api.restartApp()');
+    await new Promise(resolve => setTimeout(resolve, 1700));
+    const lostCloseRequestRecovered = !win.isDestroyed();
+    await wc.executeJavaScript('window.api.onPrepareClose(prepareForWindowClose)');
+    await wc.executeJavaScript('window.api.onUpdateProgress(handleUpdateProgress)');
+    check('Lost restart close request leaves the window open for a later normal quit', lostCloseRequestRecovered === true);
+
+    const originalSavePendingQueue = activeConfigStore.savePendingQueue.bind(activeConfigStore);
+    let rejectHungFinalQueueWrite = null;
+    let hangFinalQueueWrite = true;
+    activeConfigStore.savePendingQueue = (pendingQueue, options) => {
+      if (hangFinalQueueWrite && options?.allowDuringQuiesce === true) {
+        hangFinalQueueWrite = false;
+        return new Promise((_resolve, reject) => { rejectHungFinalQueueWrite = reject; });
+      }
+      return originalSavePendingQueue(pendingQueue, options);
+    };
+    const initialFinishCloseHandler = initialIpcHandlers.get('app:finish-close');
+    let closeReadyAttempt = null;
+    let closeRestoreAttempt = null;
+    let restoreAckRequested = false;
+    let releaseRestoreAck = null;
+    ipcMain.removeHandler('app:finish-close');
+    ipcMain.handle('app:finish-close', async (event, payload) => {
+      const ready = payload && typeof payload === 'object' ? payload.ready !== false : payload !== false;
+      if (ready) {
+        closeReadyAttempt = payload && typeof payload === 'object' ? payload.attempt : null;
+      } else {
+        closeRestoreAttempt = payload && typeof payload === 'object' ? payload.attempt : null;
+        restoreAckRequested = true;
+        await new Promise(resolve => { releaseRestoreAck = resolve; });
+      }
+      return initialFinishCloseHandler(event, payload);
+    });
+    await wc.executeJavaScript('(() => { queuePersistThrottle.cancel(); selectedFiles = []; queueJobs = [{ id: "ui-close-timeout-job", file: "C:/ui/close-timeout.bin", fileName: "close-timeout.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 1, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); return true; })()');
+    await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate()');
+    await waitUntil(() => restoreAckRequested, 4000);
+    const recoveryBeforeAck = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayVisible: document.getElementById("shutdownOverlay")?.style.display === "flex", inertRetained: closePreparationInertState.length > 0 && closePreparationInertState.every(({ element }) => element.inert === true) })');
+    const windowStayedOpenAfterCloseFailure = !win.isDestroyed();
+    rejectHungFinalQueueWrite?.(new Error('final queue write timeout'));
+    releaseRestoreAck?.();
+    const boundedCloseRecovery = await waitUntil(async () => {
+      if (win.isDestroyed()) return null;
+      const state = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayHidden: document.getElementById("shutdownOverlay")?.style.display === "none", inertRestored: closePreparationInertState.length === 0, failedWrites: failedConfigWriteOperations.length })');
+      return state.state === 'open' && state.promiseCleared ? state : null;
+    }, 4000);
+    activeConfigStore.savePendingQueue = originalSavePendingQueue;
+    const closeRecoveryMarker = 'https://close-recovery.invalid/after-timeout';
+    const writeAfterCloseRecovery = await wc.executeJavaScript('saveGlobalSettingsTracked({ ...(config.globalSettings || {}), webhookUrl: "' + closeRecoveryMarker + '" }).then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    const historyAfterCloseRecovery = await activeConfigStore.appendHistory({ id: 'ui-close-recovery-history', files: [] }).then(() => ({ ok: true }), error => ({ ok: false, error: error.message }));
+    const configAfterCloseRecovery = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    const recoveredQueue = configAfterCloseRecovery.globalSettings.pendingQueue?.queueJobs || [];
+    const failedUpdateUi = await wc.executeJavaScript('({ busy: _updateInstallBusy, message: document.getElementById("updateMessage")?.textContent || "" })');
+    const closeRecoveryEvidence = { windowStayedOpenAfterCloseFailure, recoveryBeforeAck, boundedCloseRecovery, closeReadyAttempt, closeRestoreAttempt, writesQuiesced: activeConfigStore._writesQuiesced, writeAfterCloseRecovery, historyAfterCloseRecovery, persistedWebhookUrl: configAfterCloseRecovery.globalSettings.webhookUrl, recoveredQueue: recoveredQueue.map(job => job.id), preparedUpdateMockCalls, launchedUpdateMockCalls, failedUpdateUi };
+    const closeRecoveryOk = windowStayedOpenAfterCloseFailure === true && recoveryBeforeAck.state === 'recovering' && recoveryBeforeAck.promiseCleared === false && recoveryBeforeAck.overlayVisible === true && recoveryBeforeAck.inertRetained === true && boundedCloseRecovery?.state === 'open' && boundedCloseRecovery.promiseCleared === true && boundedCloseRecovery.overlayHidden === true && boundedCloseRecovery.inertRestored === true && boundedCloseRecovery.failedWrites === 0 && activeConfigStore._writesQuiesced === false && Number.isInteger(closeReadyAttempt) && closeRestoreAttempt === closeReadyAttempt && writeAfterCloseRecovery.ok === true && historyAfterCloseRecovery.ok === true && configAfterCloseRecovery.globalSettings.webhookUrl === closeRecoveryMarker && recoveredQueue.some(job => job.id === 'ui-close-timeout-job') && preparedUpdateMockCalls === 1 && launchedUpdateMockCalls === 0 && failedUpdateUi.busy === false && failedUpdateUi.message.includes('nicht gestartet');
+    if (!closeRecoveryOk) console.log('Close recovery evidence: ' + JSON.stringify(closeRecoveryEvidence));
+    check('Close recovery waits for its correlated restore ACK and drains retained writes before reopening', closeRecoveryOk);
+    restoreInitialIpcHandler('app:finish-close');
+
+    const closeSnapshotWebhook = 'https://close-persist.invalid/current';
+    const closeSnapshotJobId = 'ui-close-persist-job';
+    activeConfigStore._historyMigrated = true;
+    blockedHistoryWriteMarker = 'ui-close-history-write';
+    blockedHistoryWriteStarted = false;
+    releaseBlockedHistoryWrite = null;
+    const pendingCloseHistoryWrite = activeConfigStore.appendHistory({ id: 'ui-close-history-write', files: [] });
+    await waitUntil(() => blockedHistoryWriteStarted);
+    await wc.executeJavaScript('(() => { config.globalSettings = { ...(config.globalSettings || {}), webhookUrl: "' + closeSnapshotWebhook + '" }; const webhookInput = document.getElementById("webhookUrlInput"); if (webhookInput) webhookInput.value = "' + closeSnapshotWebhook + '"; selectedFiles = []; queueJobs = [{ id: "' + closeSnapshotJobId + '", file: "C:/ui/close-persist.bin", fileName: "close-persist.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 4096, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); scheduleSettingsSave(); persistQueueStateSoon(false); return true; })()');
+    let mainWindowClosed = false;
+    win.once('closed', () => { mainWindowClosed = true; });
+    await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate()');
+    const rendererCloseSealed = await waitUntil(async () => !win.isDestroyed() && await wc.executeJavaScript('closePreparationState === "sealed"'));
+    const windowStayedOpenForClosePersistence = blockedHistoryWriteStarted === true && !win.isDestroyed();
+    const closeUiQuiesced = await wc.executeJavaScript('document.getElementById("shutdownOverlay")?.style.display === "flex" && closePreparationInertState.length > 0 && closePreparationInertState.every(({ element }) => element.inert === true)');
+    const postSealMainWrite = await wc.executeJavaScript('window.api.saveGlobalSettings({ ...(config.globalSettings || {}), webhookUrl: "https://close-persist.invalid/post-seal" }).then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
+    await wc.executeJavaScript('(() => { queueJobs.push({ id: "ui-post-seal-job", file: "C:/ui/post-seal.bin", fileName: "post-seal.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 1 }); rebuildJobIndex(); persistQueueStateSoon(false); scheduleSettingsSave(); return true; })()');
+    await new Promise(resolve => setTimeout(resolve, 650));
+    releaseBlockedHistoryWrite?.();
+    await pendingCloseHistoryWrite;
+    await waitUntil(() => mainWindowClosed);
+    const closePersistedConfig = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
+    const closePersistedQueue = closePersistedConfig.globalSettings.pendingQueue?.queueJobs || [];
+    check('Window close waits for asynchronous persistence of the latest renderer snapshot', keepaliveWindow.isDestroyed() === false && blockedHistoryWriteStarted === true && windowStayedOpenForClosePersistence === true && mainWindowClosed === true && closePersistedConfig.globalSettings.webhookUrl === closeSnapshotWebhook && closePersistedQueue.some(job => job.id === closeSnapshotJobId));
+    check('Window close seals renderer writes before the final snapshot is committed', rendererCloseSealed === true && closeUiQuiesced === true && !closePersistedQueue.some(job => job.id === 'ui-post-seal-job'));
+    check('Main rejects config producers after the close snapshot is sealed', postSealMainWrite.ok === false);
+
   } catch (err) {
-    console.error('Test error:', err.message);
+    console.log('Test error:', err && err.stack ? err.stack : err.message);
     failed++;
   }
 
-  console.log('\\n=== Results ===');
-  results.forEach(r => console.log(r));
-  console.log('\\nTotal: ' + (passed + failed) + ' | Passed: ' + passed + ' | Failed: ' + failed);
-
+  const printResults = () => {
+    console.log('\\n=== Results ===');
+    results.forEach(r => console.log(r));
+    console.log('\\nTotal: ' + (passed + failed) + ' | Passed: ' + passed + ' | Failed: ' + failed);
+  };
+  if (realAppQuit) {
+    app.once('will-quit', () => {
+      check('Lost restart intent does not relaunch during the later normal quit', relaunchCalls === 0);
+      check('Approved update launches its prepared installer exactly once', preparedUpdateMockCalls === 2 && launchedUpdateMockCalls === 1);
+      printResults();
+      process.exitCode = failed > 0 ? 1 : 0;
+    });
+    realAppQuit();
+    return;
+  }
+  printResults();
   app.exit(failed > 0 ? 1 : 0);
 }, 5000);
 `;
 
-// Write the injection script
-const injectPath = path.join(__dirname, '_ui-inject.tmp.js');
-fs.writeFileSync(injectPath, testScript, 'utf-8');
-execFileSync(process.execPath, ['--check', injectPath], { cwd: path.join(__dirname, '..'), stdio: 'pipe' });
-
-// Run the real app with the injection
 try {
-  const electronPath = path.join(__dirname, '..', 'node_modules', '.bin', 'electron');
+  fs.writeFileSync(injectPath, testScript, 'utf-8');
+  execFileSync(process.execPath, ['--check', injectPath], { cwd: path.join(__dirname, '..'), stdio: 'pipe' });
+  const electronPath = path.join(__dirname, '..', 'node_modules', 'electron', 'dist', 'electron.exe');
   const mainPath = path.join(__dirname, '..', 'main.js');
 
-  const result = execSync(
-    `"${electronPath}" --require "${injectPath}" "${mainPath}"`,
-    { cwd: path.join(__dirname, '..'), timeout: 20000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+  const result = execFileSync(
+    electronPath,
+    [`--user-data-dir=${userDataPath}`, '--require', injectPath, mainPath],
+    { cwd: path.join(__dirname, '..'), timeout: 45000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
   );
   console.log(result);
+  const isolatedConfigPath = path.join(userDataPath, 'electron-config.json');
+  if (!fs.existsSync(isolatedConfigPath)) throw new Error(`Isolated UI config was not created: ${isolatedConfigPath}`);
 } catch (err) {
   // timeout or exit code - still print output
   if (err.stdout) console.log(err.stdout);
@@ -335,4 +1284,5 @@ try {
   process.exitCode = Number.isInteger(err.status) && err.status !== 0 ? err.status : 1;
 } finally {
   try { fs.unlinkSync(injectPath); } catch {}
+  try { fs.rmSync(userDataPath, { recursive: true, force: true }); } catch {}
 }

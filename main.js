@@ -15,7 +15,7 @@ const DoodstreamUploader = require('./lib/doodstream-upload');
 const { selectUploadAuth } = require('./lib/account-auth');
 const { createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
-const { checkForUpdate, installUpdate, abortUpdate } = require('./lib/updater');
+const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
 const { createOnlineBackup, downloadOnlineBackup, uploadOnlineBackup } = require('./lib/online-backup');
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
@@ -93,15 +93,145 @@ if (_perfOn) {
 }
 
 let mainWindow;
+let closeFlushApproved = false;
+let closeFlushRequested = false;
+let closeHandshakeReady = false;
+let closeFlushTimer = null;
+let restartAfterClosePreparation = false;
+let quitTeardownStarted = false;
+let closePreparationAttempt = 0;
+let closeQuiesceOwnerAttempt = null;
+let lastRestoredCloseAttempt = null;
+let closeFolderMonitorWasRunning = false;
+let preparedUpdate = null;
+let updatePreparationPromise = null;
+let updateQuitPending = false;
+let preparedUpdateLaunchStarted = false;
 let _lastImportPath = null;
 let dropTargetWindow = null;
 let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
+const activeUploadProducerTrackers = new Set();
 const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
 let diagnosticAgent = null;
 let _diagHandler = null;
+
+function assertConfigWriteAllowed() {
+  if (!settingsImportGate.canStartUpload()) throw new Error('Einstellungen werden gerade importiert');
+}
+
+async function waitForConfigStoreWrites() {
+  await configStore.drainWrites();
+}
+
+function clearCloseFlushTimer() {
+  if (closeFlushTimer) clearTimeout(closeFlushTimer);
+  closeFlushTimer = null;
+}
+
+function waitForCloseOperation(promise, timeoutMs) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Speichern vor dem Beenden hat zu lange gedauert')), timeoutMs))
+  ]);
+}
+
+function trackUploadProducer(manager) {
+  let settled = false;
+  let resolveProducer;
+  const promise = new Promise(resolve => { resolveProducer = resolve; });
+  const tracker = {
+    manager,
+    promise,
+    finish() {
+      if (settled) return;
+      settled = true;
+      activeUploadProducerTrackers.delete(tracker);
+      resolveProducer();
+    }
+  };
+  activeUploadProducerTrackers.add(tracker);
+  return tracker;
+}
+
+function isClosePreparationActive(attempt) {
+  return closeFlushRequested && !closeFlushApproved && attempt === closePreparationAttempt;
+}
+
+function acquireCloseQuiesce(attempt) {
+  if (!isClosePreparationActive(attempt)) return false;
+  if (closeQuiesceOwnerAttempt !== null && closeQuiesceOwnerAttempt !== attempt) return false;
+  closeQuiesceOwnerAttempt = attempt;
+  configStore.setWritesQuiesced(true);
+  return true;
+}
+
+function releaseCloseQuiesce(attempt) {
+  if (closeQuiesceOwnerAttempt !== attempt) return false;
+  closeQuiesceOwnerAttempt = null;
+  configStore.setWritesQuiesced(false);
+  return true;
+}
+
+function rejectPendingUpdate(error) {
+  if (!preparedUpdate && !updateQuitPending) return false;
+  preparedUpdate = null;
+  updateQuitPending = false;
+  preparedUpdateLaunchStarted = false;
+  safeSend('app:update-progress', {
+    stage: 'error',
+    error: error && error.message ? error.message : String(error || 'Einstellungen konnten vor dem Update nicht gespeichert werden')
+  });
+  return true;
+}
+
+function restoreClosePreparation(attempt, clearRestart = true) {
+  if (!isClosePreparationActive(attempt)) return lastRestoredCloseAttempt === attempt;
+  closeFlushApproved = false;
+  closeFlushRequested = false;
+  clearCloseFlushTimer();
+  releaseCloseQuiesce(attempt);
+  lastRestoredCloseAttempt = attempt;
+  if (clearRestart) restartAfterClosePreparation = false;
+  if (closeFolderMonitorWasRunning) {
+    closeFolderMonitorWasRunning = false;
+    const settings = configStore.load().globalSettings?.folderMonitor;
+    if (settings?.enabled && settings.folderPath) startFolderMonitor(settings);
+  }
+  rejectPendingUpdate(new Error('Das Update wurde nicht gestartet, weil die Einstellungen vor dem Beenden nicht gespeichert werden konnten'));
+  return true;
+}
+
+function armCloseFlushTimer(attempt, timeoutMs) {
+  clearCloseFlushTimer();
+  closeFlushTimer = setTimeout(() => {
+    closeFlushTimer = null;
+    restoreClosePreparation(attempt);
+  }, timeoutMs);
+}
+
+function requestClosePreparation() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() || !closeHandshakeReady) return false;
+  if (closeFlushRequested) return true;
+  const attempt = ++closePreparationAttempt;
+  closeFlushRequested = true;
+  closeFolderMonitorWasRunning = !!folderMonitor.running;
+  try { folderMonitor.stop(); } catch {}
+  try { if (uploadManager) uploadManager.cancel(); } catch {}
+  (async () => {
+    try {
+      await waitForCloseOperation(Promise.all(Array.from(activeUploadProducerTrackers, tracker => tracker.promise)), 2500);
+      if (attempt !== closePreparationAttempt || !closeFlushRequested) return;
+      safeSend('app:prepare-close', attempt);
+      armCloseFlushTimer(attempt, 1500);
+    } catch {
+      restoreClosePreparation(attempt);
+    }
+  })();
+  return true;
+}
 
 const _hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!_hasSingleInstanceLock) {
@@ -708,6 +838,7 @@ function _flushUploadLog() {
 
 function _persistFallbackLogPath(workingPath) {
   try {
+    if (!settingsImportGate.canStartUpload()) return;
     const cfg = configStore.load();
     const gs = cfg.globalSettings || {};
     const mode = gs.logMode || 'single';
@@ -913,7 +1044,7 @@ function makeAccountPicker(config) {
 function persistRotation(pick) {
   if (!pick.dirty()) return;
   _rotationCursors = { ...rotationCursors(), ...pick.indices() };
-  configStore.saveRotationCursors(_rotationCursors);
+  configStore.saveRotationCursors(_rotationCursors).catch(error => debugLog(`rotation cursor save failed: ${error.message}`));
 }
 
 function buildUploadTasks(config, files, hosters, pick) {
@@ -1231,7 +1362,7 @@ function createWindow() {
     height: 750,
     minWidth: 800,
     minHeight: 550,
-    backgroundColor: '#16181c',
+    backgroundColor: '#0f0f0f',
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -1240,8 +1371,27 @@ function createWindow() {
     }
   });
   mainWindow = startupWindow.window;
+  closePreparationAttempt++;
+  closeFlushApproved = false;
+  closeFlushRequested = false;
+  closeHandshakeReady = false;
+  closeQuiesceOwnerAttempt = null;
+  lastRestoredCloseAttempt = null;
+  configStore.setWritesQuiesced(false);
+  clearCloseFlushTimer();
+
+  mainWindow.on('close', (event) => {
+    if (closeFlushApproved || !closeHandshakeReady || mainWindow.webContents.isDestroyed()) return;
+    event.preventDefault();
+    requestClosePreparation();
+  });
 
   mainWindow.webContents.setBackgroundThrottling(false);
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    closeHandshakeReady = false;
+    restoreClosePreparation(closePreparationAttempt);
+  });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
@@ -1422,7 +1572,27 @@ app.on('window-all-closed', () => {
   app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!closeFlushApproved && mainWindow && !mainWindow.isDestroyed() && closeHandshakeReady) {
+    event.preventDefault();
+    requestClosePreparation();
+  }
+});
+
+app.on('will-quit', () => {
+  if (quitTeardownStarted) return;
+  quitTeardownStarted = true;
+  if (preparedUpdate && updateQuitPending && closeFlushApproved && !preparedUpdateLaunchStarted) {
+    preparedUpdateLaunchStarted = true;
+    try {
+      launchPreparedUpdate(preparedUpdate);
+    } catch (error) {
+      logError('prepared update launch failed', error);
+    }
+  }
+  preparedUpdate = null;
+  updateQuitPending = false;
+  if (restartAfterClosePreparation) app.relaunch();
   if (uploadManager) try { uploadManager.cancel(); } catch {}
   try { folderMonitor.stop(); } catch {}
   try {
@@ -1467,6 +1637,7 @@ ipcMain.handle('get-config', () => {
 });
 
 ipcMain.handle('save-config', async (_event, config) => {
+  assertConfigWriteAllowed();
   await configStore.save(config);
   if (config && config.globalSettings) _invalidateLogSettings();
   try {
@@ -1519,6 +1690,7 @@ ipcMain.handle('get-history', () => {
 ipcMain.handle('prune-history', async (_event, payload) => {
   const retention = payload && payload.retention;
   const dryRun = !!(payload && payload.dryRun);
+  if (!dryRun) assertConfigWriteAllowed();
   return configStore.pruneHistory(retention, { dryRun });
 });
 
@@ -1725,6 +1897,7 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
 });
 
 ipcMain.handle('start-upload', (_event, payload) => {
+  if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
   const config = configStore.load();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
@@ -1784,6 +1957,8 @@ ipcMain.handle('start-upload', (_event, payload) => {
   // Pass hoster settings to the upload manager
   uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
   globalThis._mhuUploadManagerRef = uploadManager;
+  const _thisManager = uploadManager;
+  const _producerTracker = trackUploadProducer(_thisManager);
 
   const _progressByJob = new Map();
   const _progressTerminalQueue = [];
@@ -1907,7 +2082,6 @@ ipcMain.handle('start-upload', (_event, payload) => {
   // fires start-upload while we're still awaiting appendHistory would
   // create a fresh manager which the trailing `uploadManager = null` then
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
-  const _thisManager = uploadManager;
   uploadManager.on('batch-done', async (summary) => {
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
@@ -1918,7 +2092,16 @@ ipcMain.handle('start-upload', (_event, payload) => {
     try { await configStore.appendHistory(summary); } catch (err) {
       debugLog(`appendHistory failed: ${err.message}`);
     }
+    if (_progressFlushTimer) {
+      clearTimeout(_progressFlushTimer);
+      _progressFlushTimer = null;
+    }
+    const finalProgressBatch = _progressTerminalQueue.splice(0);
+    for (const value of _progressByJob.values()) finalProgressBatch.push(value);
+    _progressByJob.clear();
+    if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
     safeSend('upload-batch-done', summary);
+    _producerTracker.finish();
 
     const fullyAborted = isAllAborted(summary);
     if (isAutoRetry) {
@@ -1939,9 +2122,19 @@ ipcMain.handle('start-upload', (_event, payload) => {
   // This ensures webContents.send() calls from upload events
   // are not interleaved with the handle() response.
   process.nextTick(() => {
-    if (!uploadManager) { debugLog('nextTick: uploadManager was nulled before startBatch'); return; }
+    if (uploadManager !== _thisManager) {
+      debugLog('nextTick: uploadManager was replaced before startBatch');
+      _producerTracker.finish();
+      return;
+    }
+    if (closeFlushRequested) {
+      try { _thisManager.cancel(); } catch {}
+      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+      _producerTracker.finish();
+      return;
+    }
     debugLog(`nextTick: calling startBatch now (priming ${_sessionFailedAccounts.size} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
-    uploadManager.startBatch(tasks, {
+    _thisManager.startBatch(tasks, {
       primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
     }).catch((err) => {
@@ -1956,6 +2149,7 @@ ipcMain.handle('start-upload', (_event, payload) => {
         error: err ? err.message : 'Unbekannter Fehler'
       };
       safeSend('upload-batch-done', errorSummary);
+      _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
     });
@@ -1992,6 +2186,7 @@ ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
 });
 
 ipcMain.handle('add-jobs-to-batch', (_event, payload) => {
+  if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!uploadManager || !uploadManager.running) {
     return { error: 'Kein Upload aktiv' };
   }
@@ -2208,6 +2403,7 @@ ipcMain.handle('open-log-folder', async () => {
 });
 
 ipcMain.handle('clear-history', async () => {
+  assertConfigWriteAllowed();
   await configStore.clearHistory();
   return true;
 });
@@ -2266,6 +2462,7 @@ async function syncImportedRuntime(config) {
 async function applyImportedSettings(imported) {
   settingsImportGate.begin();
   try {
+    await waitForConfigStoreWrites();
     const prepared = prepareImportedSettings(imported);
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
@@ -2302,6 +2499,7 @@ ipcMain.handle('export-backup', async () => {
     ]
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
+  await waitForConfigStoreWrites();
   const config = createPortableSettingsSnapshot(configStore.load());
   if (filePath.toLowerCase().endsWith('.json')) {
     fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf-8');
@@ -2363,6 +2561,7 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
 
 ipcMain.handle('online-backup:create', async () => {
   try {
+    await waitForConfigStoreWrites();
     const snapshot = createPortableSettingsSnapshot(configStore.load());
     const created = createOnlineBackup(snapshot, app.getVersion());
     await uploadOnlineBackup(created.record);
@@ -2455,18 +2654,37 @@ ipcMain.handle('app:check-updates', async () => {
   }
 });
 
-ipcMain.handle('app:install-update', () => {
-  try { if (uploadManager) uploadManager.cancel(); } catch {}
-  installUpdate((progress) => {
-    safeSend('app:update-progress', progress);
-  }).catch((err) => {
-    safeSend('app:update-progress', { stage: 'error', error: err.message });
-  });
-  return { started: true };
+ipcMain.handle('app:install-update', async () => {
+  if (updatePreparationPromise || preparedUpdate || updateQuitPending) {
+    return { started: false, error: 'Ein Update wird bereits vorbereitet' };
+  }
+  updatePreparationPromise = (async () => {
+    const prepared = await prepareUpdate((progress) => {
+      safeSend('app:update-progress', progress);
+    });
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() || !closeHandshakeReady) {
+      throw new Error('Die Anwendung ist noch nicht bereit, das Update sicher zu installieren');
+    }
+    preparedUpdate = prepared;
+    updateQuitPending = true;
+    preparedUpdateLaunchStarted = false;
+    setImmediate(() => app.quit());
+    return { started: true };
+  })();
+  try {
+    return await updatePreparationPromise;
+  } catch (error) {
+    rejectPendingUpdate(error);
+    safeSend('app:update-progress', { stage: 'error', error: error.message });
+    return { started: false, error: error.message };
+  } finally {
+    updatePreparationPromise = null;
+  }
 });
 
 ipcMain.handle('app:abort-update', () => {
   abortUpdate();
+  rejectPendingUpdate(new Error('Update abgebrochen'));
   return true;
 });
 
@@ -2475,12 +2693,59 @@ ipcMain.handle('app:get-version', () => {
 });
 
 ipcMain.handle('app:restart', () => {
-  app.relaunch();
+  restartAfterClosePreparation = true;
   app.quit();
 });
 
 ipcMain.handle('app:quit', () => {
   app.quit();
+});
+
+ipcMain.on('app:close-handshake-ready', (event) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) closeHandshakeReady = true;
+});
+
+ipcMain.on('app:close-preparation-started', (event, attempt) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && isClosePreparationActive(attempt)) {
+    armCloseFlushTimer(attempt, 3000);
+  }
+});
+
+ipcMain.handle('app:finish-close', async (event, payload = true) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return false;
+  const attempt = payload && typeof payload === 'object' && Number.isInteger(payload.attempt) ? payload.attempt : null;
+  if (attempt === null) return false;
+  const ready = payload && typeof payload === 'object' ? payload.ready !== false : payload !== false;
+  if (!ready) {
+    if (isClosePreparationActive(attempt)) {
+      clearCloseFlushTimer();
+      return restoreClosePreparation(attempt);
+    }
+    return lastRestoredCloseAttempt === attempt;
+  }
+  if (!isClosePreparationActive(attempt)) return false;
+  clearCloseFlushTimer();
+  let approved = false;
+  try {
+    if (!acquireCloseQuiesce(attempt)) return false;
+    await waitForCloseOperation(waitForConfigStoreWrites(), 1000);
+    if (!isClosePreparationActive(attempt)) return false;
+    if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'pendingQueue')) {
+      await waitForCloseOperation(configStore.savePendingQueue(payload.pendingQueue, { allowDuringQuiesce: true }), 1000);
+    }
+    if (!isClosePreparationActive(attempt)) return false;
+    closeFlushApproved = true;
+    approved = true;
+    setImmediate(() => {
+      app.quit();
+    });
+    return true;
+  } catch {
+    restoreClosePreparation(attempt);
+    return false;
+  } finally {
+    if (!approved) releaseCloseQuiesce(attempt);
+  }
 });
 
 // --- Hoster settings ---
@@ -2490,8 +2755,11 @@ ipcMain.handle('get-hoster-settings', () => {
 });
 
 ipcMain.handle('save-hoster-settings', async (_event, hosterSettings) => {
+  assertConfigWriteAllowed();
   await configStore.save({ hosterSettings });
-  if (uploadManager) uploadManager.updateSettings(hosterSettings, null);
+  if (uploadManager) {
+    try { uploadManager.updateSettings(hosterSettings, null); } catch (error) { debugLog(`hoster settings runtime update failed: ${error.message}`); }
+  }
   return true;
 });
 
@@ -2501,22 +2769,19 @@ ipcMain.handle('get-global-settings', () => {
   return config.globalSettings || {};
 });
 
-function _preserveDiagSubtree(globalSettings) {
-  if (!globalSettings || typeof globalSettings !== 'object') return globalSettings;
-  try {
-    const cur = configStore.load();
-    if (cur.globalSettings && cur.globalSettings.diagnostics) {
-      globalSettings.diagnostics = cur.globalSettings.diagnostics;
-    }
-  } catch {}
-  return globalSettings;
-}
+ipcMain.handle('save-pending-queue', async (_event, pendingQueue) => {
+  await configStore.savePendingQueue(pendingQueue);
+  return true;
+});
 
 ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
-  globalSettings = _preserveDiagSubtree(globalSettings);
-  await configStore.save({ globalSettings });
+  assertConfigWriteAllowed();
+  await configStore.saveRendererGlobalSettings(globalSettings);
+  globalSettings = configStore.load().globalSettings;
   _invalidateLogSettings();
-  if (uploadManager) uploadManager.updateSettings(null, globalSettings);
+  if (uploadManager) {
+    try { uploadManager.updateSettings(null, globalSettings); } catch (error) { debugLog(`global settings runtime update failed: ${error.message}`); }
+  }
   return true;
 });
 
@@ -2545,62 +2810,6 @@ function _sweepOrphanConfigTmps() {
     }
   } catch {}
 }
-
-// Synchronous save for beforeunload — blocks renderer until write completes
-// Uses atomic write pattern (tmp + backup + rename) to prevent corruption.
-// Returns false on any failure so the renderer (which surfaces this via the
-// beforeunload chain) doesn't quietly think queue + settings persisted when
-// they didn't. Errors are logged for diagnostics regardless.
-ipcMain.on('save-global-settings-sync', (event, globalSettings) => {
-  const tmpPath = configStore.filePath + '.' + process.pid + '.tmp';
-  try {
-    const current = configStore.load();
-    const _diskDiag = current.globalSettings && current.globalSettings.diagnostics;
-    current.globalSettings = globalSettings;
-    if (_diskDiag) current.globalSettings.diagnostics = _diskDiag;
-    try { configStore._guardHosters(current, false); } catch {}
-    _invalidateLogSettings();
-    const data = configStore._serializeForDisk(current);
-    const backupPath = configStore.filePath + '.bak';
-    const _fd = fs.openSync(tmpPath, 'w');
-    try { fs.writeSync(_fd, data); fs.fsyncSync(_fd); } finally { fs.closeSync(_fd); }
-    if (fs.existsSync(configStore.filePath)) {
-      // Use try/catch around the read so an AV/lock race doesn't fail the
-      // whole save just because we couldn't refresh the .bak — the write to
-      // the live file via rename is what matters.
-      try {
-        const existing = fs.readFileSync(configStore.filePath, 'utf-8');
-        if (existing && existing.trim().length > 2) {
-          fs.writeFileSync(backupPath, existing, 'utf-8');
-        }
-      } catch (bakErr) {
-        debugLog(`save-global-settings-sync: backup read/write skipped: ${bakErr.message}`);
-      }
-    }
-    let renamed = false;
-    let lastErr = null;
-    for (let attempt = 0; attempt < 5 && !renamed; attempt++) {
-      try {
-        fs.renameSync(tmpPath, configStore.filePath);
-        renamed = true;
-      } catch (renameErr) {
-        lastErr = renameErr;
-        const code = renameErr && renameErr.code;
-        if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES') {
-          _sleepSyncMs(40);
-        } else {
-          throw renameErr;
-        }
-      }
-    }
-    if (!renamed) throw lastErr || new Error('renameSync failed');
-    event.returnValue = true;
-  } catch (err) {
-    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
-    debugLog(`save-global-settings-sync FAILED: ${err && err.message ? err.message : err}`);
-    event.returnValue = false;
-  }
-});
 
 // --- Folder Monitor ---
 function startFolderMonitor(settings) {
@@ -2809,6 +3018,7 @@ ipcMain.handle('diagnostics:get-settings', () => {
 });
 
 ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
+  assertConfigWriteAllowed();
   const cfg = configStore.load();
   const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
   const next = {
@@ -2830,6 +3040,7 @@ ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
 });
 
 ipcMain.handle('diagnostics:regenerate', async () => {
+  assertConfigWriteAllowed();
   const cfg = configStore.load();
   const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
   const next = { ...cur, token: generateToken(), codeIssuedAt: Date.now() };
@@ -2908,32 +3119,38 @@ async function startRemoteServer() {
 
   let token = remote.token;
   if (!token) {
-    token = generateToken();
-    const gs = { ...config.globalSettings, remote: { ...remote, token } };
-    await configStore.save({ globalSettings: gs });
+    const canonical = await configStore.saveRemoteSettings(remote, generateToken);
+    token = canonical.token;
   }
 
   remoteServer = new RemoteServer();
-  await remoteServer.start({
-    port: remote.port || 9100,
-    token,
-    allowInput: remote.allowInput !== false,
-    mainWindow,
-    onSignalingToCapture: (data) => {
-      if (!captureWindow || captureWindow.isDestroyed()) {
-        debugLog('remote: signaling dropped, no capture window');
-        return;
-      }
-      if (captureWindowReady) {
-        captureWindow.webContents.send('remote:signaling-to-capture', data);
-      } else {
-        debugLog('remote: capture window not ready, queuing', data.type, 'message');
-        signalingQueue.push(data);
-      }
-    },
-    onCreateCaptureWindow: () => createCaptureWindow(),
-    onDestroyCaptureWindow: () => destroyCaptureWindow()
-  });
+  try {
+    await remoteServer.start({
+      port: remote.port || 9100,
+      token,
+      allowInput: remote.allowInput !== false,
+      mainWindow,
+      onSignalingToCapture: (data) => {
+        if (!captureWindow || captureWindow.isDestroyed()) {
+          debugLog('remote: signaling dropped, no capture window');
+          return;
+        }
+        if (captureWindowReady) {
+          captureWindow.webContents.send('remote:signaling-to-capture', data);
+        } else {
+          debugLog('remote: capture window not ready, queuing', data.type, 'message');
+          signalingQueue.push(data);
+        }
+      },
+      onCreateCaptureWindow: () => createCaptureWindow(),
+      onDestroyCaptureWindow: () => destroyCaptureWindow()
+    });
+  } catch (error) {
+    try { remoteServer.stop(); } catch {}
+    remoteServer = null;
+    destroyCaptureWindow();
+    throw error;
+  }
 
   debugLog(`remote-server started on port ${remoteServer.getPort()}`);
 }
@@ -3066,19 +3283,27 @@ ipcMain.handle('remote:get-settings', () => {
 });
 
 ipcMain.handle('remote:save-settings', async (_event, remoteSettings) => {
-  const config = configStore.load();
-  const gs = { ...config.globalSettings, remote: remoteSettings };
-  await configStore.save({ globalSettings: gs });
+  assertConfigWriteAllowed();
+  const canonicalSettings = await configStore.saveRemoteSettings(remoteSettings, generateToken);
 
-  if (remoteSettings.enabled) {
-    await startRemoteServer();
-  } else if (remoteServer) {
-    remoteServer.stop();
-    remoteServer = null;
-    destroyCaptureWindow();
-    debugLog('remote-server stopped');
+  let runtimeError = '';
+  try {
+    if (canonicalSettings.enabled) {
+      await startRemoteServer();
+    } else if (remoteServer) {
+      remoteServer.stop();
+      remoteServer = null;
+      destroyCaptureWindow();
+      debugLog('remote-server stopped');
+    }
+  } catch (error) {
+    runtimeError = error && error.message ? error.message : String(error);
   }
-  return true;
+  return {
+    saved: true,
+    runtimeError,
+    settings: canonicalSettings
+  };
 });
 
 ipcMain.handle('remote:generate-token', () => {
@@ -3095,6 +3320,7 @@ ipcMain.handle('remote:status', () => {
 
 // --- Always on top ---
 ipcMain.handle('set-always-on-top', async (_event, value) => {
+  assertConfigWriteAllowed();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(!!value);
   }

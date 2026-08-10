@@ -17,7 +17,15 @@ contextBridge.exposeInMainWorld('api', {
   // Global settings
   getGlobalSettings: () => ipcRenderer.invoke('get-global-settings'),
   saveGlobalSettings: (settings) => ipcRenderer.invoke('save-global-settings', settings),
-  saveGlobalSettingsSync: (settings) => ipcRenderer.sendSync('save-global-settings-sync', settings),
+  savePendingQueue: (pendingQueue) => ipcRenderer.invoke('save-pending-queue', pendingQueue),
+  finishClosePreparation: (payload = true) => ipcRenderer.invoke('app:finish-close', payload),
+  onPrepareClose: (callback) => {
+    ipcRenderer.on('app:prepare-close', (_event, attempt) => {
+      ipcRenderer.send('app:close-preparation-started', attempt);
+      callback(attempt);
+    });
+  },
+  signalCloseHandshakeReady: () => ipcRenderer.send('app:close-handshake-ready'),
 
   // Always on top
   setAlwaysOnTop: (value) => ipcRenderer.invoke('set-always-on-top', value),
@@ -155,6 +163,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('upload-stats');
     ipcRenderer.removeAllListeners('app:update-available');
     ipcRenderer.removeAllListeners('app:update-progress');
+    ipcRenderer.removeAllListeners('app:prepare-close');
     ipcRenderer.removeAllListeners('shutdown-countdown');
     ipcRenderer.removeAllListeners('folder-monitor:new-files');
     ipcRenderer.removeAllListeners('drop-target:files');

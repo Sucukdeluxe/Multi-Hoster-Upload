@@ -9,11 +9,13 @@ Multi-Hoster-Upload is a Windows desktop app for managing large file batches acr
 ## Capabilities
 
 - Upload one batch to several supported hosters in parallel.
-- Manage multiple accounts per hoster with validation, health checks, and automatic rotation.
+- Manage multiple accounts per hoster with validation, health checks, automatic rotation, and inline OTP completion.
+- Filter uploads, accounts, and history from task-focused sidebars without changing the underlying queue.
 - Add files by drag and drop or file selection and monitor live queue progress.
-- Control per-hoster concurrency, bandwidth limits, retries, and folder monitoring.
+- Control per-hoster concurrency, bandwidth limits, retries, folder monitoring, notifications, and completed-item cleanup.
 - Keep local upload history and copy completed links in bulk.
 - Transfer accounts and settings with a 75-character encrypted online key while encryption and decryption stay on the client.
+- Check for updates from the header and install available releases from an accessible update dialog.
 
 ## Supported hosters
 
@@ -29,7 +31,7 @@ Multi-Hoster-Upload is a Windows desktop app for managing large file batches acr
 
 1. Download the Setup or portable executable from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 2. Run the installer, or launch the portable executable directly.
-3. Add and validate at least one hoster account in Settings, then select files and start the queue.
+3. Add and validate at least one hoster account in Accounts, then select files and start the queue.
 
 ## Local data and credentials
 

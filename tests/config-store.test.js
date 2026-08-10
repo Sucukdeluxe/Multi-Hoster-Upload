@@ -31,6 +31,36 @@ describe('ConfigStore', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('explicit user-data-dir isolates development config writes from the project', async () => {
+    const isolatedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-user-data-'));
+    const projectConfigPath = path.join(__dirname, '..', 'electron-config.json');
+    const projectConfigExisted = fs.existsSync(projectConfigPath);
+    const projectConfigBefore = projectConfigExisted ? fs.readFileSync(projectConfigPath) : null;
+    const explicitStore = new ConfigStore({
+      isPackaged: false,
+      commandLine: {
+        hasSwitch: (name) => name === 'user-data-dir'
+      },
+      getPath: (name) => {
+        if (name === 'userData') return isolatedDir;
+        if (name === 'exe') return path.join(isolatedDir, 'Multi-Hoster-Upload.exe');
+        throw new Error(`Unexpected app path: ${name}`);
+      }
+    });
+
+    try {
+      assert.equal(explicitStore.filePath, path.join(isolatedDir, 'electron-config.json'));
+      await explicitStore.save({ globalSettings: { alwaysOnTop: true } });
+      assert.equal(fs.existsSync(path.join(isolatedDir, 'electron-config.json')), true);
+      assert.equal(fs.existsSync(projectConfigPath), projectConfigExisted);
+      if (projectConfigBefore) {
+        assert.equal(fs.readFileSync(projectConfigPath).equals(projectConfigBefore), true);
+      }
+    } finally {
+      fs.rmSync(isolatedDir, { recursive: true, force: true });
+    }
+  });
+
   it('load returns defaults when file does not exist', () => {
     const config = store.load();
     assert.ok(config.hosters);
@@ -254,6 +284,84 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.alwaysOnTop, true);
   });
 
+  it('drainWrites waits for config and history writes appended while draining', async () => {
+    assert.equal(typeof store.drainWrites, 'function');
+    await store.save({ globalSettings: { alwaysOnTop: false } });
+    store._historyMigrated = true;
+    fs.writeFileSync(store.historyPath, '[]', 'utf-8');
+
+    const originalAtomicWrite = store._atomicWrite.bind(store);
+    const originalHistoryWrite = store._writeHistoryFileAtomic.bind(store);
+    const configReleases = [];
+    const historyReleases = [];
+    const block = (releases, operation) => new Promise((resolve, reject) => {
+      releases.push(() => Promise.resolve().then(operation).then(resolve, reject));
+    });
+    store._atomicWrite = (data) => block(configReleases, () => originalAtomicWrite(data));
+    store._writeHistoryFileAtomic = (history) => block(historyReleases, () => originalHistoryWrite(history));
+
+    const configWrites = store.save({ globalSettings: { alwaysOnTop: true } })
+      .then(() => store.save({ hosterSettings: { 'byse.sx': { retries: 8 } } }));
+    const historyWrites = store.appendHistory({ id: 'first', files: [] })
+      .then(() => store.appendHistory({ id: 'second', files: [] }));
+
+    while (configReleases.length < 1 || historyReleases.length < 1) await new Promise(resolve => setImmediate(resolve));
+    let drained = false;
+    const draining = store.drainWrites().then(() => { drained = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(drained, false);
+
+    configReleases.shift()();
+    historyReleases.shift()();
+    while (configReleases.length < 1 || historyReleases.length < 1) await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(drained, false);
+
+    configReleases.shift()();
+    historyReleases.shift()();
+    await Promise.all([configWrites, historyWrites, draining]);
+    assert.equal(store.load().globalSettings.alwaysOnTop, true);
+    assert.equal(store.load().hosterSettings['byse.sx'].retries, 8);
+    assert.deepEqual(store.loadHistory().map(entry => entry.id), ['first', 'second']);
+  });
+
+  it('drainWrites ignores caller-handled failures but propagates a write failing during the drain', async () => {
+    const originalAtomicWrite = store._atomicWrite.bind(store);
+    store._atomicWrite = () => Promise.reject(new Error('config write failed'));
+    await assert.rejects(store.save({ globalSettings: { alwaysOnTop: true } }), /config write failed/);
+    await store.drainWrites();
+
+    store._atomicWrite = originalAtomicWrite;
+    store._historyMigrated = true;
+    fs.writeFileSync(store.historyPath, '[]', 'utf-8');
+    let rejectHistoryWrite;
+    store._writeHistoryFileAtomic = () => new Promise((_resolve, reject) => { rejectHistoryWrite = reject; });
+    const pendingWrite = store.appendHistory({ id: 'failed', files: [] });
+    pendingWrite.catch(() => {});
+    while (!rejectHistoryWrite) await new Promise(resolve => setImmediate(resolve));
+    const draining = store.drainWrites();
+    rejectHistoryWrite(new Error('history write failed'));
+    await assert.rejects(draining, /history write failed/);
+    await assert.rejects(pendingWrite, /history write failed/);
+    await store.drainWrites();
+  });
+
+  it('surfaces a failed queued write and keeps later writes usable', async () => {
+    const originalAtomicWrite = store._atomicWrite.bind(store);
+    let failNextWrite = true;
+    store._atomicWrite = (data) => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        return Promise.reject(new Error('write failed'));
+      }
+      return originalAtomicWrite(data);
+    };
+
+    await assert.rejects(store.appendHistory({ id: 'failed', files: [] }), /write failed/);
+    await store.appendHistory({ id: 'saved', files: [] });
+    assert.deepEqual(store.loadHistory().map(entry => entry.id), ['saved']);
+  });
+
   it('serializes a complete settings replacement with pending saves', async () => {
     const originalAtomicWrite = store._atomicWrite.bind(store);
     let activeWrites = 0;
@@ -286,6 +394,103 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.alwaysOnTop, false);
     assert.deepEqual(config.globalSettings.pendingQueue, { savedAt: 123, queueJobs: [{ id: 'local' }] });
     assert.deepEqual(config.rotationCursors, {});
+  });
+
+  it('patches the pending queue after an import without reverting imported settings', async () => {
+    await store.save({
+      globalSettings: {
+        alwaysOnTop: true,
+        webhookUrl: 'https://before.invalid',
+        pendingQueue: { savedAt: 1, queueJobs: [{ id: 'before' }] }
+      }
+    });
+
+    const replace = store.replaceSettings({
+      hosters: { 'byse.sx': [{ id: 'imported', enabled: true, authType: 'api', apiKey: 'imported-key' }] },
+      hosterSettings: { 'byse.sx': { retries: 9 } },
+      globalSettings: {
+        alwaysOnTop: false,
+        webhookUrl: 'https://imported.invalid',
+        pendingQueue: null
+      },
+      history: [],
+      rotationCursors: {}
+    });
+    const pendingQueue = {
+      savedAt: 2,
+      queueJobs: [{ id: 'live', status: 'done' }]
+    };
+    const saveQueue = store.savePendingQueue(pendingQueue);
+
+    await Promise.all([replace, saveQueue]);
+    const config = store.load();
+    assert.equal(config.hosters['byse.sx'][0].id, 'imported');
+    assert.equal(config.globalSettings.alwaysOnTop, false);
+    assert.equal(config.globalSettings.webhookUrl, 'https://imported.invalid');
+    assert.deepEqual(config.globalSettings.pendingQueue, pendingQueue);
+  });
+
+  it('preserves main-owned global state when saving a renderer snapshot', async () => {
+    await store.save({
+      globalSettings: {
+        alwaysOnTop: false,
+        pendingQueue: { savedAt: 3, queueJobs: [{ id: 'local' }] },
+        diagnostics: { enabled: true, port: 7777 },
+        historyRetention: '7d',
+        remote: { enabled: true, port: 9100, token: 'main-token', allowInput: true }
+      }
+    });
+
+    await store.saveRendererGlobalSettings({
+      alwaysOnTop: true,
+      pendingQueue: null,
+      diagnostics: { enabled: false, port: 1 },
+      historyRetention: 'all',
+      remote: { enabled: true, port: 9200, token: '', allowInput: false }
+    });
+
+    const config = store.load();
+    assert.equal(config.globalSettings.alwaysOnTop, true);
+    assert.deepEqual(config.globalSettings.pendingQueue, { savedAt: 3, queueJobs: [{ id: 'local' }] });
+    assert.equal(config.globalSettings.diagnostics.enabled, true);
+    assert.equal(config.globalSettings.diagnostics.port, 7777);
+    assert.equal(config.globalSettings.historyRetention, '7d');
+    assert.deepEqual(config.globalSettings.remote, { enabled: true, port: 9200, token: 'main-token', allowInput: false });
+  });
+
+  it('merges remote settings in the write queue and returns the canonical token', async () => {
+    await store.save({
+      globalSettings: {
+        remote: { enabled: false, port: 9100, token: 'canonical-token', allowInput: true }
+      }
+    });
+
+    const rendererSave = store.saveRendererGlobalSettings({
+      alwaysOnTop: true,
+      remote: { enabled: false, port: 9200, token: '', allowInput: false }
+    });
+    const remoteSave = store.saveRemoteSettings(
+      { enabled: true, port: 9300, token: '', allowInput: false },
+      () => 'generated-token'
+    );
+
+    const [, canonical] = await Promise.all([rendererSave, remoteSave]);
+    assert.deepEqual(canonical, { enabled: true, port: 9300, token: 'canonical-token', allowInput: false });
+    assert.deepEqual(store.load().globalSettings.remote, canonical);
+  });
+
+  it('rejects ordinary writes while quiesced and permits only the final pending queue snapshot', async () => {
+    store.setWritesQuiesced(true);
+
+    await assert.rejects(store.save({ globalSettings: { alwaysOnTop: true } }), /beendet/);
+    await assert.rejects(store.appendHistory({ id: 'late-history', files: [] }), /beendet/);
+    await store.savePendingQueue({ savedAt: 4, queueJobs: [{ id: 'final' }] }, { allowDuringQuiesce: true });
+
+    assert.equal(store.load().globalSettings.alwaysOnTop, false);
+    assert.deepEqual(store.load().globalSettings.pendingQueue, { savedAt: 4, queueJobs: [{ id: 'final' }] });
+    store.setWritesQuiesced(false);
+    await store.save({ globalSettings: { ...store.load().globalSettings, alwaysOnTop: true } });
+    assert.equal(store.load().globalSettings.alwaysOnTop, true);
   });
 
   it('load() returns independent clones — mutating one result must not leak into the cache', () => {
@@ -433,11 +638,133 @@ describe('ConfigStore history split (electron-history.json)', () => {
     assert.equal(s.loadHistory().length, 7, 'legacy path still serves history if migration never ran');
   });
 
+  it('migrated prune refuses to overwrite a corrupted history file', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    fs.writeFileSync(s.historyPath, '{broken-history', 'utf-8');
+    const historyBefore = fs.readFileSync(s.historyPath, 'utf-8');
+
+    await assert.rejects(s.pruneHistory('7d', { dryRun: false }), /Verlaufsdatei ist beschädigt/);
+
+    assert.equal(fs.readFileSync(s.historyPath, 'utf-8'), historyBefore);
+    assert.equal(JSON.parse(fs.readFileSync(s.filePath, 'utf-8')).globalSettings.historyRetention, 'all');
+  });
+
   it('pruneHistory trims history.json and persists the retention setting', async () => {
     writeConfigWithHistory(12);
     s._migrateHistory();
     const res = await s.pruneHistory('all', { dryRun: false });
     assert.equal(s.loadHistory().length, 12);
     assert.ok(res.keptBatches === 12);
+  });
+
+  it('migrated prune leaves history unchanged when the retention commit fails', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    const historyBefore = fs.readFileSync(s.historyPath, 'utf-8');
+    s._atomicWrite = () => Promise.reject(new Error('retention commit failed'));
+
+    await assert.rejects(s.pruneHistory('7d', { dryRun: false }), /retention commit failed/);
+
+    assert.equal(fs.readFileSync(s.historyPath, 'utf-8'), historyBefore);
+    assert.equal(JSON.parse(fs.readFileSync(s.filePath, 'utf-8')).globalSettings.historyRetention, 'all');
+  });
+
+  it('migrated prune restores the previous retention when the history write fails', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    const historyBefore = fs.readFileSync(s.historyPath, 'utf-8');
+    const originalAtomicWrite = s._atomicWrite.bind(s);
+    const retentionWrites = [];
+    s._atomicWrite = (data) => {
+      retentionWrites.push(JSON.parse(data).globalSettings.historyRetention);
+      return originalAtomicWrite(data);
+    };
+    s._writeHistoryFileAtomic = () => Promise.reject(new Error('history prune failed'));
+
+    await assert.rejects(s.pruneHistory('7d', { dryRun: false }), /history prune failed/);
+
+    assert.deepEqual(retentionWrites, ['7d', 'all']);
+    assert.equal(JSON.parse(fs.readFileSync(s.filePath, 'utf-8')).globalSettings.historyRetention, 'all');
+    assert.equal(fs.readFileSync(s.historyPath, 'utf-8'), historyBefore);
+  });
+
+  it('migrated prune serializes surrounding global settings saves across an internal rollback', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    const historyBefore = fs.readFileSync(s.historyPath, 'utf-8');
+    const originalAtomicWrite = s._atomicWrite.bind(s);
+    const configWrites = [];
+    let priorWriteStarted = false;
+    let releasePriorWrite;
+    s._atomicWrite = (data) => {
+      const settings = JSON.parse(data).globalSettings;
+      configWrites.push({ webhookUrl: settings.webhookUrl || '', alwaysOnTop: !!settings.alwaysOnTop, historyRetention: settings.historyRetention });
+      if (!priorWriteStarted && settings.webhookUrl === 'https://prune-race.invalid/prior') {
+        priorWriteStarted = true;
+        return new Promise((resolve, reject) => {
+          releasePriorWrite = () => originalAtomicWrite(data).then(resolve, reject);
+        });
+      }
+      return originalAtomicWrite(data);
+    };
+
+    let rejectHistoryWrite;
+    s._writeHistoryFileAtomic = () => new Promise((_resolve, reject) => { rejectHistoryWrite = reject; });
+    const priorSettings = { ...s.load().globalSettings, alwaysOnTop: true, webhookUrl: 'https://prune-race.invalid/prior', historyRetention: 'all' };
+    const priorSave = s.save({ globalSettings: priorSettings });
+    while (!releasePriorWrite) await new Promise(resolve => setImmediate(resolve));
+
+    let pruneError = null;
+    const pruning = s.pruneHistory('7d', { dryRun: false }).catch(error => { pruneError = error; });
+    releasePriorWrite();
+    await priorSave;
+    while (!rejectHistoryWrite) await new Promise(resolve => setImmediate(resolve));
+
+    const laterSettings = { ...priorSettings, alwaysOnTop: false, webhookUrl: 'https://prune-race.invalid/later', historyRetention: 'all' };
+    const laterSave = s.save({ globalSettings: laterSettings });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    const laterCommittedBeforeRollback = configWrites.some(write => write.webhookUrl === 'https://prune-race.invalid/later');
+    rejectHistoryWrite(new Error('history prune race failed'));
+    await pruning;
+    await laterSave;
+
+    assert.match(pruneError?.message || '', /history prune race failed/);
+    assert.equal(laterCommittedBeforeRollback, false);
+    assert.deepEqual(configWrites.map(write => `${write.webhookUrl}:${write.historyRetention}`), [
+      'https://prune-race.invalid/prior:all',
+      'https://prune-race.invalid/prior:7d',
+      'https://prune-race.invalid/prior:all',
+      'https://prune-race.invalid/later:all'
+    ]);
+    const finalSettings = JSON.parse(fs.readFileSync(s.filePath, 'utf-8')).globalSettings;
+    assert.equal(finalSettings.webhookUrl, 'https://prune-race.invalid/later');
+    assert.equal(finalSettings.alwaysOnTop, false);
+    assert.equal(finalSettings.historyRetention, 'all');
+    assert.equal(fs.readFileSync(s.historyPath, 'utf-8'), historyBefore);
+  });
+
+  it('renderer snapshots cannot revert retention after a successful prune', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    const originalHistoryWrite = s._writeHistoryFileAtomic.bind(s);
+    let releaseHistoryWrite;
+    s._writeHistoryFileAtomic = (history) => new Promise((resolve, reject) => {
+      releaseHistoryWrite = () => originalHistoryWrite(history).then(resolve, reject);
+    });
+
+    const pruning = s.pruneHistory('7d', { dryRun: false });
+    while (!releaseHistoryWrite) await new Promise(resolve => setImmediate(resolve));
+    const staleRendererSave = s.saveRendererGlobalSettings({
+      ...s.load().globalSettings,
+      alwaysOnTop: true,
+      historyRetention: 'all'
+    });
+    releaseHistoryWrite();
+    await Promise.all([pruning, staleRendererSave]);
+
+    assert.equal(s.load().globalSettings.historyRetention, '7d');
+    assert.equal(s.load().globalSettings.alwaysOnTop, true);
   });
 });

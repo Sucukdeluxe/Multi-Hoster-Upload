@@ -12,9 +12,20 @@ function batch(timestamp, okRows, extras = {}) {
 
 const DAY = 86400000;
 
-test('countHistoryRows counts only non-aborted, non-error results', () => {
+test('countHistoryRows counts every visible history result', () => {
   const h = [batch('2026-01-01', 3, { aborted: 2, error: 1 })];
-  assert.strictEqual(countHistoryRows(h), 3);
+  assert.strictEqual(countHistoryRows(h), 6);
+});
+
+test('count policy prunes histories made only from failed or aborted uploads', () => {
+  const h = [
+    batch('2026-01-01', 0, { error: 60 }),
+    batch('2026-01-02', 0, { aborted: 60 }),
+    batch('2026-01-03', 0, { error: 60 })
+  ];
+  const pruned = applyHistoryRetention(h, '100', Date.parse('2026-06-01'));
+  assert.deepStrictEqual(pruned.map(b => b.timestamp), ['2026-01-02', '2026-01-03']);
+  assert.strictEqual(countHistoryRows(pruned), 120);
 });
 
 test('retention "all" returns the array unchanged', () => {

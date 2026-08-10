@@ -102,6 +102,161 @@ const queuePersistThrottle = (window.ThrottleTimer && window.ThrottleTimer.makeT
         isPending() { return h !== null; }
       };
     })();
+let configWriteQueue = Promise.resolve();
+const failedConfigWriteOperations = [];
+let configFlushPromise = null;
+let configWriteEpoch = 0;
+let configImportInProgress = false;
+let closePreparationState = 'open';
+let closeWriteAccessDepth = 0;
+
+function createSupersededConfigWriteError() {
+  const error = new Error('Einstellungen wurden durch einen Import ersetzt');
+  error.code = 'CONFIG_WRITE_SUPERSEDED';
+  return error;
+}
+
+function createClosedConfigWriteError() {
+  const error = new Error('Die Anwendung wird gerade beendet');
+  error.code = 'CONFIG_WRITE_CLOSED';
+  return error;
+}
+
+function beginConfigImport() {
+  if (configImportInProgress) throw new Error('Ein Einstellungsimport läuft bereits');
+  configImportInProgress = true;
+  configWriteEpoch++;
+}
+
+function endConfigImport() {
+  configImportInProgress = false;
+}
+
+function isConfigWriteImportGateError(error) {
+  return String(error && error.message ? error.message : error).includes('Einstellungen werden gerade importiert');
+}
+
+function retainFailedConfigWrite(operation, epoch, preserveAcrossImport) {
+  if (!failedConfigWriteOperations.some(entry => entry.operation === operation)) {
+    failedConfigWriteOperations.push({ operation, epoch, preserveAcrossImport });
+  }
+}
+
+async function retryFailedConfigWrites() {
+  while (failedConfigWriteOperations.length > 0) {
+    const entry = failedConfigWriteOperations[0];
+    if (entry.epoch !== configWriteEpoch && !entry.preserveAcrossImport) {
+      failedConfigWriteOperations.shift();
+      continue;
+    }
+    try {
+      await entry.operation();
+      failedConfigWriteOperations.shift();
+    } catch (error) {
+      if (isConfigWriteImportGateError(error)) {
+        failedConfigWriteOperations.shift();
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function enqueueConfigWriteOperation(operation) {
+  const promise = configWriteQueue.then(operation, operation);
+  const tail = promise.then(() => undefined, () => undefined);
+  configWriteQueue = tail;
+  return { promise, tail };
+}
+
+function runConfigWrite(operation, options = {}) {
+  const epoch = configWriteEpoch;
+  const preserveAcrossImport = options.preserveAcrossImport === true;
+  const allowedDuringClose = options.allowDuringClose === true || closeWriteAccessDepth > 0;
+  const blockedByImport = configImportInProgress && !preserveAcrossImport;
+  const blockedByClose = closePreparationState !== 'open' && !allowedDuringClose;
+  return enqueueConfigWriteOperation(async () => {
+    if (blockedByClose || (closePreparationState === 'sealed' && !allowedDuringClose)) throw createClosedConfigWriteError();
+    if (!preserveAcrossImport && (blockedByImport || configImportInProgress || epoch !== configWriteEpoch)) throw createSupersededConfigWriteError();
+    try {
+      await retryFailedConfigWrites();
+    } catch (error) {
+      retainFailedConfigWrite(operation, epoch, preserveAcrossImport);
+      throw error;
+    }
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isConfigWriteImportGateError(error)) retainFailedConfigWrite(operation, epoch, preserveAcrossImport);
+      throw error;
+    }
+  }).promise;
+}
+
+async function withCloseWriteAccess(operation) {
+  closeWriteAccessDepth++;
+  try {
+    return await operation();
+  } finally {
+    closeWriteAccessDepth--;
+  }
+}
+
+function snapshotConfigWritePayload(payload) {
+  return structuredClone(payload);
+}
+
+function saveConfigTracked(configPatch) {
+  const payload = snapshotConfigWritePayload(configPatch);
+  return runConfigWrite(() => window.api.saveConfig(payload));
+}
+
+function saveHosterSettingsTracked(settings) {
+  const payload = snapshotConfigWritePayload(settings);
+  return runConfigWrite(() => window.api.saveHosterSettings(payload));
+}
+
+function saveGlobalSettingsTracked(settings) {
+  const payload = snapshotConfigWritePayload(settings);
+  return runConfigWrite(() => window.api.saveGlobalSettings(payload));
+}
+
+function savePendingQueueTracked(pendingQueue) {
+  const payload = snapshotConfigWritePayload(pendingQueue);
+  return runConfigWrite(() => window.api.savePendingQueue(payload), { preserveAcrossImport: true });
+}
+
+function setAlwaysOnTopTracked(value) {
+  const enabled = !!value;
+  return runConfigWrite(() => window.api.setAlwaysOnTop(enabled));
+}
+
+function saveDiagnosticsSettingsTracked(settings) {
+  const payload = snapshotConfigWritePayload(settings);
+  return runConfigWrite(() => window.api.diagnosticsSaveSettings(payload));
+}
+
+function saveRemoteSettingsTracked(settings) {
+  const payload = snapshotConfigWritePayload(settings);
+  return runConfigWrite(() => window.api.remoteSaveSettings(payload));
+}
+
+function flushConfigWrites() {
+  if (configFlushPromise) return configFlushPromise;
+  configFlushPromise = (async () => {
+    while (true) {
+      const { promise, tail } = enqueueConfigWriteOperation(retryFailedConfigWrites);
+      await promise;
+      if (configWriteQueue === tail && failedConfigWriteOperations.length === 0) return;
+    }
+  })();
+  configFlushPromise.then(
+    () => { configFlushPromise = null; },
+    () => { configFlushPromise = null; }
+  );
+  return configFlushPromise;
+}
+
 let _restoredSnapshotSavedAt = null;
 let settingsSaveTimer = null;
 const settingsSaveCoordinator = window.SerializedRunner.createSerializedRunner(performSaveSettings);
@@ -142,11 +297,21 @@ const _doneRemovalCoalescer = window.CoalescedSet
     })
   : null;
 const queueSortState = { key: 'filename', direction: 'asc' };
+let uploadSidebarFilter = 'all';
+let _queueFilterCache = { filter: '', source: null, result: [] };
 
 // History state
 let historyRowsData = [];
 let historySortState = { key: 'date', direction: 'desc' };
 let _historySortClicked = false;
+let historySidebarCounts = { total: 0, success: 0, error: 0 };
+let accountSidebarFilter = 'all';
+let historySidebarFilter = 'all';
+let _knownUpdateInfo = null;
+let _updateCheckBusy = false;
+let _updateInstallBusy = false;
+let _updateDialogReturnFocus = null;
+let _updateDialogInertState = [];
 
 // Session-specific files for the "Files" panel (resets each session)
 let sessionFilesData = [];
@@ -471,14 +636,73 @@ async function _handleMenuAction(action) {
       break;
     }
     case 'check-updates': {
-      showCopyToast('Suche nach Updates…');
-      try {
-        const result = await window.api.checkForUpdate();
-        if (result && result.available) { showUpdateBanner(result); showCopyToast('Update gefunden!'); }
-        else showCopyToast('Kein Update verfügbar');
-      } catch { showCopyToast('Fehler beim Prüfen'); }
+      await requestUpdateCheck();
       break;
     }
+  }
+}
+
+function _setHeaderUpdateLabel(text) {
+  const button = document.getElementById('headerUpdateBtn');
+  if (!button) return;
+  const label = button.querySelector('[data-update-label], .header-update-label');
+  if (label) label.textContent = text;
+  else button.textContent = text;
+}
+
+function _syncHeaderUpdateState() {
+  const button = document.getElementById('headerUpdateBtn');
+  const available = !!(_knownUpdateInfo && _knownUpdateInfo.available);
+  const version = available ? String(_knownUpdateInfo.remoteVersion || '').replace(/^v/i, '') : '';
+  const hint = _updateCheckBusy
+    ? 'Suche nach Aktualisierungen…'
+    : available
+      ? `Update v${version || 'unbekannt'} verfügbar. Klicken zum Installieren.`
+      : 'Nach Aktualisierungen suchen';
+  if (button) {
+    button.classList.toggle('update-available', available);
+    button.classList.toggle('is-checking', _updateCheckBusy);
+    button.disabled = _updateCheckBusy;
+    button.setAttribute('aria-busy', _updateCheckBusy ? 'true' : 'false');
+    button.setAttribute('aria-label', hint);
+    button.title = hint;
+    button.dataset.tooltip = hint;
+    _setHeaderUpdateLabel(_updateCheckBusy ? 'Prüfen…' : (available ? 'Update verfügbar' : 'Update'));
+  }
+  const manualButton = document.getElementById('manualUpdateCheckBtn');
+  if (manualButton) {
+    manualButton.disabled = _updateCheckBusy;
+    manualButton.setAttribute('aria-busy', _updateCheckBusy ? 'true' : 'false');
+    manualButton.textContent = _updateCheckBusy ? 'Prüfe…' : (available ? 'Update verfügbar' : 'Nach Updates suchen');
+  }
+}
+
+async function requestUpdateCheck() {
+  if (_knownUpdateInfo && _knownUpdateInfo.available) {
+    showUpdateBanner(_knownUpdateInfo);
+    return _knownUpdateInfo;
+  }
+  if (_updateCheckBusy) return null;
+  _updateCheckBusy = true;
+  _syncHeaderUpdateState();
+  showCopyToast('Suche nach Updates…');
+  try {
+    const result = await window.api.checkForUpdate();
+    if (result && result.available) {
+      showUpdateBanner(result);
+      showCopyToast('Update gefunden!');
+    } else if (result && result.error) {
+      showCopyToast('Updateprüfung fehlgeschlagen');
+    } else {
+      showCopyToast('Kein Update verfügbar');
+    }
+    return result;
+  } catch {
+    showCopyToast('Updateprüfung fehlgeschlagen');
+    return null;
+  } finally {
+    _updateCheckBusy = false;
+    _syncHeaderUpdateState();
   }
 }
 
@@ -500,7 +724,7 @@ function _menuSaveParallel(v) {
   const n = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
   const gs = { ...(config.globalSettings || {}), parallelUploadCount: n };
   config.globalSettings = gs;
-  window.api.saveGlobalSettings(gs).catch(() => {});
+  saveGlobalSettingsTracked(gs).catch(() => {});
   const mirror = document.getElementById('parallelUploadCountInput');
   if (mirror) mirror.value = String(n);
   return n;
@@ -510,7 +734,7 @@ function _menuSaveSpeedMbs(mbs, enabled) {
   const kbs = enabled ? Math.max(0, Math.round((parseFloat(mbs) || 0) * 1024)) : 0;
   const gs = { ...(config.globalSettings || {}), globalMaxSpeedKbs: kbs };
   config.globalSettings = gs;
-  window.api.saveGlobalSettings(gs).catch(() => {});
+  saveGlobalSettingsTracked(gs).catch(() => {});
   const mirror = document.getElementById('globalMaxSpeedMbsInput');
   if (mirror) mirror.value = kbs > 0 ? String(+(kbs / 1024).toFixed(2)) : '0';
 }
@@ -909,15 +1133,18 @@ function buildPersistedQueueState() {
 }
 
 async function persistQueueStateNow() {
+  const pendingQueue = buildPersistedQueueState();
   const globalSettings = {
     ...(config.globalSettings || {}),
-    pendingQueue: buildPersistedQueueState()
+    pendingQueue
   };
   config.globalSettings = globalSettings;
-  await window.api.saveGlobalSettings(globalSettings);
+  await savePendingQueueTracked(pendingQueue);
+  return pendingQueue;
 }
 
 function persistQueueStateSoon(immediate) {
+  if (closePreparationState !== 'open') return;
   if (immediate) {
     queuePersistThrottle.cancel();
     persistQueueStateNow().catch(() => {});
@@ -930,13 +1157,10 @@ function persistQueueStateSoon(immediate) {
 }
 
 function clearPersistedQueueStateSoon() {
+  if (closePreparationState !== 'open') return;
   queuePersistThrottle.request(() => {
-    const globalSettings = {
-      ...(config.globalSettings || {}),
-      pendingQueue: null
-    };
-    config.globalSettings = globalSettings;
-    window.api.saveGlobalSettings(globalSettings).catch(() => {});
+    config.globalSettings = { ...(config.globalSettings || {}), pendingQueue: null };
+    savePendingQueueTracked(null).catch(() => {});
   }, 0);
 }
 
@@ -1108,6 +1332,7 @@ const _ABORT_SELECTION_STATUSES = new Set(['preview', 'queued', 'getting-server'
 
 function updateQueueActionButtons() {
   updateStartButton();
+  _normalizeQueueSelectionToVisible();
 
   const hasSelection = selectedJobIds.size > 0;
   // Single pass over the (usually small) selection set instead of three O(n)
@@ -1435,11 +1660,58 @@ function _updateRowInPlace(tr, job) {
   return true;
 }
 
+function _matchesUploadSidebarFilter(job, filter = uploadSidebarFilter) {
+  if (filter === 'active') return job.status === 'uploading' || job.status === 'getting-server' || job.status === 'retrying';
+  if (filter === 'waiting') return job.status === 'preview' || job.status === 'queued';
+  if (filter === 'done') return job.status === 'done';
+  if (filter === 'error') return job.status === 'error';
+  return true;
+}
+
+function _getVisibleQueueJobs() {
+  if (uploadSidebarFilter === 'all') return queueJobs;
+  const filtered = queueJobs.filter(job => _matchesUploadSidebarFilter(job));
+  if (_queueFilterCache.filter === uploadSidebarFilter && _queueFilterCache.source === queueJobs && _queueFilterCache.result.length === filtered.length) {
+    let unchanged = true;
+    for (let index = 0; index < filtered.length; index++) {
+      if (_queueFilterCache.result[index] !== filtered[index]) {
+        unchanged = false;
+        break;
+      }
+    }
+    if (unchanged) return _queueFilterCache.result;
+  }
+  _queueFilterCache = { filter: uploadSidebarFilter, source: queueJobs, result: filtered };
+  return filtered;
+}
+
+function _normalizeQueueSelectionToVisible(visibleJobs = _getVisibleQueueJobs()) {
+  if (selectedJobIds.size === 0) return false;
+  const visibleIds = new Set(visibleJobs.map(job => job.id));
+  let changed = false;
+  for (const id of selectedJobIds) {
+    if (!visibleIds.has(id)) {
+      selectedJobIds.delete(id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function _getVisibleSelectedQueueJobs(predicate) {
+  const visibleJobs = _getVisibleQueueJobs();
+  _normalizeQueueSelectionToVisible(visibleJobs);
+  return visibleJobs.filter(job => selectedJobIds.has(job.id) && (!predicate || predicate(job)));
+}
+
 function renderQueueTable() {
   const tbody = document.getElementById('queueBody');
   if (!tbody) return;
 
-  _sortedJobsCache = sortQueueJobs(queueJobs);
+  const visibleJobs = _getVisibleQueueJobs();
+  const selectionChanged = _normalizeQueueSelectionToVisible(visibleJobs);
+  _sortedJobsCache = sortQueueJobs(visibleJobs);
+  if (selectionChanged) updateQueueActionButtons();
   const totalRows = _sortedJobsCache.length;
 
   if (totalRows < 200) {
@@ -1841,18 +2113,43 @@ async function doBackupExport() {
 }
 
 function applyImportedConfig(importedConfig, message) {
-  config = importedConfig;
+  const pendingQueue = buildPersistedQueueState();
+  config = {
+    ...importedConfig,
+    globalSettings: {
+      ...(importedConfig.globalSettings || {}),
+      pendingQueue
+    }
+  };
   hosterSettings = config.hosterSettings || {};
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
-  window.api.setAlwaysOnTop(alwaysOnTopState);
   renderSettings();
   renderAccounts();
   renderHosterSummary();
   renderHosterModal();
   loadHistory();
   showCopyToast(message);
+}
+
+async function persistImportedQueueState() {
+  let persistenceError = null;
+  try {
+    await persistQueueStateNow();
+  } catch (error) {
+    persistenceError = error;
+  }
+  try {
+    await flushConfigWrites();
+  } catch (error) {
+    if (!persistenceError) persistenceError = error;
+  }
+  return persistenceError;
+}
+
+function showImportQueuePersistenceError(error) {
+  showCopyToast(`Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden: ${error.message || error}`, 8000);
 }
 
 function setOnlineBackupStatus(message, state = '') {
@@ -1928,12 +2225,21 @@ async function doOnlineBackupRestore() {
   try {
     await flushPendingSettingsSaves();
     setOnlineBackupStatus('Lade und entschlüssele Einstellungen…', 'busy');
-    const result = await window.api.restoreOnlineBackup(key);
+    beginConfigImport();
+    let result;
+    let queuePersistenceError = null;
+    try {
+      result = await window.api.restoreOnlineBackup(key);
+      if (result && result.ok) applyImportedConfig(result.config, 'Online-Backup importiert');
+    } finally {
+      queuePersistenceError = await persistImportedQueueState();
+      endConfigImport();
+    }
     if (!result || !result.ok) throw new Error(result?.error || 'Online-Sicherung konnte nicht importiert werden');
-    applyImportedConfig(result.config, 'Online-Backup importiert');
     const warnings = Array.isArray(result.warnings) ? result.warnings : [];
     if (warnings.length) setOnlineBackupStatus(`Einstellungen übernommen. Bitte prüfen: ${warnings.join(', ')}.`, 'warning');
     else setOnlineBackupStatus('Alle Accounts und Einstellungen wurden übernommen.', 'success');
+    if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
   } catch (error) {
     setOnlineBackupStatus(error.message || String(error), 'error');
   } finally {
@@ -2012,7 +2318,16 @@ async function doBackupImport(legacyPassword) {
   const pw = typeof legacyPassword === 'string' ? legacyPassword : undefined;
   try {
     await flushPendingSettingsSaves();
-    const result = await window.api.importBackup(pw);
+    beginConfigImport();
+    let result;
+    let queuePersistenceError = null;
+    try {
+      result = await window.api.importBackup(pw);
+      if (result && result.ok) applyImportedConfig(result.config, 'Backup importiert');
+    } finally {
+      queuePersistenceError = await persistImportedQueueState();
+      endConfigImport();
+    }
     if (!result || result.canceled) return;
     if (result.needsPassword) {
       const entered = await askLegacyBackupPassword(result.hint);
@@ -2020,10 +2335,10 @@ async function doBackupImport(legacyPassword) {
       return;
     }
     if (result.ok) {
-      applyImportedConfig(result.config, 'Backup importiert');
       if (Array.isArray(result.warnings) && result.warnings.length) {
         alert(`Backup importiert. Bitte prüfen: ${result.warnings.join(', ')}.`);
       }
+      if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
     } else if (result.error) {
       alert('Import fehlgeschlagen: ' + result.error);
     }
@@ -2036,6 +2351,7 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.context-menu')) hideContextMenu();
 });
 document.addEventListener('keydown', (e) => {
+  if (_isUpdateDialogVisible()) return;
   const accountModal = document.getElementById('accountModal');
   if (e.key === 'Tab' && accountModal && accountModal.style.display !== 'none') {
     const focusable = Array.from(accountModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
@@ -2061,8 +2377,10 @@ document.addEventListener('keydown', (e) => {
       if (selectedRecentIds.size > 0 && selectedJobIds.size === 0) {
         sessionFilesData.forEach(r => selectedRecentIds.add(r.order));
         renderRecentUploadsPanel();
-      } else if (queueJobs.length > 0) {
-        queueJobs.forEach(j => selectedJobIds.add(j.id));
+      } else {
+        const visibleJobs = _getVisibleQueueJobs();
+        selectedJobIds.clear();
+        visibleJobs.forEach(j => selectedJobIds.add(j.id));
         renderQueueTable();
       }
     }
@@ -2071,6 +2389,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Delete') {
     if (activeView && activeView.id === 'upload-view') {
       e.preventDefault();
+      _normalizeQueueSelectionToVisible();
       if (selectedRecentIds.size > 0) {
         deleteSelectedRecentFiles();
       } else if (selectedJobIds.size > 0) {
@@ -2112,6 +2431,7 @@ document.getElementById('contextMenu').addEventListener('click', (e) => {
 });
 
 async function handleContextAction(action) {
+  _normalizeQueueSelectionToVisible();
   if (action === 'start-selected') {
     startSelectedUpload();
   } else if (action === 'copy-links') {
@@ -2163,7 +2483,8 @@ async function handleContextAction(action) {
     persistQueueStateSoon(true);
   } else if (action === 'always-on-top') {
     alwaysOnTopState = !alwaysOnTopState;
-    await window.api.setAlwaysOnTop(alwaysOnTopState);
+    await setAlwaysOnTopTracked(alwaysOnTopState);
+    config.globalSettings = { ...(config.globalSettings || {}), alwaysOnTop: alwaysOnTopState };
   } else if (action.startsWith('delete-hoster:')) {
     const hoster = action.replace('delete-hoster:', '');
     // Cancel active uploads for this hoster
@@ -2190,8 +2511,7 @@ async function handleContextAction(action) {
 }
 
 function getSelectedJobLinks() {
-  return queueJobs
-    .filter(j => selectedJobIds.has(j.id) && j.status === 'done' && j.result)
+  return _getVisibleSelectedQueueJobs(j => j.status === 'done' && j.result)
     .map(j => j.result.download_url || j.result.embed_url || '')
     .filter(Boolean);
 }
@@ -2275,10 +2595,11 @@ function _markSkippedJobs(result) {
   renderQueueTable();
 }
 
-async function startSelectedUpload() {
+async function startSelectedUpload(explicitJobs) {
+  const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();
-    const addable = queueJobs.filter(j => selectedJobIds.has(j.id) && isStartableQueueStatus(j.status));
+    const addable = scopedJobs.filter(j => isStartableQueueStatus(j.status));
     if (addable.length === 0) {
       if (selectedJobIds.size > 0) showCopyToast('Keine startbaren Jobs ausgewählt (alle laufen schon oder sind fertig).');
       return;
@@ -2304,7 +2625,7 @@ async function startSelectedUpload() {
         uploading = false;
         updateQueueActionButtons();
         updateStatusBar();
-        await startSelectedUpload();
+        await startSelectedUpload(addable);
         return;
       }
       _markSkippedJobs(result);
@@ -2333,7 +2654,7 @@ async function startSelectedUpload() {
   updateQueueActionButtons();
 
   const hosters = getSelectedHosters();
-  const jobsToStart = queueJobs.filter((job) => selectedJobIds.has(job.id) && isStartableQueueStatus(job.status));
+  const jobsToStart = scopedJobs.filter(job => isStartableQueueStatus(job.status));
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
 
   try {
@@ -2745,11 +3066,12 @@ function _handleStatsImpl(data) {
 
 // --- Per-job log modal ---
 async function showJobLogModal() {
-  if (selectedJobIds.size === 0) return;
+  const selectedJobs = _getVisibleSelectedQueueJobs();
+  if (selectedJobs.length === 0) return;
   // Use the first selected job — log view is per-file, multi-select doesn't
   // make sense here.
-  const jobId = [...selectedJobIds][0];
-  const job = _jobIndexById.get(jobId);
+  const job = selectedJobs[0];
+  const jobId = job.id;
   const modal = document.getElementById('jobLogModal');
   const titleEl = document.getElementById('jobLogTitle');
   const bodyEl = document.getElementById('jobLogBody');
@@ -2799,6 +3121,7 @@ async function copyJobLogToClipboard() {
 
 // --- Retry ---
 async function retrySelectedJobs() {
+  _normalizeQueueSelectionToVisible();
   const retryJobs = [];
   // Build a Set for O(1) selectedFiles dedup below.
   const existingFilePaths = new Set();
@@ -2844,10 +3167,11 @@ async function retrySelectedJobs() {
   selectedJobIds.clear();
   retryJobs.forEach(j => selectedJobIds.add(j.id));
   persistQueueStateSoon();
-  await startSelectedUpload();
+  await startSelectedUpload(retryJobs);
 }
 
 async function abortSelectedJobs() {
+  _normalizeQueueSelectionToVisible();
   const activeJobIds = [];
 
   queueJobs.forEach((job) => {
@@ -2887,6 +3211,7 @@ async function abortAllUploads() {
 }
 
 function moveSelectedJobs(direction) {
+  _normalizeQueueSelectionToVisible();
   if (uploading || selectedJobIds.size === 0) return;
 
   const jobs = queueJobs.slice();
@@ -3057,6 +3382,134 @@ function _computeQueueStats() {
   return _queueStatsCache;
 }
 
+function _setSidebarCount(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = Number(value || 0).toLocaleString('de-DE');
+}
+
+function _syncSidebarFilterButtons(selector, datasetKey, value) {
+  document.querySelectorAll(selector).forEach(button => {
+    const active = button.dataset[datasetKey] === value;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function setUploadSidebarFilter(value) {
+  if (!['all', 'active', 'waiting', 'done', 'error'].includes(value)) return;
+  uploadSidebarFilter = value;
+  _syncSidebarFilterButtons('[data-upload-sidebar-target]', 'uploadSidebarTarget', value);
+  _queueFilterCache = { filter: '', source: null, result: [] };
+  _normalizeQueueSelectionToVisible();
+  _lastVisibleRange = { start: -1, end: -1 };
+  const container = document.getElementById('queueContainer');
+  if (container) container.scrollTop = 0;
+  renderQueueTable();
+}
+
+function updateUploadSidebarSummary(stats = _computeQueueStats()) {
+  let waiting = 0;
+  let active = 0;
+  for (const job of queueJobs) {
+    if (job.status === 'preview' || job.status === 'queued') waiting++;
+    else if (job.status === 'uploading' || job.status === 'getting-server' || job.status === 'retrying') active++;
+  }
+  const accountCount = getAccountsWithCredsFlat().filter(({ account }) => account.enabled !== false).length;
+  _setSidebarCount('uploadSidebarAllCount', stats.total);
+  _setSidebarCount('uploadSidebarActiveCount', active);
+  _setSidebarCount('uploadSidebarWaitingCount', waiting);
+  _setSidebarCount('uploadSidebarDoneCount', stats.done);
+  _setSidebarCount('uploadSidebarErrorCount', stats.errors);
+  _setSidebarCount('uploadSidebarAccountsCount', accountCount);
+}
+
+function updateAccountSidebarSummary(allAccounts = getAllAccountsFlat()) {
+  let ready = 0;
+  let warning = 0;
+  let error = 0;
+  let availableAccounts = 0;
+  const hosterCounts = new Map();
+  for (const { name, account } of allAccounts) {
+    hosterCounts.set(name, (hosterCounts.get(name) || 0) + 1);
+    if (account.enabled !== false && accountHasCreds(name, account)) availableAccounts++;
+    const category = _getAccountSidebarCategory(name, account);
+    if (category === 'ready') ready++;
+    else if (category === 'error') error++;
+    else warning++;
+  }
+  _setSidebarCount('accountsSidebarAllCount', allAccounts.length);
+  _setSidebarCount('accountsSidebarReadyCount', ready);
+  _setSidebarCount('accountsSidebarWarningCount', warning);
+  _setSidebarCount('accountsSidebarErrorCount', error);
+  _setSidebarCount('uploadSidebarAccountsCount', availableAccounts);
+  const container = document.getElementById('accountsSidebarHosters');
+  if (container) {
+    container.replaceChildren(...HOSTERS.filter(name => hosterCounts.has(name)).map(name => {
+      const row = document.createElement('div');
+      row.className = 'view-sidebar-hoster';
+      const dot = document.createElement('span');
+      dot.className = 'view-sidebar-hoster-dot';
+      const label = document.createElement('span');
+      label.className = 'view-sidebar-copy';
+      label.textContent = getHosterLabel(name);
+      const count = document.createElement('span');
+      count.className = 'view-sidebar-badge';
+      count.textContent = hosterCounts.get(name).toLocaleString('de-DE');
+      row.append(dot, label, count);
+      return row;
+    }));
+  }
+}
+
+function _getAccountSidebarCategory(name, account) {
+  if (account.enabled === false || !accountHasCreds(name, account)) return 'warning';
+  const status = (accountStatuses[account.id] && accountStatuses[account.id].status) || 'unchecked';
+  if (status === 'ok') return 'ready';
+  if (status === 'error') return 'error';
+  return 'warning';
+}
+
+function _applyAccountSidebarFilter() {
+  const entries = new Map(getAllAccountsFlat().map(entry => [entry.account.id, entry]));
+  document.querySelectorAll('#accountsList .account-hoster-group').forEach(group => {
+    let matches = 0;
+    group.querySelectorAll('.account-card').forEach(card => {
+      const entry = entries.get(card.dataset.accountId);
+      const visible = !!entry && (accountSidebarFilter === 'all' || _getAccountSidebarCategory(entry.name, entry.account) === accountSidebarFilter);
+      card.hidden = !visible;
+      if (visible) matches++;
+    });
+    group.hidden = matches === 0;
+  });
+}
+
+function setAccountSidebarFilter(value) {
+  if (!['all', 'ready', 'warning', 'error'].includes(value)) return;
+  accountSidebarFilter = value;
+  _syncSidebarFilterButtons('[data-accounts-sidebar-filter]', 'accountsSidebarFilter', value);
+  _applyAccountSidebarFilter();
+}
+
+function setHistorySidebarFilter(value) {
+  if (!['all', 'success', 'error'].includes(value)) return;
+  historySidebarFilter = value;
+  _syncSidebarFilterButtons('[data-history-filter]', 'historyFilter', value);
+  const container = document.getElementById('historyContainer');
+  if (container) {
+    container.scrollTop = 0;
+    renderHistoryTable(container);
+  }
+}
+
+function updateHistorySidebarSummary() {
+  _setSidebarCount('historySidebarAllCount', historySidebarCounts.total);
+  _setSidebarCount('historySidebarSuccessCount', historySidebarCounts.success);
+  _setSidebarCount('historySidebarErrorCount', historySidebarCounts.error);
+  const retention = document.getElementById('historySidebarRetention');
+  const select = document.getElementById('historyRetentionSelect');
+  if (retention && select) retention.textContent = select.selectedOptions[0]?.textContent || 'Alles behalten';
+}
+
 function updateStatusBar() {
   const stats = _computeQueueStats();
 
@@ -3084,6 +3537,7 @@ function updateStatusBar() {
   document.getElementById('sbInProgressCount').textContent = `Läuft ${stats.inProgress}`;
   document.getElementById('sbDoneCount').textContent = `Fertig ${_sessionDoneCount}`;
   document.getElementById('sbErrorCount').textContent = `Fehler ${_sessionErrorCount}`;
+  updateUploadSidebarSummary(stats);
 }
 
 // --- Health Check ---
@@ -3219,6 +3673,10 @@ function renderSettings() {
         ${pageDefinitions.map((definition, index) => `<button class="settings-nav-button${index === 0 ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.search}" aria-current="${index === 0 ? 'page' : 'false'}">${definition.label}</button>`).join('')}
       </nav>
       <p class="settings-search-empty" id="settingsSearchEmpty" hidden>Keine passende Einstellung gefunden.</p>
+      <div class="settings-sidebar-status">
+        <span class="view-sidebar-section-label">Speicherstatus</span>
+        <div class="view-sidebar-summary view-sidebar-summary-block save-feedback" id="saveFeedback" role="status" aria-live="polite">Automatisch gespeichert</div>
+      </div>
     </aside>
     <div class="settings-content"></div>`;
   container.appendChild(layout);
@@ -3755,13 +4213,14 @@ function renderSettings() {
         if (bindHintEl) { bindHintEl.innerHTML = '<span style="color:#f59e0b">Netzwerkmodus braucht mindestens eine IP/CIDR in der Allowlist — sonst bleibt es fail-closed auf Loopback.</span>'; }
         return;
       }
-      await window.api.diagnosticsSaveSettings({
+      const diagnosticsSettings = {
         enabled: enabledEl.checked,
         port: parseInt(portEl.value, 10) || 9110,
         bindMode: modeEl.value,
         publicHost: publicHostEl.value.trim(),
         allowlist
-      });
+      };
+      await saveDiagnosticsSettingsTracked(diagnosticsSettings);
       applySettings(await window.api.diagnosticsGetSettings());
       refreshStatus();
     };
@@ -3782,7 +4241,7 @@ function renderSettings() {
       setTimeout(() => { b.textContent = 'Kopieren'; }, 1500);
     });
     document.getElementById('diagRegenerateBtn').addEventListener('click', async () => {
-      const r = await window.api.diagnosticsRegenerate();
+      const r = await runConfigWrite(() => window.api.diagnosticsRegenerate());
       if (r && r.code) { codeEl.value = r.code; issuedEl.textContent = fmtIssued(r.codeIssuedAt); }
       refreshStatus();
     });
@@ -3807,23 +4266,8 @@ function renderSettings() {
 
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
-  document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', async (e) => {
-    const btn = e.target;
-    btn.disabled = true;
-    btn.textContent = 'Prüfe...';
-    try {
-      const result = await window.api.checkForUpdate();
-      if (result && result.available) {
-        showUpdateBanner(result);
-        btn.textContent = 'Update gefunden!';
-      } else {
-        btn.textContent = 'Kein Update verfügbar';
-      }
-    } catch {
-      btn.textContent = 'Fehler beim Prüfen';
-    }
-    setTimeout(() => { btn.disabled = false; btn.textContent = 'Nach Updates suchen'; }, 3000);
-  });
+  document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
+  _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' ? 'change' : 'input';
     input.addEventListener(eventName, scheduleSettingsSave);
@@ -3839,6 +4283,7 @@ async function chooseLogFilePath() {
 }
 
 function scheduleSettingsSave() {
+  if (closePreparationState !== 'open') return;
   const feedback = document.getElementById('saveFeedback');
   if (feedback) feedback.textContent = 'Speichert...';
   clearTimeout(settingsSaveTimer);
@@ -3922,7 +4367,7 @@ async function performSaveSettings(options = {}) {
     const newAot = !!aotCheckbox.checked;
     if (newAot !== alwaysOnTopState) {
       alwaysOnTopState = newAot;
-      await window.api.setAlwaysOnTop(alwaysOnTopState);
+      await setAlwaysOnTopTracked(newAot);
     }
   }
 
@@ -3944,13 +4389,9 @@ async function performSaveSettings(options = {}) {
     newHosterSettings[name] = hs;
   }
 
-  // Fire both saves in parallel instead of serializing the two IPC round-trips.
-  // Skip the getConfig refetch — we just wrote it, we know the new state, and
-  // the round-trip added 100–200ms of UI stall per keystroke (autosave fires
-  // on every input change).
   await Promise.all([
-    window.api.saveHosterSettings(newHosterSettings),
-    window.api.saveGlobalSettings(globalSettings)
+    saveHosterSettingsTracked(newHosterSettings),
+    saveGlobalSettingsTracked(globalSettings)
   ]);
   config.hosterSettings = newHosterSettings;
   config.globalSettings = globalSettings;
@@ -3978,7 +4419,14 @@ async function performSaveSettings(options = {}) {
   const remoteBadge = document.getElementById('remoteStatusBadge');
   if (remoteSettings) {
     try {
-      await window.api.remoteSaveSettings(remoteSettings);
+      const remoteSaveResult = await saveRemoteSettingsTracked(remoteSettings);
+      if (remoteSaveResult && remoteSaveResult.settings) {
+        globalSettings.remote = { ...remoteSaveResult.settings };
+        config.globalSettings = { ...(config.globalSettings || {}), remote: { ...remoteSaveResult.settings } };
+        const tokenInput = document.getElementById('remoteTokenInput');
+        if (tokenInput) tokenInput.value = remoteSaveResult.settings.token || '';
+      }
+      if (remoteSaveResult && remoteSaveResult.runtimeError) throw new Error(remoteSaveResult.runtimeError);
       if (remoteBadge) {
         remoteBadge.textContent = remoteSettings.enabled ? 'Aktiv' : 'Inaktiv';
         remoteBadge.className = `panel-status${remoteSettings.enabled ? ' active' : ''}`;
@@ -3995,7 +4443,12 @@ async function performSaveSettings(options = {}) {
           statusEl.style.color = '#94a3b8';
         }
       }
-    } catch {}
+    } catch {
+      if (remoteBadge) {
+        remoteBadge.textContent = 'Fehler';
+        remoteBadge.className = 'panel-status';
+      }
+    }
   }
 
   const feedback = document.getElementById('saveFeedback');
@@ -4082,6 +4535,8 @@ function updateAccountCard(accountId) {
   tmp.innerHTML = _buildAccountCardHtml(found.name, found.account, idx);
   card.replaceWith(tmp.firstElementChild);
   _refreshHosterGroupHeader(found.name);
+  updateAccountSidebarSummary();
+  _applyAccountSidebarFilter();
 }
 
 function _refreshHosterGroupHeader(name) {
@@ -4122,6 +4577,7 @@ function renderAccounts() {
   ensureAccountStatusEntries();
 
   const allAccounts = getAllAccountsFlat();
+  updateAccountSidebarSummary(allAccounts);
   const runCheckBtn = document.getElementById('accountsRunHealthCheckBtn');
   if (runCheckBtn) runCheckBtn.disabled = healthCheckRunning;
 
@@ -4133,10 +4589,10 @@ function renderAccounts() {
         <div class="accounts-empty-icon" aria-hidden="true">+</div>
         <h3>Noch keine Accounts</h3>
         <p>Füge deinen ersten Hoster-Account hinzu. Die Zugangsdaten werden vor dem Speichern geprüft.</p>
-        <button class="btn btn-primary" type="button" data-account-empty-add>Ersten Account hinzufügen</button>
       </div>`;
     if (footer) footer.style.display = 'none';
     if (!_accountListenersBound) bindAccountListeners(container);
+    _applyAccountSidebarFilter();
     return;
   }
 
@@ -4158,6 +4614,7 @@ function renderAccounts() {
   _updateToggleAllAccountsBtn();
 
   if (!_accountListenersBound) bindAccountListeners(container);
+  _applyAccountSidebarFilter();
 }
 
 function _summarizeHosterGroup(accounts) {
@@ -4191,6 +4648,7 @@ const _hosterGroupOpenMemory = new Map();
 let _hosterSettingsSaveTimer = null;
 const hosterSettingsSaveCoordinator = window.SerializedRunner.createSerializedRunner(performHosterSettingsSave);
 function scheduleHosterSettingsSave() {
+  if (closePreparationState !== 'open') return;
   clearTimeout(_hosterSettingsSaveTimer);
   _hosterSettingsSaveTimer = setTimeout(() => {
     _hosterSettingsSaveTimer = null;
@@ -4216,22 +4674,46 @@ async function performHosterSettingsSave() {
     });
     newHosterSettings[name] = hs;
   }
-  await window.api.saveHosterSettings(newHosterSettings);
+  await saveHosterSettingsTracked(newHosterSettings);
   config.hosterSettings = newHosterSettings;
   hosterSettings = newHosterSettings;
 }
 
+async function recoverSerializedSave(coordinator, retry) {
+  try {
+    await coordinator.flush();
+    return false;
+  } catch {
+    await flushConfigWrites();
+    await retry();
+    return true;
+  }
+}
+
 async function flushPendingSettingsSaves() {
-  await Promise.all([settingsSaveCoordinator.flush(), hosterSettingsSaveCoordinator.flush()]);
   const flushSettings = settingsSaveTimer !== null;
   const flushHosters = _hosterSettingsSaveTimer !== null;
   clearTimeout(settingsSaveTimer);
   clearTimeout(_hosterSettingsSaveTimer);
   settingsSaveTimer = null;
   _hosterSettingsSaveTimer = null;
-  if (flushSettings) await saveSettings({ feedbackText: 'Automatisch gespeichert' });
-  if (flushHosters) await saveHosterSettingsFromDom();
+  queuePersistThrottle.flushSync();
+  const settingsRecovered = await recoverSerializedSave(
+    settingsSaveCoordinator,
+    () => saveSettings({ feedbackText: 'Automatisch gespeichert' })
+  );
+  const hostersRecovered = await recoverSerializedSave(
+    hosterSettingsSaveCoordinator,
+    saveHosterSettingsFromDom
+  );
+  if (flushSettings && !settingsRecovered) await saveSettings({ feedbackText: 'Automatisch gespeichert' });
+  if (flushHosters && !hostersRecovered) await saveHosterSettingsFromDom();
   await Promise.all([settingsSaveCoordinator.flush(), hosterSettingsSaveCoordinator.flush()]);
+  await flushConfigWrites();
+  const persistedConfig = await window.api.getConfig();
+  config = persistedConfig;
+  hosterSettings = config.hosterSettings || {};
+  alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
 }
 
 function _buildHosterSettingsHtml(name) {
@@ -4476,7 +4958,7 @@ function bindAccountListeners(container) {
 
     // Persist in the background. saveConfig is idempotent; we don't need to
     // await here or re-fetch — our in-memory config is already the truth.
-    window.api.saveConfig({ hosters: config.hosters }).catch(() => {});
+    saveConfigTracked({ hosters: config.hosters }).catch(() => {});
   });
 }
 
@@ -4490,7 +4972,7 @@ async function toggleAccount(accountId) {
   // accounts in the list.
   updateAccountCard(accountId);
   renderHosterSummary();
-  window.api.saveConfig({ hosters: config.hosters }).catch(() => {});
+  saveConfigTracked({ hosters: config.hosters }).catch(() => {});
 }
 
 async function checkSingleAccount(accountId) {
@@ -4705,7 +5187,7 @@ async function deleteAccount(accountId) {
   // Fire-and-forget the persist. The earlier `await getConfig()` round-trip
   // was redundant (we already have the truth in memory) and was the main
   // source of perceived lag on add/delete.
-  window.api.saveConfig({ hosters: config.hosters }).catch((err) => {
+  saveConfigTracked({ hosters: config.hosters }).catch((err) => {
     if (window.api && window.api.debugLog) window.api.debugLog(`deleteAccount saveConfig failed: ${err && err.message ? err.message : err}`);
     showCopyToast('Account-Löschung konnte nicht persistiert werden — bitte erneut versuchen.');
   });
@@ -4903,7 +5385,7 @@ async function _persistAccount(ctx, creds) {
     accountId = `${ctx.hosterName}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     candidateHosters[ctx.hosterName].push({ id: accountId, ...creds });
   }
-  await window.api.saveConfig({ hosters: candidateHosters });
+  await saveConfigTracked({ hosters: candidateHosters });
   return { accountId, candidateHosters, isEdit: ctx.isEdit };
 }
 
@@ -4952,29 +5434,39 @@ async function loadHistory() {
 
   if (!history || history.length === 0) {
     historyRowsData = [];
+    historySidebarCounts = { total: 0, success: 0, error: 0 };
+    updateHistorySidebarSummary();
     container.innerHTML = '<p class="empty-state">Noch keine Uploads.</p>';
     return;
   }
 
   historySortState = { key: 'date', direction: 'desc' };
   historyRowsData = [];
+  historySidebarCounts = { total: 0, success: 0, error: 0 };
   let order = 0;
 
   for (const batch of history) {
     const dt = formatDateTime(batch.timestamp || new Date());
     for (const file of (batch.files || [])) {
       for (const result of (file.results || [])) {
-        if (result.status === 'aborted' || result.status === 'error') continue;
+        historySidebarCounts.total++;
+        const isError = result.status === 'aborted' || result.status === 'error';
+        if (isError) historySidebarCounts.error++;
+        else historySidebarCounts.success++;
+        const detail = isError
+          ? String(result.error || result.message || (result.status === 'aborted' ? 'Abgebrochen' : 'Fehlgeschlagen'))
+          : (result.download_url || result.embed_url || '');
         historyRowsData.push({
           date: dt.text, dateTs: dt.ts,
           filename: file.name || '', host: result.hoster || '',
-          link: result.download_url || result.embed_url || '',
-          isError: false, order: order++
+          link: detail,
+          isError, order: order++
         });
       }
     }
   }
 
+  updateHistorySidebarSummary();
   renderHistoryTable(container);
 }
 
@@ -5201,8 +5693,15 @@ function _renderHistoryVirtualRows() {
   tbody.innerHTML = parts.join('');
 }
 
+function _getVisibleHistoryRows() {
+  if (historySidebarFilter === 'success') return historyRowsData.filter(row => !row.isError);
+  if (historySidebarFilter === 'error') return historyRowsData.filter(row => row.isError);
+  return historyRowsData;
+}
+
 function renderHistoryTable(container) {
-  if (!container || !historyRowsData.length) {
+  const visibleRows = _getVisibleHistoryRows();
+  if (!container || !visibleRows.length) {
     if (container) container.innerHTML = '<p class="empty-state">Noch keine Uploads.</p>';
     const emptyNotice = document.getElementById('historyCapNotice');
     if (emptyNotice) emptyNotice.style.display = 'none';
@@ -5210,8 +5709,8 @@ function renderHistoryTable(container) {
     return;
   }
 
-  const total = historyRowsData.length;
-  const working = total > HISTORY_RENDER_CAP ? historyRowsData.slice(-HISTORY_RENDER_CAP) : historyRowsData;
+  const total = visibleRows.length;
+  const working = total > HISTORY_RENDER_CAP ? visibleRows.slice(-HISTORY_RENDER_CAP) : visibleRows;
   const notice = document.getElementById('historyCapNotice');
   if (notice) {
     if (total > HISTORY_RENDER_CAP) {
@@ -5274,30 +5773,127 @@ function sortHistoryRows(rows) {
   });
 }
 
-// Flush pending queue state on window close (sync IPC — blocks until save completes)
-window.addEventListener('beforeunload', () => {
-  // Flush pending settings save if user changed settings right before closing
-  if (settingsSaveTimer) {
-    clearTimeout(settingsSaveTimer);
-    settingsSaveTimer = null;
-    try { saveSettings(); } catch {}
+let closePreparationPromise = null;
+let closePreparationInertState = [];
+let closePreparationOverlayState = null;
+let closePreparationGeneration = 0;
+let activeClosePreparationAttempt = null;
+const CLOSE_PREPARATION_TIMEOUT_MS = 1200;
+
+function waitForClosePreparationStep(promise) {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Speichern vor dem Beenden hat zu lange gedauert')), CLOSE_PREPARATION_TIMEOUT_MS))
+  ]);
+}
+
+function setClosePreparationUi(active) {
+  const overlay = document.getElementById('shutdownOverlay');
+  const message = document.getElementById('shutdownMessage');
+  const cancelButton = document.getElementById('cancelShutdownBtn');
+  if (!overlay || !message || !cancelButton) return;
+  if (active) {
+    if (closePreparationOverlayState) return;
+    closePreparationOverlayState = {
+      display: overlay.style.display,
+      message: message.innerHTML,
+      cancelDisplay: cancelButton.style.display
+    };
+    closePreparationInertState = Array.from(document.body.children)
+      .filter(element => element !== overlay && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    closePreparationInertState.forEach(({ element }) => { element.inert = true; });
+    message.textContent = 'Einstellungen werden gespeichert…';
+    cancelButton.style.display = 'none';
+    overlay.style.display = 'flex';
+    return;
   }
-  queuePersistThrottle.cancel();
-  // Drain pending done-removals synchronously before persisting so jobs the
-  // user expected to disappear (removeFromQueueOnDone=true) don't reappear
-  // on next launch. Microtask wouldn't run before the sync IPC below.
-  if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
-  const globalSettings = {
-    ...(config.globalSettings || {}),
-    pendingQueue: buildPersistedQueueState()
-  };
-  config.globalSettings = globalSettings;
-  window.api.saveGlobalSettingsSync(globalSettings);
-});
+  closePreparationInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  closePreparationInertState = [];
+  overlay.style.display = closePreparationOverlayState ? closePreparationOverlayState.display : 'none';
+  message.innerHTML = closePreparationOverlayState ? closePreparationOverlayState.message : '';
+  cancelButton.style.display = closePreparationOverlayState ? closePreparationOverlayState.cancelDisplay : '';
+  closePreparationOverlayState = null;
+}
+
+function isCurrentClosePreparation(generation, attempt) {
+  return generation === closePreparationGeneration && attempt === activeClosePreparationAttempt;
+}
+
+async function recoverWindowClose(generation, attempt, originalError) {
+  if (!isCurrentClosePreparation(generation, attempt)) return;
+  closePreparationState = 'recovering';
+  let restored = false;
+  try {
+    restored = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: false, attempt }));
+  } catch (error) {
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
+    return;
+  }
+  if (!isCurrentClosePreparation(generation, attempt)) return;
+  if (restored !== true) {
+    showCopyToast('Die Anwendung konnte nach dem fehlgeschlagenen Speichern nicht entsperrt werden', 8000);
+    return;
+  }
+  try {
+    await waitForClosePreparationStep(withCloseWriteAccess(async () => {
+      await flushConfigWrites();
+      if (!isCurrentClosePreparation(generation, attempt)) return;
+      await persistQueueStateNow();
+      await flushConfigWrites();
+      if (failedConfigWriteOperations.length !== 0) throw new Error('Nicht alle Einstellungen konnten gespeichert werden');
+    }));
+  } catch (error) {
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
+    return;
+  }
+  if (!isCurrentClosePreparation(generation, attempt)) return;
+  closePreparationPromise = null;
+  activeClosePreparationAttempt = null;
+  closePreparationState = 'open';
+  setClosePreparationUi(false);
+  showCopyToast(originalError.message || String(originalError), 8000);
+}
+
+function prepareForWindowClose(attempt) {
+  if (!Number.isInteger(attempt)) return Promise.resolve(false);
+  if (closePreparationPromise && activeClosePreparationAttempt === attempt) return closePreparationPromise;
+  const generation = ++closePreparationGeneration;
+  activeClosePreparationAttempt = attempt;
+  closePreparationState = 'preparing';
+  setClosePreparationUi(true);
+  closePreparationPromise = (async () => {
+    if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
+    await waitForClosePreparationStep(withCloseWriteAccess(flushPendingSettingsSaves));
+    if (!isCurrentClosePreparation(generation, attempt)) return;
+    const pendingQueue = buildPersistedQueueState();
+    closePreparationState = 'sealed';
+    await waitForClosePreparationStep(flushConfigWrites());
+    if (!isCurrentClosePreparation(generation, attempt)) return;
+    const accepted = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: true, attempt, pendingQueue }));
+    if (!accepted) throw new Error('Einstellungen konnten vor dem Beenden nicht gespeichert werden');
+  })();
+  closePreparationPromise.catch(error => recoverWindowClose(generation, attempt, error));
+  return closePreparationPromise;
+}
 
 // --- Setup Listeners ---
 function setupListeners() {
   try { initMenuBar(); } catch (err) { console.error('menu bar init failed', err); }
+  document.querySelectorAll('[data-upload-sidebar-target]').forEach(button => {
+    button.addEventListener('click', () => setUploadSidebarFilter(button.dataset.uploadSidebarTarget));
+  });
+  document.querySelectorAll('[data-accounts-sidebar-filter]').forEach(button => {
+    button.addEventListener('click', () => setAccountSidebarFilter(button.dataset.accountsSidebarFilter));
+  });
+  document.querySelectorAll('[data-history-filter]').forEach(button => {
+    button.addEventListener('click', () => setHistorySidebarFilter(button.dataset.historyFilter));
+  });
+  _syncSidebarFilterButtons('[data-upload-sidebar-target]', 'uploadSidebarTarget', uploadSidebarFilter);
+  _syncSidebarFilterButtons('[data-accounts-sidebar-filter]', 'accountsSidebarFilter', accountSidebarFilter);
+  _syncSidebarFilterButtons('[data-history-filter]', 'historyFilter', historySidebarFilter);
   document.getElementById('addFilesBtn').addEventListener('click', pickFiles);
   document.getElementById('addFolderBtn').addEventListener('click', pickFolder);
   document.getElementById('startUploadBtn').addEventListener('click', startUpload);
@@ -5381,8 +5977,12 @@ function setupListeners() {
 
   document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
     if (!confirm('Verlauf wirklich löschen?')) return;
-    await window.api.clearHistory();
-    loadHistory();
+    try {
+      await runConfigWrite(() => window.api.clearHistory());
+      loadHistory();
+    } catch (error) {
+      showCopyToast(error.message || String(error));
+    }
   });
   document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
 
@@ -5398,14 +5998,15 @@ function setupListeners() {
           if (!ok) { historyRetentionSelect.value = prev; return; }
         }
       }
-      const globalSettings = { ...(config.globalSettings || {}), historyRetention: value };
-      config.globalSettings = globalSettings;
-      await window.api.saveGlobalSettings(globalSettings).catch(() => {});
-      if (value !== 'all') {
-        const res = await window.api.pruneHistory(value);
+      try {
+        const res = await runConfigWrite(() => window.api.pruneHistory(value));
+        config.globalSettings = { ...(config.globalSettings || {}), historyRetention: value };
         if (res && res.removedRows > 0) showCopyToast(`Verlauf gekürzt: ${res.removedRows.toLocaleString('de-DE')} entfernt`);
+        loadHistory();
+      } catch (error) {
+        historyRetentionSelect.value = prev;
+        showCopyToast(error.message || String(error));
       }
-      loadHistory();
     });
   }
 
@@ -5451,7 +6052,7 @@ function setupListeners() {
 
   // Click on empty area in queue → deselect all
   document.getElementById('upload-view').addEventListener('click', (e) => {
-    if (!e.target.closest('.queue-row') && !e.target.closest('.btn') && !e.target.closest('.context-menu') && !e.target.closest('.recent-files-panel')) {
+    if (e.target.closest('.view-main') && !e.target.closest('.queue-row') && !e.target.closest('.btn') && !e.target.closest('.context-menu') && !e.target.closest('.recent-files-panel')) {
       if (selectedJobIds.size > 0) {
         selectedJobIds.clear();
         renderQueueTable();
@@ -5511,35 +6112,242 @@ function setupListeners() {
   document.getElementById('jobLogModal')?.addEventListener('click', (e) => {
     if (e.target.id === 'jobLogModal') hideJobLogModal();
   });
+
+  document.getElementById('headerUpdateBtn')?.addEventListener('click', requestUpdateCheck);
+  document.getElementById('installUpdateBtn')?.addEventListener('click', installKnownUpdate);
+  document.getElementById('dismissUpdateBtn')?.addEventListener('click', closeUpdateDialog);
+  document.getElementById('updateCloseBtn')?.addEventListener('click', closeUpdateDialog);
+  document.getElementById('updateBanner')?.addEventListener('click', (event) => {
+    if (event.target.id === 'updateBanner') closeUpdateDialog();
+  });
+  document.addEventListener('keydown', _handleUpdateDialogKeydown, true);
+  _syncHeaderUpdateState();
 }
 
 // --- Update UI ---
 function showUpdateBanner(info) {
-  const banner = document.getElementById('updateBanner');
-  const msg = document.getElementById('updateMessage');
-  if (!banner || !msg) return;
-  msg.textContent = `Update v${info.remoteVersion} verfügbar`;
-  banner.style.display = 'flex';
-  document.getElementById('installUpdateBtn').onclick = async () => {
-    msg.textContent = 'Update wird heruntergeladen...';
-    document.getElementById('installUpdateBtn').disabled = true;
-    await persistQueueStateNow().catch(() => {}); // Save queue before update restart
-    await window.api.installUpdate();
-  };
-  document.getElementById('dismissUpdateBtn').onclick = () => { banner.style.display = 'none'; };
+  if (!info) return;
+  _knownUpdateInfo = { ...info, available: true };
+  if (_updateInstallBusy) {
+    _syncHeaderUpdateState();
+    _setUpdateDialogVisible(true);
+    return;
+  }
+  _updateInstallBusy = false;
+  const version = String(info.remoteVersion || '').replace(/^v/i, '') || 'unbekannt';
+  const title = document.getElementById('updateDialogTitle');
+  const message = document.getElementById('updateMessage');
+  const notes = document.getElementById('updateReleaseNotes');
+  const installButton = document.getElementById('installUpdateBtn');
+  if (title) title.textContent = 'Eine neue Version ist verfügbar';
+  if (message) message.textContent = `Update v${version} verfügbar`;
+  if (notes) {
+    const releaseNotes = String(info.releaseNotes || '').trim();
+    notes.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
+    notes.hidden = !releaseNotes;
+  }
+  if (installButton) {
+    installButton.disabled = false;
+    installButton.textContent = 'Jetzt updaten';
+  }
+  _setUpdateProgress(0, 'Bereit zum Download');
+  _setUpdateDialogBusy(false);
+  _syncHeaderUpdateState();
+  _setUpdateDialogVisible(true);
 }
 
 function handleUpdateProgress(data) {
-  const msg = document.getElementById('updateMessage');
-  if (!msg) return;
-  if (data.stage === 'downloading') msg.textContent = `Wird heruntergeladen… ${data.percent || 0}%`;
-  else if (data.stage === 'verifying') msg.textContent = 'Verifiziere...';
-  else if (data.stage === 'launching') msg.textContent = 'Setup wird gestartet...';
-  else if (data.stage === 'done') msg.textContent = 'Update installiert. App wird neu gestartet...';
-  else if (data.stage === 'error') {
-    msg.textContent = `Update fehlgeschlagen: ${data.error}`;
-    const btn = document.getElementById('installUpdateBtn');
-    if (btn) { btn.disabled = false; btn.textContent = 'Erneut versuchen'; }
+  const progress = data || {};
+  const message = document.getElementById('updateMessage');
+  const button = document.getElementById('installUpdateBtn');
+  if (progress.stage === 'starting') {
+    _updateInstallBusy = true;
+    _setUpdateDialogBusy(true);
+    _setUpdateProgress(0, 'Download 0%');
+    if (message) message.textContent = 'Download wird vorbereitet…';
+    if (button) button.textContent = 'Download 0%';
+  } else if (progress.stage === 'downloading') {
+    const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
+    _updateInstallBusy = true;
+    _setUpdateDialogBusy(true);
+    _setUpdateProgress(percent, `Download ${percent}%`);
+    if (message) message.textContent = `Update wird heruntergeladen… ${percent}%`;
+    if (button) button.textContent = `Download ${percent}%`;
+  } else if (progress.stage === 'verifying') {
+    _updateInstallBusy = true;
+    _setUpdateDialogBusy(true);
+    _setUpdateProgress(100, 'Prüfen…');
+    if (message) message.textContent = 'Download wird geprüft…';
+    if (button) button.textContent = 'Prüfen…';
+  } else if (progress.stage === 'prepared') {
+    _updateInstallBusy = true;
+    _setUpdateDialogBusy(true);
+    _setUpdateProgress(100, 'Neustart…');
+    if (message) message.textContent = 'Update ist bereit. Einstellungen werden gespeichert…';
+    if (button) button.textContent = 'Neustart…';
+  } else if (progress.stage === 'launching' || progress.stage === 'done') {
+    _updateInstallBusy = true;
+    _setUpdateDialogBusy(true);
+    _setUpdateProgress(100, 'Neustart…');
+    if (message) message.textContent = progress.stage === 'done' ? 'Update installiert. Die Anwendung startet neu…' : 'Update wird installiert. Die Anwendung startet neu…';
+    if (button) button.textContent = 'Neustart…';
+  } else if (progress.stage === 'error') {
+    _updateInstallBusy = false;
+    _setUpdateDialogBusy(false);
+    _setUpdateProgress(0, 'Update fehlgeschlagen');
+    if (message) message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Wiederholen';
+    }
+    _setUpdateDialogVisible(true);
+  }
+}
+
+function _isUpdateDialogVisible() {
+  const overlay = document.getElementById('updateBanner');
+  return Boolean(overlay && overlay.style.display !== 'none' && overlay.getAttribute('aria-hidden') !== 'true');
+}
+
+function _setUpdateBackgroundInert(active) {
+  const overlay = document.getElementById('updateBanner');
+  if (!overlay) return;
+  if (active) {
+    if (_updateDialogInertState.length > 0) return;
+    _updateDialogInertState = Array.from(document.body.children)
+      .filter(element => element !== overlay && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    _updateDialogInertState.forEach(({ element }) => { element.inert = true; });
+    return;
+  }
+  _updateDialogInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  _updateDialogInertState = [];
+}
+
+function _getUpdateDialogFocusable() {
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return [];
+  return Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
+    .filter(element => !element.hidden && element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden');
+}
+
+function _focusUpdateDialog() {
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return;
+  const target = _getUpdateDialogFocusable()[0] || dialog;
+  target.focus();
+}
+
+function _handleUpdateDialogKeydown(event) {
+  if (!_isUpdateDialogVisible()) return;
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!_updateInstallBusy) closeUpdateDialog();
+    return;
+  }
+  if (event.key !== 'Tab') {
+    if (!dialog.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      _focusUpdateDialog();
+    }
+    return;
+  }
+  const focusable = _getUpdateDialogFocusable();
+  if (focusable.length === 0) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const activeElement = document.activeElement;
+  if (!dialog.contains(activeElement) || (!event.shiftKey && activeElement === last) || (event.shiftKey && activeElement === first)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
+function _setUpdateDialogVisible(visible) {
+  const overlay = document.getElementById('updateBanner');
+  if (!overlay) return;
+  if (visible) {
+    const wasVisible = _isUpdateDialogVisible();
+    if (!wasVisible) {
+      _updateDialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      _setUpdateBackgroundInert(true);
+    }
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => {
+      const dialog = overlay.querySelector('.update-dialog');
+      if (_isUpdateDialogVisible() && dialog && !dialog.contains(document.activeElement)) _focusUpdateDialog();
+    });
+  } else {
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    _setUpdateBackgroundInert(false);
+    const returnFocus = _updateDialogReturnFocus;
+    _updateDialogReturnFocus = null;
+    if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
+  }
+}
+
+function closeUpdateDialog() {
+  if (_updateInstallBusy) return false;
+  _setUpdateDialogVisible(false);
+  return true;
+}
+
+function _setUpdateDialogBusy(busy) {
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (dialog) dialog.setAttribute('aria-busy', busy ? 'true' : 'false');
+  ['installUpdateBtn', 'dismissUpdateBtn', 'updateCloseBtn'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = busy;
+  });
+  if (busy && dialog && (!dialog.contains(document.activeElement) || document.activeElement.matches?.(':disabled'))) dialog.focus();
+}
+
+function _setUpdateProgress(percent, text) {
+  const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  const progressText = document.getElementById('updateProgressText');
+  const progressBar = document.getElementById('updateProgressBar');
+  if (progressText) progressText.textContent = text;
+  if (progressBar) {
+    progressBar.setAttribute('aria-valuenow', String(value));
+    progressBar.setAttribute('aria-valuetext', String(text || `${value}%`));
+    if ('value' in progressBar) progressBar.value = value;
+    progressBar.style.width = `${value}%`;
+  }
+}
+
+async function installKnownUpdate() {
+  if (_updateInstallBusy) return;
+  if (!_knownUpdateInfo || !_knownUpdateInfo.available) {
+    await requestUpdateCheck();
+    return;
+  }
+  _updateInstallBusy = true;
+  _setUpdateDialogBusy(true);
+  _setUpdateProgress(0, 'Download 0%');
+  const message = document.getElementById('updateMessage');
+  const button = document.getElementById('installUpdateBtn');
+  if (message) message.textContent = 'Download wird vorbereitet…';
+  if (button) button.textContent = 'Download 0%';
+  try {
+    await persistQueueStateNow();
+    const result = await window.api.installUpdate();
+    if (result && result.started === false) throw new Error(result.error || 'Update konnte nicht gestartet werden');
+  } catch (error) {
+    handleUpdateProgress({ stage: 'error', error: error && error.message ? error.message : String(error) });
   }
 }
 
@@ -5926,7 +6734,10 @@ function updateStatsPanel() {
 }
 
 // --- Start ---
-init().catch((err) => {
+window.api.onPrepareClose(prepareForWindowClose);
+init().then(() => {
+  window.api.signalCloseHandshakeReady();
+}).catch((err) => {
   try {
     if (window.api && window.api.debugLog) window.api.debugLog(`init failed: ${err && err.stack ? err.stack : err}`);
     const root = document.getElementById('app') || document.body;
