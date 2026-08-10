@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 
-const { isNewer, resolveReleaseVersion, prepareUpdate, launchPreparedUpdate } = require('../lib/updater');
+const { isNewer, resolveReleaseVersion, fetchGithubReleaseNotes, prepareUpdate, launchPreparedUpdate } = require('../lib/updater');
 const releasePlanUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release-plan.mjs')).href;
 
 test('bridge title resolves product version instead of transport tag', () => {
@@ -20,6 +20,23 @@ test('release arguments reject a malformed transport tag', async () => {
     () => parseReleaseArgs(['2.0.1', '--transport-tag', '3.3.109', 'Bridge', '--dry-run']),
     /--transport-tag must match vX\.Y\.Z/
   );
+});
+
+test('matching GitHub release notes replace the private release body', async () => {
+  const calls = [];
+  const notes = await fetchGithubReleaseNotes('2.1.0', 'Private fallback', async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, json: async () => ({ tag_name: 'v2.1.0', body: '## Public changes\n\n- English UI' }) };
+  });
+
+  assert.equal(notes, '## Public changes\n\n- English UI');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.github.com/repos/Sucukdeluxe/Multi-Hoster-Upload/releases/tags/v2.1.0');
+});
+
+test('GitHub release-note failures preserve the private release body', async () => {
+  const notes = await fetchGithubReleaseNotes('2.1.0', 'Private fallback', async () => ({ ok: false }));
+  assert.equal(notes, 'Private fallback');
 });
 
 test('update preparation writes a verified installer without launching it', async () => {

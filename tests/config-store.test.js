@@ -72,11 +72,13 @@ describe('ConfigStore', () => {
     assert.equal(config.hosterSettings['doodstream.com'].retries, 3);
     assert.equal(config.hosterSettings['doodstream.com'].parallelCount, 2);
     assert.equal(config.globalSettings.alwaysOnTop, false);
+    assert.equal(config.globalSettings.language, 'en');
     assert.equal(config.globalSettings.shutdownAfterFinish, 'nothing');
     assert.equal(config.globalSettings.logFilePath, '');
     assert.equal(config.globalSettings.resumeQueueOnLaunch, true);
     assert.equal(config.globalSettings.parallelUploadCount, 0);
     assert.equal(config.globalSettings.scaleParallelUploads, false);
+    assert.equal(config.globalSettings.lastBrowseDirectory, '');
     assert.equal(config.globalSettings.pendingQueue, null);
     assert.deepEqual(config.history, []);
   });
@@ -456,6 +458,18 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.diagnostics.port, 7777);
     assert.equal(config.globalSettings.historyRetention, '7d');
     assert.deepEqual(config.globalSettings.remote, { enabled: true, port: 9200, token: 'main-token', allowInput: false });
+  });
+
+  it('persists the last browse directory across stale renderer settings saves', async () => {
+    const selectedDirectory = path.join(tmpDir, 'selected');
+
+    await store.saveLastBrowseDirectory(selectedDirectory);
+    await store.saveRendererGlobalSettings({
+      alwaysOnTop: true,
+      lastBrowseDirectory: ''
+    });
+
+    assert.equal(store.load().globalSettings.lastBrowseDirectory, selectedDirectory);
   });
 
   it('merges remote settings in the write queue and returns the canonical token', async () => {

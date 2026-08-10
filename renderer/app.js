@@ -1,4 +1,14 @@
 const HOSTERS = ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx', 'clouddrop.cc'];
+const uiLocalizer = window.I18n.createDomLocalizer(document);
+uiLocalizer.start('en');
+
+function setUiLanguage(value) {
+  return uiLocalizer.setLanguage(window.I18n.normalizeLanguage(value));
+}
+
+function getUiLocale() {
+  return uiLocalizer.getLanguage() === 'de' ? 'de-DE' : 'en-US';
+}
 
 // Dropdown options for "Add Account" modal: value -> label
 const HOSTER_ADD_OPTIONS = [
@@ -260,6 +270,9 @@ function flushConfigWrites() {
 let _restoredSnapshotSavedAt = null;
 let settingsSaveTimer = null;
 const settingsSaveCoordinator = window.SerializedRunner.createSerializedRunner(performSaveSettings);
+let settingsBaseline = '';
+let settingsDirty = false;
+let settingsSaving = false;
 let lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: 0, elapsed: 0, activeJobs: 0 };
 const AUTO_CHECK_PREF_KEY = 'autoHealthCheckBeforeUpload';
 const QUEUE_COL_WIDTHS_KEY = 'queueColumnWidthsPx';
@@ -342,6 +355,7 @@ window.addEventListener('unhandledrejection', (e) => {
 // --- Init ---
 async function init() {
   config = await window.api.getConfig();
+  setUiLanguage(config.globalSettings?.language);
   hosterSettings = config.hosterSettings || {};
   autoHealthCheckEnabled = loadAutoCheckPreference();
   ensureAccountStatusEntries();
@@ -527,6 +541,8 @@ function _isHistoryTabActive() {
     if (nextView) nextView.classList.add('active');
     activeTab = tab;
     syncTabIndicator(tab);
+    const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation > .settings-nav-button.active');
+    _syncSidebarIndicator(activeSidebarButton, true);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
       loadHistory();
     }
@@ -3126,7 +3142,7 @@ async function showJobLogModal() {
   }
 
   const fmt = (e) => {
-    const t = new Date(e.ts || Date.now()).toLocaleTimeString('de-DE', { hour12: false }) + '.' +
+    const t = new Date(e.ts || Date.now()).toLocaleTimeString(getUiLocale(), { hour12: false }) + '.' +
       String((e.ts || 0) % 1000).padStart(3, '0');
     if (e.kind === 'progress') {
       const attempt = e.attempt ? ` (${e.attempt}/${e.maxAttempts || '?'})` : '';
@@ -3420,15 +3436,41 @@ function _computeQueueStats() {
 
 function _setSidebarCount(id, value) {
   const element = document.getElementById(id);
-  if (element) element.textContent = Number(value || 0).toLocaleString('de-DE');
+  if (element) element.textContent = Number(value || 0).toLocaleString(getUiLocale());
+}
+
+function _syncSidebarIndicator(button, immediate = false) {
+  const navigation = button?.closest('.view-sidebar-navigation, .settings-navigation');
+  const indicator = navigation?.querySelector(':scope > .view-sidebar-indicator, :scope > .settings-nav-indicator');
+  if (!indicator || !button) return;
+  const navigationRect = navigation.getBoundingClientRect();
+  const buttonRect = button.getBoundingClientRect();
+  if (buttonRect.width === 0 || buttonRect.height === 0) return;
+  const firstPosition = indicator.dataset.ready !== 'true';
+  if (immediate || firstPosition) indicator.style.transition = 'none';
+  indicator.style.width = `${buttonRect.width}px`;
+  indicator.style.height = `${buttonRect.height}px`;
+  indicator.style.transform = `translate(${buttonRect.left - navigationRect.left}px, ${buttonRect.top - navigationRect.top}px)`;
+  if (immediate || firstPosition) {
+    indicator.getBoundingClientRect();
+    requestAnimationFrame(() => {
+      indicator.style.transition = '';
+      indicator.dataset.ready = 'true';
+    });
+  }
 }
 
 function _syncSidebarFilterButtons(selector, datasetKey, value) {
+  let activeButton = null;
+  let selectionChanged = false;
   document.querySelectorAll(selector).forEach(button => {
     const active = button.dataset[datasetKey] === value;
+    if (active && !button.classList.contains('active')) selectionChanged = true;
     button.classList.toggle('active', active);
     button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    if (active) activeButton = button;
   });
+  _syncSidebarIndicator(activeButton, !selectionChanged);
 }
 
 function setUploadSidebarFilter(value) {
@@ -3490,7 +3532,7 @@ function updateAccountSidebarSummary(allAccounts = getAllAccountsFlat()) {
       label.textContent = getHosterLabel(name);
       const count = document.createElement('span');
       count.className = 'view-sidebar-badge';
-      count.textContent = hosterCounts.get(name).toLocaleString('de-DE');
+      count.textContent = hosterCounts.get(name).toLocaleString(getUiLocale());
       row.append(dot, label, count);
       return row;
     }));
@@ -3543,7 +3585,15 @@ function updateHistorySidebarSummary() {
   _setSidebarCount('historySidebarErrorCount', historySidebarCounts.error);
   const retention = document.getElementById('historySidebarRetention');
   const select = document.getElementById('historyRetentionSelect');
-  if (retention && select) retention.textContent = select.selectedOptions[0]?.textContent || 'Alles behalten';
+  const labels = {
+    all: 'Alles behalten',
+    '7d': 'Letzte 7 Tage',
+    '30d': 'Letzte 30 Tage',
+    '90d': 'Letzte 90 Tage',
+    '1000': 'Letzte 1000 Uploads',
+    '100': 'Letzte 100 Uploads'
+  };
+  if (retention && select) retention.textContent = labels[select.value] || labels.all;
 }
 
 function updateStatusBar() {
@@ -3733,6 +3783,7 @@ function renderSettings() {
         </div>
       </div>
       <nav class="settings-navigation" aria-label="Einstellungskategorien">
+        <span class="settings-nav-indicator" aria-hidden="true"></span>
         ${pageDefinitions.map((definition, index) => `<button class="settings-nav-button${index === 0 ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.search}" aria-current="${index === 0 ? 'page' : 'false'}">${definition.label}</button>`).join('')}
       </nav>
       <p class="settings-search-empty" id="settingsSearchEmpty" hidden>Keine passende Einstellung gefunden.</p>
@@ -3758,6 +3809,24 @@ function renderSettings() {
   pages.allgemein.innerHTML = `
       ${pageHeader('Allgemein', 'Fensterverhalten, Drop-Target und Programmupdates.')}
       <div class="settings-section-label">Oberfläche</div>
+      <div class="settings-row language-settings-row">
+        <label id="languagePickerLabel">Sprache</label>
+        <div class="language-picker" id="languagePicker" data-language="${globalSettings.language === 'de' ? 'de' : 'en'}" role="group" aria-labelledby="languagePickerLabel">
+          <span class="language-picker-indicator" aria-hidden="true"></span>
+          <button type="button" class="language-option" data-language="en" aria-pressed="${globalSettings.language !== 'de'}">
+            <span class="language-flag language-flag-en" aria-hidden="true"></span>
+            <span>Englisch</span>
+          </button>
+          <button type="button" class="language-option" data-language="de" aria-pressed="${globalSettings.language === 'de'}">
+            <span class="language-flag language-flag-de" aria-hidden="true"></span>
+            <span>Deutsch</span>
+          </button>
+        </div>
+        <select class="settings-autosave" id="languageInput" hidden aria-hidden="true" tabindex="-1">
+          <option value="en" ${globalSettings.language !== 'de' ? 'selected' : ''}>Englisch</option>
+          <option value="de" ${globalSettings.language === 'de' ? 'selected' : ''}>Deutsch</option>
+        </select>
+      </div>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
           <label for="alwaysOnTopInput">Immer im Vordergrund</label>
@@ -3769,8 +3838,11 @@ function renderSettings() {
         </div>
       </div>
       <div class="settings-section-label">Programmupdate</div>
-      <div class="settings-row">
-        <label>Neue Version suchen</label>
+      <div class="settings-row program-update-row program-update-card">
+        <div class="program-update-copy">
+          <strong class="program-update-title">Nach neuer Version suchen</strong>
+          <span class="program-update-description">Verfügbare Updates werden zusammen mit dem Changelog angezeigt.</span>
+        </div>
         <button class="btn btn-xs btn-secondary" id="manualUpdateCheckBtn">Nach Updates suchen</button>
       </div>
   `;
@@ -3898,7 +3970,7 @@ function renderSettings() {
   pages.logs.innerHTML = `
       ${pageHeader('Logs & Support', 'Protokollierung verwalten, Log-Dateien öffnen und ein bereinigtes Support-Paket erstellen.')}
       <div class="settings-section-label">Log</div>
-      <div class="settings-row">
+      <div class="settings-row log-file-path-row">
         <label>FileUploader Log</label>
         <input type="text" class="key-input settings-autosave" id="logFilePathInput" value="${escapeAttr(globalSettings.logFilePath || '')}" placeholder="Standardpfad verwenden">
         <button class="btn btn-xs btn-secondary" id="chooseLogFilePathBtn">Ordner wählen</button>
@@ -4047,6 +4119,8 @@ function renderSettings() {
   const activateSettingsPage = (target, focus = false) => {
     const activeButton = navigation.querySelector(`[data-settings-page="${target}"]`);
     if (!activeButton || activeButton.hidden) return;
+    const indicator = navigation.querySelector('.settings-nav-indicator');
+    if (indicator) indicator.hidden = false;
     navigation.querySelectorAll('.settings-nav-button').forEach((button) => {
       const active = button === activeButton;
       button.classList.toggle('active', active);
@@ -4055,6 +4129,7 @@ function renderSettings() {
     Object.values(pages).forEach((page) => {
       page.classList.toggle('active', page.dataset.subpage === target);
     });
+    _syncSidebarIndicator(activeButton);
     if (focus) activeButton.focus();
     content.scrollTop = 0;
   };
@@ -4081,7 +4156,7 @@ function renderSettings() {
   const searchInput = layout.querySelector('#settingsSearchInput');
   const searchEmpty = layout.querySelector('#settingsSearchEmpty');
   searchInput.addEventListener('input', () => {
-    const query = searchInput.value.trim().toLocaleLowerCase('de-DE');
+    const query = searchInput.value.trim().toLocaleLowerCase(getUiLocale());
     const visibleButtons = [];
     navigation.querySelectorAll('.settings-nav-button').forEach((button) => {
       const visible = !query || button.dataset.search.includes(query);
@@ -4092,10 +4167,14 @@ function renderSettings() {
     const activeButton = navigation.querySelector('.settings-nav-button.active');
     if (visibleButtons.length === 0) {
       Object.values(pages).forEach((page) => page.classList.remove('active'));
+      const indicator = navigation.querySelector('.settings-nav-indicator');
+      if (indicator) indicator.hidden = true;
       return;
     }
     if (!activeButton || activeButton.hidden || !content.querySelector('.settings-subpage.active')) {
       activateSettingsPage((activeButton && !activeButton.hidden ? activeButton : visibleButtons[0]).dataset.settingsPage);
+    } else {
+      _syncSidebarIndicator(activeButton, true);
     }
   });
 
@@ -4218,7 +4297,7 @@ function renderSettings() {
 
     const fmtIssued = (ts) => {
       if (!ts) return '';
-      try { return 'Code erstellt: ' + new Date(ts).toLocaleString('de-DE'); } catch { return ''; }
+      try { return 'Code erstellt: ' + new Date(ts).toLocaleString(getUiLocale()); } catch { return ''; }
     };
     const parseAllowlist = () => allowlistEl.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     const renderModeUi = (suggestedHosts) => {
@@ -4264,7 +4343,7 @@ function renderSettings() {
         const el = document.getElementById('diagConnectionStatus');
         if (!el || !st) return;
         if (st.running) {
-          const last = st.lastAccess ? new Date(st.lastAccess).toLocaleString('de-DE') : '—';
+          const last = st.lastAccess ? new Date(st.lastAccess).toLocaleString(getUiLocale()) : '—';
           const scope = st.bindMode === 'network' ? `Netzwerk (Allowlist: ${st.allowlistCount})` : 'nur lokal';
           el.textContent = `Aktiv auf ${st.bindAddress}:${st.port} (${scope}) — ${st.clientCount} Client(s) — Letzter Zugriff: ${last}`;
           el.style.color = '#10b981';
@@ -4336,8 +4415,37 @@ function renderSettings() {
   document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
-    const eventName = input.type === 'checkbox' ? 'change' : 'input';
-    input.addEventListener(eventName, scheduleSettingsSave);
+    const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
+    input.addEventListener(eventName, () => {
+      if (input.id === 'languageInput') {
+        setUiLanguage(input.value);
+        syncLanguagePicker(input.value);
+      }
+      markSettingsDirty();
+    });
+  });
+  container.querySelectorAll('.language-option').forEach(button => {
+    button.addEventListener('click', () => {
+      const input = document.getElementById('languageInput');
+      if (!input || input.value === button.dataset.language) return;
+      input.value = button.dataset.language;
+      input.dispatchEvent(new window.Event('change', { bubbles: true }));
+    });
+  });
+  syncLanguagePicker(globalSettings.language);
+  establishSettingsBaseline();
+  window.requestAnimationFrame(() => {
+    if (layout.isConnected) _syncSidebarIndicator(navigation.querySelector('.settings-nav-button.active'), true);
+  });
+}
+
+function syncLanguagePicker(value) {
+  const language = window.I18n.normalizeLanguage(value);
+  const picker = document.getElementById('languagePicker');
+  if (!picker) return;
+  picker.dataset.language = language;
+  picker.querySelectorAll('.language-option').forEach(button => {
+    button.setAttribute('aria-pressed', String(button.dataset.language === language));
   });
 }
 
@@ -4346,24 +4454,66 @@ async function chooseLogFilePath() {
   if (!folders || !folders[0]) return;
   const normalized = folders[0].replace(/[\\\/]+$/, '');
   document.getElementById('logFilePathInput').value = `${normalized}\\fileuploader.log`;
-  scheduleSettingsSave();
+  markSettingsDirty();
+}
+
+function captureSettingsState() {
+  const controls = Array.from(document.querySelectorAll('#settings-view .settings-autosave'));
+  return JSON.stringify(controls.map(control => [
+    control.id || control.name || '',
+    control.type === 'checkbox' ? control.checked : control.value
+  ]));
+}
+
+function syncSettingsSaveState(message) {
+  const button = document.getElementById('saveSettingsBtn');
+  const feedback = document.getElementById('saveFeedback');
+  if (button) {
+    button.disabled = settingsSaving || !settingsDirty;
+    button.classList.toggle('btn-success', settingsDirty && !settingsSaving);
+    button.classList.toggle('btn-secondary', !settingsDirty || settingsSaving);
+  }
+  if (feedback && message) feedback.textContent = message;
+}
+
+function establishSettingsBaseline(message = 'Keine ungespeicherten Änderungen') {
+  settingsBaseline = captureSettingsState();
+  settingsDirty = false;
+  syncSettingsSaveState(message);
+}
+
+function markSettingsDirty() {
+  settingsDirty = captureSettingsState() !== settingsBaseline;
+  syncSettingsSaveState(settingsDirty ? 'Ungespeicherte Änderungen' : 'Keine ungespeicherten Änderungen');
 }
 
 function scheduleSettingsSave() {
-  if (closePreparationState !== 'open') return;
-  const feedback = document.getElementById('saveFeedback');
-  if (feedback) feedback.textContent = 'Speichert...';
-  clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = setTimeout(() => {
-    settingsSaveTimer = null;
-    saveSettings({ feedbackText: 'Automatisch gespeichert' }).catch((err) => {
-      if (feedback) feedback.textContent = `Speichern fehlgeschlagen: ${err.message}`;
-    });
-  }, 350);
+  markSettingsDirty();
 }
 
 function saveSettings(options = {}) {
-  return settingsSaveCoordinator.run(options);
+  const requestedState = captureSettingsState();
+  settingsSaving = true;
+  syncSettingsSaveState('Speichert…');
+  return settingsSaveCoordinator.run(options).then(result => {
+    const savedMessage = options.feedbackText || 'Gespeichert!';
+    settingsBaseline = requestedState;
+    settingsDirty = captureSettingsState() !== settingsBaseline;
+    syncSettingsSaveState(settingsDirty ? 'Ungespeicherte Änderungen' : savedMessage);
+    setTimeout(() => {
+      const feedback = document.getElementById('saveFeedback');
+      if (!settingsDirty && feedback?.textContent === savedMessage) syncSettingsSaveState('Keine ungespeicherten Änderungen');
+    }, 1800);
+    return result;
+  }, error => {
+    settingsSaving = false;
+    settingsDirty = captureSettingsState() !== settingsBaseline;
+    syncSettingsSaveState(`Speichern fehlgeschlagen: ${error.message}`);
+    throw error;
+  }).finally(() => {
+    settingsSaving = false;
+    syncSettingsSaveState();
+  });
 }
 
 async function performSaveSettings(options = {}) {
@@ -4383,6 +4533,10 @@ async function performSaveSettings(options = {}) {
 
   const globalSettings = {
     ...cur,
+    language: (() => {
+      const el = document.getElementById('languageInput');
+      return window.I18n.normalizeLanguage(el ? el.value : cur.language);
+    })(),
     logFilePath: elTxt('logFilePathInput', cur.logFilePath || '').trim(),
     logMode: (() => {
       const el = document.getElementById('logModeInput');
@@ -4519,12 +4673,7 @@ async function performSaveSettings(options = {}) {
   }
 
   const feedback = document.getElementById('saveFeedback');
-  feedback.textContent = feedbackText;
-  setTimeout(() => {
-    if (feedback.textContent === feedbackText) {
-      feedback.textContent = 'Änderungen werden automatisch gespeichert.';
-    }
-  }, 1800);
+  if (feedback) feedback.textContent = feedbackText;
 }
 
 // --- Accounts ---
@@ -5489,6 +5638,112 @@ function _hideOtpField() {
 }
 
 // --- History ---
+let historyRetentionMenuToken = 0;
+
+function syncHistoryRetentionPicker() {
+  const select = document.getElementById('historyRetentionSelect');
+  const value = document.getElementById('historyRetentionValue');
+  const menu = document.getElementById('historyRetentionMenu');
+  if (!select || !value || !menu) return;
+  const labels = {
+    all: 'Alles behalten',
+    '7d': 'Letzte 7 Tage',
+    '30d': 'Letzte 30 Tage',
+    '90d': 'Letzte 90 Tage',
+    '1000': 'Letzte 1000 Uploads',
+    '100': 'Letzte 100 Uploads'
+  };
+  value.textContent = labels[select.value] || labels.all;
+  menu.querySelectorAll('[data-history-retention]').forEach(option => {
+    const selected = option.dataset.historyRetention === select.value;
+    option.setAttribute('aria-selected', String(selected));
+    option.tabIndex = selected ? 0 : -1;
+  });
+}
+
+function openHistoryRetentionMenu(focusOption = false) {
+  const trigger = document.getElementById('historyRetentionTrigger');
+  const menu = document.getElementById('historyRetentionMenu');
+  if (!trigger || !menu) return;
+  historyRetentionMenuToken++;
+  menu.classList.remove('menu-closing', 'menu-opening');
+  menu.style.display = 'block';
+  void menu.offsetHeight;
+  menu.classList.add('menu-opening');
+  trigger.setAttribute('aria-expanded', 'true');
+  if (focusOption) {
+    window.requestAnimationFrame(() => menu.querySelector('[aria-selected="true"]')?.focus());
+  }
+}
+
+function closeHistoryRetentionMenu(returnFocus = false) {
+  const trigger = document.getElementById('historyRetentionTrigger');
+  const menu = document.getElementById('historyRetentionMenu');
+  if (!trigger || !menu || window.getComputedStyle(menu).display === 'none') return;
+  const token = ++historyRetentionMenuToken;
+  menu.classList.remove('menu-opening', 'menu-closing');
+  void menu.offsetHeight;
+  menu.classList.add('menu-closing');
+  trigger.setAttribute('aria-expanded', 'false');
+  const finish = () => {
+    if (!Object.is(historyRetentionMenuToken, token)) return;
+    menu.style.display = 'none';
+    menu.classList.remove('menu-closing');
+    if (returnFocus) trigger.focus();
+  };
+  menu.addEventListener('animationend', finish, { once: true });
+  window.setTimeout(finish, 220);
+}
+
+function selectHistoryRetentionOption(value) {
+  const select = document.getElementById('historyRetentionSelect');
+  if (!select || !select.querySelector(`option[value="${value}"]`)) return;
+  select.value = value;
+  syncHistoryRetentionPicker();
+  closeHistoryRetentionMenu(true);
+  select.dispatchEvent(new window.Event('change', { bubbles: true }));
+}
+
+function syncHistoryClearAction() {
+  const button = document.getElementById('clearHistoryBtn');
+  if (button) button.disabled = historyRowsData.length === 0;
+}
+
+function closeHistoryClearModal() {
+  const modal = document.getElementById('historyClearModal');
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  document.getElementById('clearHistoryBtn')?.focus();
+}
+
+function openHistoryClearModal() {
+  const button = document.getElementById('clearHistoryBtn');
+  const modal = document.getElementById('historyClearModal');
+  if (!modal || !button || button.disabled) return;
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('confirmHistoryClearBtn')?.focus();
+}
+
+async function confirmHistoryClear() {
+  const confirmButton = document.getElementById('confirmHistoryClearBtn');
+  const cancelButton = document.getElementById('cancelHistoryClearBtn');
+  if (!confirmButton || confirmButton.disabled) return;
+  confirmButton.disabled = true;
+  cancelButton.disabled = true;
+  try {
+    await runConfigWrite(() => window.api.clearHistory());
+    await loadHistory();
+    closeHistoryClearModal();
+  } catch (error) {
+    showCopyToast(error.message || String(error));
+  } finally {
+    confirmButton.disabled = false;
+    cancelButton.disabled = false;
+  }
+}
+
 async function loadHistory() {
   const history = await window.api.getHistory();
   window._historyForStats = history || [];
@@ -5496,13 +5751,17 @@ async function loadHistory() {
   _historyDirty = false;
   _invalidateHosterLifetimeCache();
   const retSel = document.getElementById('historyRetentionSelect');
-  if (retSel) retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
+  if (retSel) {
+    retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
+    syncHistoryRetentionPicker();
+  }
   const container = document.getElementById('historyContainer');
 
   if (!history || history.length === 0) {
     historyRowsData = [];
     historySidebarCounts = { total: 0, success: 0, error: 0 };
     updateHistorySidebarSummary();
+    syncHistoryClearAction();
     container.innerHTML = '<p class="empty-state">Noch keine Uploads.</p>';
     return;
   }
@@ -5534,6 +5793,7 @@ async function loadHistory() {
   }
 
   updateHistorySidebarSummary();
+  syncHistoryClearAction();
   renderHistoryTable(container);
 }
 
@@ -5784,7 +6044,7 @@ function renderHistoryTable(container) {
   if (notice) {
     if (total > HISTORY_RENDER_CAP) {
       notice.style.display = '';
-      notice.textContent = `Zeige neueste ${HISTORY_RENDER_CAP.toLocaleString('de-DE')} von ${total.toLocaleString('de-DE')} Einträgen. Der vollständige Verlauf bleibt gespeichert und ist über „Verlauf exportieren“ verfügbar.`;
+      notice.textContent = `Zeige neueste ${HISTORY_RENDER_CAP.toLocaleString(getUiLocale())} von ${total.toLocaleString(getUiLocale())} Einträgen. Der vollständige Verlauf bleibt gespeichert und ist über „Verlauf exportieren“ verfügbar.`;
     } else {
       notice.style.display = 'none';
     }
@@ -5970,6 +6230,15 @@ function setupListeners() {
   _syncSidebarFilterButtons('[data-upload-sidebar-target]', 'uploadSidebarTarget', uploadSidebarFilter);
   _syncSidebarFilterButtons('[data-accounts-sidebar-filter]', 'accountsSidebarFilter', accountSidebarFilter);
   _syncSidebarFilterButtons('[data-history-filter]', 'historyFilter', historySidebarFilter);
+  let sidebarResizeFrame = 0;
+  window.addEventListener('resize', () => {
+    window.cancelAnimationFrame(sidebarResizeFrame);
+    sidebarResizeFrame = window.requestAnimationFrame(() => {
+      document.querySelectorAll('.view.active .view-sidebar-navigation > .view-sidebar-item.active, .view.active .settings-navigation > .settings-nav-button.active').forEach(button => {
+        _syncSidebarIndicator(button, true);
+      });
+    });
+  });
   document.getElementById('addFilesBtn').addEventListener('click', pickFiles);
   document.getElementById('addFolderBtn').addEventListener('click', pickFolder);
   document.getElementById('startUploadBtn').addEventListener('click', startUpload);
@@ -6064,16 +6333,73 @@ function setupListeners() {
     }
   }, true);
 
-  document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
-    if (!confirm('Verlauf wirklich löschen?')) return;
-    try {
-      await runConfigWrite(() => window.api.clearHistory());
-      loadHistory();
-    } catch (error) {
-      showCopyToast(error.message || String(error));
+  document.getElementById('clearHistoryBtn').addEventListener('click', openHistoryClearModal);
+  document.getElementById('confirmHistoryClearBtn').addEventListener('click', confirmHistoryClear);
+  document.getElementById('cancelHistoryClearBtn').addEventListener('click', closeHistoryClearModal);
+  document.getElementById('closeHistoryClearModalBtn').addEventListener('click', closeHistoryClearModal);
+  document.getElementById('historyClearModal').addEventListener('click', event => {
+    if (event.target.id === 'historyClearModal') closeHistoryClearModal();
+  });
+  document.addEventListener('keydown', event => {
+    const modal = document.getElementById('historyClearModal');
+    if (modal?.style.display !== 'flex' || event.key !== 'Escape') return;
+    event.preventDefault();
+    closeHistoryClearModal();
+  }, true);
+  document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
+
+  const historyRetentionPicker = document.getElementById('historyRetentionPicker');
+  const historyRetentionTrigger = document.getElementById('historyRetentionTrigger');
+  const historyRetentionMenu = document.getElementById('historyRetentionMenu');
+  historyRetentionTrigger.addEventListener('click', event => {
+    event.stopPropagation();
+    if (window.getComputedStyle(historyRetentionMenu).display === 'none' || historyRetentionMenu.classList.contains('menu-closing')) {
+      openHistoryRetentionMenu();
+    } else {
+      closeHistoryRetentionMenu();
     }
   });
-  document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
+  historyRetentionTrigger.addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    openHistoryRetentionMenu(true);
+  });
+  historyRetentionMenu.addEventListener('click', event => {
+    const option = event.target.closest('[data-history-retention]');
+    if (option) selectHistoryRetentionOption(option.dataset.historyRetention);
+  });
+  historyRetentionMenu.addEventListener('keydown', event => {
+    const options = [...historyRetentionMenu.querySelectorAll('[data-history-retention]')];
+    const current = options.indexOf(document.activeElement);
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeHistoryRetentionMenu(true);
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      const option = event.target.closest('[data-history-retention]');
+      if (!option) return;
+      event.preventDefault();
+      selectHistoryRetentionOption(option.dataset.historyRetention);
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? options.length - 1
+        : (Math.max(0, current) + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+    options[next]?.focus();
+  });
+  historyRetentionPicker.addEventListener('focusout', () => {
+    window.setTimeout(() => {
+      if (!historyRetentionPicker.contains(document.activeElement)) closeHistoryRetentionMenu();
+    }, 0);
+  });
+  document.addEventListener('mousedown', event => {
+    if (!historyRetentionPicker.contains(event.target)) closeHistoryRetentionMenu();
+  });
 
   const historyRetentionSelect = document.getElementById('historyRetentionSelect');
   if (historyRetentionSelect) {
@@ -6083,17 +6409,22 @@ function setupListeners() {
       if (value !== 'all') {
         const preview = await window.api.pruneHistory(value, { dryRun: true });
         if (preview && preview.removedRows > 0) {
-          const ok = confirm(`${preview.removedRows.toLocaleString('de-DE')} Verlaufseinträge werden dauerhaft entfernt.\n\nFortfahren?`);
-          if (!ok) { historyRetentionSelect.value = prev; return; }
+          const ok = confirm(`${preview.removedRows.toLocaleString(getUiLocale())} Verlaufseinträge werden dauerhaft entfernt.\n\nFortfahren?`);
+          if (!ok) {
+            historyRetentionSelect.value = prev;
+            syncHistoryRetentionPicker();
+            return;
+          }
         }
       }
       try {
         const res = await runConfigWrite(() => window.api.pruneHistory(value));
         config.globalSettings = { ...(config.globalSettings || {}), historyRetention: value };
-        if (res && res.removedRows > 0) showCopyToast(`Verlauf gekürzt: ${res.removedRows.toLocaleString('de-DE')} entfernt`);
+        if (res && res.removedRows > 0) showCopyToast(`Verlauf gekürzt: ${res.removedRows.toLocaleString(getUiLocale())} entfernt`);
         loadHistory();
       } catch (error) {
         historyRetentionSelect.value = prev;
+        syncHistoryRetentionPicker();
         showCopyToast(error.message || String(error));
       }
     });
@@ -6227,17 +6558,18 @@ function showUpdateBanner(info) {
   const title = document.getElementById('updateDialogTitle');
   const message = document.getElementById('updateMessage');
   const notes = document.getElementById('updateReleaseNotes');
+  const notesBody = document.getElementById('updateReleaseNotesBody');
   const installButton = document.getElementById('installUpdateBtn');
   if (title) title.textContent = 'Eine neue Version ist verfügbar';
   if (message) message.textContent = `Update v${version} verfügbar`;
-  if (notes) {
+  if (notes && notesBody) {
     const releaseNotes = String(info.releaseNotes || '').trim();
-    notes.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
+    notesBody.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
     notes.hidden = !releaseNotes;
   }
   if (installButton) {
     installButton.disabled = false;
-    installButton.textContent = 'Jetzt updaten';
+    installButton.textContent = 'Jetzt installieren';
   }
   _setUpdateProgress(0, 'Bereit zum Download');
   _setUpdateDialogBusy(false);
@@ -6583,8 +6915,8 @@ function formatDateTime(value) {
   const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
   return {
     ts: safeDate.getTime(),
-    text: safeDate.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
-      + ' ' + safeDate.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    text: safeDate.toLocaleDateString(getUiLocale(), { day: '2-digit', month: '2-digit', year: 'numeric' })
+      + ' ' + safeDate.toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   };
 }
 

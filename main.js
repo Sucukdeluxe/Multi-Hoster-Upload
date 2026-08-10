@@ -1364,6 +1364,7 @@ function createWindow() {
     minWidth: 800,
     minHeight: 550,
     backgroundColor: '#0f0f0f',
+    icon: path.join(__dirname, 'assets', 'app_icon.ico'),
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
@@ -1799,15 +1800,34 @@ async function _dispatchHealthCheck(hoster, hosterConfig, otp) {
   return { status: 'skipped', message: 'Kein Health-Check fuer diesen Hoster' };
 }
 
+function getUploadBrowseDirectory() {
+  const savedDirectory = configStore.load().globalSettings.lastBrowseDirectory;
+  if (savedDirectory) {
+    try {
+      if (fs.statSync(savedDirectory).isDirectory()) return savedDirectory;
+    } catch {}
+  }
+  return app.getPath('downloads');
+}
+
+async function rememberUploadBrowseDirectory(selectedPath, selectedDirectory = false) {
+  if (!selectedPath) return;
+  const directory = selectedDirectory ? selectedPath : path.dirname(selectedPath);
+  await configStore.saveLastBrowseDirectory(directory);
+}
+
 ipcMain.handle('select-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: getUploadBrowseDirectory(),
     properties: ['openFile', 'multiSelections'],
     filters: [
       { name: 'Alle Dateien', extensions: ['*'] },
       { name: 'Videos', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'] }
     ]
   });
-  return result.canceled ? null : result.filePaths;
+  if (result.canceled || !result.filePaths.length) return null;
+  await rememberUploadBrowseDirectory(result.filePaths[0]);
+  return result.filePaths;
 });
 
 // Debug self-test: runs a minimal upload in the main process to verify events work
@@ -1837,9 +1857,11 @@ ipcMain.handle('debug-test-upload', async () => {
 
 ipcMain.handle('select-folder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: getUploadBrowseDirectory(),
     properties: ['openDirectory', 'multiSelections']
   });
   if (result.canceled || !result.filePaths.length) return null;
+  await rememberUploadBrowseDirectory(result.filePaths[0], true);
 
   const files = [];
   for (const folder of result.filePaths) await walkFolderAsync(folder, files);
@@ -1848,9 +1870,11 @@ ipcMain.handle('select-folder', async () => {
 
 ipcMain.handle('select-folder-with-sizes', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: getUploadBrowseDirectory(),
     properties: ['openDirectory', 'multiSelections']
   });
   if (result.canceled || !result.filePaths.length) return null;
+  await rememberUploadBrowseDirectory(result.filePaths[0], true);
 
   const files = [];
   for (const folder of result.filePaths) await walkFolderAsync(folder, files);

@@ -146,14 +146,17 @@
         <h2 id="updateDialogTitle">Eine neue Version ist verfügbar</h2>
         <p id="updateMessage"></p>
       </div>
-      <div class="update-release-notes" id="updateReleaseNotes" hidden></div>
+      <div class="update-release-notes" id="updateReleaseNotes" hidden>
+        <div class="update-release-notes-title">Changelog</div>
+        <div class="update-release-notes-body" id="updateReleaseNotesBody"></div>
+      </div>
       <div class="update-progress" aria-live="polite">
         <div class="update-progress-track"><span id="updateProgressBar" role="progressbar" aria-label="Update-Fortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0%"></span></div>
         <span id="updateProgressText"></span>
       </div>
       <div class="update-dialog-actions">
-        <button class="btn btn-secondary" id="dismissUpdateBtn">Später erinnern</button>
-        <button class="btn btn-primary" id="installUpdateBtn">Jetzt updaten</button>
+        <button class="btn btn-secondary" id="dismissUpdateBtn">Abbrechen</button>
+        <button class="btn btn-primary" id="installUpdateBtn">Jetzt installieren</button>
       </div>
     </section>
   </div>
@@ -165,6 +168,7 @@
         <h1 class="view-sidebar-title">Uploads</h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Upload-Status">
+        <span class="view-sidebar-indicator" aria-hidden="true"></span>
         <button class="view-sidebar-item active" data-upload-sidebar-target="all" aria-label="Alle Dateien anzeigen">
           <svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-files"></use></svg>
           <span class="view-sidebar-copy">Alle Dateien</span>
@@ -348,10 +352,11 @@
   <div id="accounts-view" class="view" role="tabpanel" aria-labelledby="accounts-tab">
     <aside class="view-sidebar" aria-label="Account-Übersicht">
       <div class="view-sidebar-header">
-        <span class="view-sidebar-kicker">Zugänge</span>
+        <span class="view-sidebar-kicker">Accounts verwalten</span>
         <h1 class="view-sidebar-title">Accounts</h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Account-Status">
+        <span class="view-sidebar-indicator" aria-hidden="true"></span>
         <button class="view-sidebar-item active" data-accounts-sidebar-filter="all" aria-label="Alle Accounts anzeigen">
           <svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-accounts"></use></svg>
           <span class="view-sidebar-copy">Alle Accounts</span>
@@ -478,15 +483,31 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="historyClearModal" style="display:none" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="historyClearModalTitle" aria-describedby="historyClearModalMessage" style="width:min(440px,100%)">
+      <div class="modal-header">
+        <div><h3 id="historyClearModalTitle">Verlauf löschen?</h3></div>
+        <button class="icon-btn" id="closeHistoryClearModalBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="historyClearModalMessage">Alle Verlaufseinträge werden dauerhaft gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="cancelHistoryClearBtn">Abbrechen</button>
+        <button class="btn btn-danger" id="confirmHistoryClearBtn">Verlauf löschen</button>
+      </div>
+    </div>
+  </div>
+
   <div id="settings-view" class="view" role="tabpanel" aria-labelledby="settings-tab">
     <div class="settings-container">
       <div class="settings-header">
         <div>
           <h2>Einstellungen</h2>
-          <p class="settings-hint">Alle Optionen nach Aufgaben sortiert. Änderungen werden automatisch gespeichert.</p>
+          <p class="settings-hint">Alle Optionen nach Aufgaben sortiert. Änderungen werden mit dem Speichern-Button übernommen.</p>
         </div>
         <div class="settings-save-row">
-          <button class="btn btn-secondary" id="saveSettingsBtn">Jetzt speichern</button>
+          <button class="btn btn-secondary" id="saveSettingsBtn" disabled>Speichern</button>
         </div>
       </div>
       <div class="settings-hosters" id="settingsHosters"></div>
@@ -500,6 +521,7 @@
         <h1 class="view-sidebar-title">Verlauf</h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Verlaufsstatus">
+        <span class="view-sidebar-indicator" aria-hidden="true"></span>
         <button class="view-sidebar-item active" data-history-filter="all" aria-label="Gesamten Verlauf anzeigen">
           <svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
           <span class="view-sidebar-copy">Alle Uploads</span>
@@ -529,8 +551,22 @@
       <div class="history-header">
         <h2>Upload-Verlauf</h2>
         <div class="history-header-actions">
-          <label for="historyRetentionSelect" class="history-retention-label">Aufbewahrung</label>
-          <select id="historyRetentionSelect" class="key-input history-retention-select">
+          <label for="historyRetentionTrigger" class="history-retention-label">Aufbewahrung</label>
+          <div class="history-retention-picker" id="historyRetentionPicker">
+            <button type="button" class="btn btn-secondary history-retention-trigger" id="historyRetentionTrigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="historyRetentionMenu">
+              <span id="historyRetentionValue">Alles behalten</span>
+              <span class="history-retention-chevron" aria-hidden="true"></span>
+            </button>
+            <div class="history-retention-menu" id="historyRetentionMenu" role="listbox" aria-labelledby="historyRetentionTrigger" style="display:none">
+              <button type="button" class="history-retention-option" role="option" data-history-retention="all" aria-selected="true">Alles behalten</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="7d" aria-selected="false">Letzte 7 Tage</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="30d" aria-selected="false">Letzte 30 Tage</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="90d" aria-selected="false">Letzte 90 Tage</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="1000" aria-selected="false">Letzte 1000 Uploads</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="100" aria-selected="false">Letzte 100 Uploads</button>
+            </div>
+          </div>
+          <select id="historyRetentionSelect" class="history-retention-select" hidden aria-hidden="true" tabindex="-1">
             <option value="all">Alles behalten</option>
             <option value="7d">Letzte 7 Tage</option>
             <option value="30d">Letzte 30 Tage</option>
@@ -539,7 +575,7 @@
             <option value="100">Letzte 100 Uploads</option>
           </select>
           <button class="btn btn-secondary" id="exportHistoryBtn">Verlauf exportieren</button>
-          <button class="btn btn-secondary" id="clearHistoryBtn">Verlauf löschen</button>
+          <button class="btn btn-danger" id="clearHistoryBtn" disabled>Verlauf löschen</button>
         </div>
       </div>
       <div id="historyCapNotice" class="history-cap-notice" style="display:none"></div>
@@ -633,6 +669,7 @@
   <script src="../lib/serialized-runner.js"></script>
   <script src="account-submit.js"></script>
   <script src="account-status.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

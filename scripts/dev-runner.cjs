@@ -57,12 +57,14 @@ function releaseLock() {
 }
 
 function startApp() {
-  child = spawn(electron, ['.', '--dev'], {
+  const startedChild = spawn(electron, ['.', '--dev'], {
     cwd: root,
     stdio: 'inherit',
     windowsHide: false
   });
-  child.once('exit', (code, signal) => {
+  child = startedChild;
+  startedChild.once('exit', (code, signal) => {
+    if (child !== startedChild) return;
     child = null;
     if (!stopping && code !== 0 && signal !== 'SIGTERM') process.exitCode = code || 1;
   });

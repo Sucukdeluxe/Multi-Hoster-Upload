@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const path = require('node:path');
 const { configureStartupRenderer, createStartupWindow } = require('../lib/startup-renderer');
 
 class TestBrowserWindow extends EventEmitter {
@@ -38,6 +40,17 @@ test('createStartupWindow forces the main window to start hidden', () => {
 
   assert.equal(startup.window.options.width, 1100);
   assert.equal(startup.window.options.show, false);
+});
+
+test('main window uses the branded application icon', () => {
+  const projectRoot = path.join(__dirname, '..');
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const createWindowStart = mainSource.indexOf('function createWindow()');
+  const createWindowEnd = mainSource.indexOf('\nfunction createTray()', createWindowStart);
+  const createWindowSource = mainSource.slice(createWindowStart, createWindowEnd);
+
+  assert.equal(fs.existsSync(path.join(projectRoot, 'assets', 'app_icon.ico')), true);
+  assert.match(createWindowSource, /icon:\s*path\.join\(__dirname, ['"]assets['"], ['"]app_icon\.ico['"]\)/u);
 });
 
 test('startup load registers visibility before navigation and shows only once', async () => {

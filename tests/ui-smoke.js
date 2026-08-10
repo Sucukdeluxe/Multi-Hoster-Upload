@@ -153,6 +153,42 @@ setTimeout(async () => {
     check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
 
+    const languageReady = await waitUntil(() => wc.executeJavaScript('Boolean(document.getElementById("languageInput"))'));
+    check('Fresh profiles render in English by default', languageReady === true && await wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")') === 'en|en|Upload,Accounts,Settings,History');
+    await wc.executeJavaScript('document.getElementById("settings-tab").click()');
+    const languagePickerContract = await wc.executeJavaScript('(() => { const picker = document.getElementById("languagePicker"); const select = document.getElementById("languageInput"); const indicator = picker?.querySelector(".language-picker-indicator"); const buttons = [...(picker?.querySelectorAll(".language-option") || [])]; return [select?.hidden, buttons.length, buttons.map(button => button.dataset.language).join(","), buttons.map(button => button.getAttribute("aria-pressed")).join(","), Boolean(buttons[0]?.querySelector(".language-flag-en") && buttons[1]?.querySelector(".language-flag-de")), indicator ? parseFloat(getComputedStyle(indicator).transitionDuration) > 0 : false].join("|"); })()');
+    check('Language uses a two-option animated flag picker instead of a visible dropdown', languagePickerContract === 'true|2|en,de|true,false|true|true');
+    const languagePickerMotion = await wc.executeJavaScript('(async () => { const picker = document.getElementById("languagePicker"); const indicator = picker?.querySelector(".language-picker-indicator"); if (!picker || !indicator) return null; const before = indicator.getBoundingClientRect().left; picker.querySelector("[data-language=de]").click(); const germanLanguage = document.documentElement.lang; await new Promise(resolve => setTimeout(resolve, 90)); const movingRight = indicator.getBoundingClientRect().left; await new Promise(resolve => setTimeout(resolve, 170)); const german = { language: germanLanguage, selected: picker.dataset.language, pressed: picker.querySelector("[data-language=de]").getAttribute("aria-pressed"), left: indicator.getBoundingClientRect().left }; picker.querySelector("[data-language=en]").click(); const englishLanguage = document.documentElement.lang; await new Promise(resolve => setTimeout(resolve, 90)); const movingLeft = indicator.getBoundingClientRect().left; await new Promise(resolve => setTimeout(resolve, 170)); const english = { language: englishLanguage, selected: picker.dataset.language, pressed: picker.querySelector("[data-language=en]").getAttribute("aria-pressed"), left: indicator.getBoundingClientRect().left }; return { before, movingRight, movingLeft, german, english }; })()');
+    if (!languagePickerMotion || !(languagePickerMotion.movingRight > languagePickerMotion.before + 2 && languagePickerMotion.movingRight < languagePickerMotion.german.left - 2) || !(languagePickerMotion.movingLeft < languagePickerMotion.german.left - 2 && languagePickerMotion.movingLeft > languagePickerMotion.before + 2)) console.log('Language picker motion: ' + JSON.stringify(languagePickerMotion));
+    check('Language indicator visibly slides right and left while applying both languages immediately', Boolean(languagePickerMotion && languagePickerMotion.german.language === 'de' && languagePickerMotion.german.selected === 'de' && languagePickerMotion.german.pressed === 'true' && languagePickerMotion.movingRight > languagePickerMotion.before + 2 && languagePickerMotion.movingRight < languagePickerMotion.german.left - 2 && languagePickerMotion.english.language === 'en' && languagePickerMotion.english.selected === 'en' && languagePickerMotion.english.pressed === 'true' && languagePickerMotion.movingLeft < languagePickerMotion.german.left - 2 && languagePickerMotion.movingLeft > languagePickerMotion.before + 2 && Math.abs(languagePickerMotion.english.left - languagePickerMotion.before) <= 1));
+    await captureVisual('00-language-picker.png');
+    await wc.executeJavaScript('document.getElementById("upload-tab").click()');
+    const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
+    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI-HOSTER UPLOAD', 'Markdown', 'Multi-Hoster Upload', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'mp4,mkv,avi']);
+    const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !value.includes('Multi-Hoster-Uploader'));
+    if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
+    check('Every mounted human-facing value is translated or explicitly language-neutral', unexpectedUnchangedValues.length === 0);
+    const englishValues = await wc.executeJavaScript('(() => { const values = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { const value = node.nodeValue.trim(); if (value) values.push(value); node = walker.nextNode(); } values.push(...[...document.querySelectorAll("[title],[aria-label],[placeholder]")].flatMap(element => [element.title, element.getAttribute("aria-label"), element.getAttribute("placeholder")])); return [...new Set(values.filter(Boolean))]; })()');
+    const germanTerms = ['ä', 'ö', 'ü', 'ß', 'Allgemein', 'Änderungen', 'Abbrechen', 'Aktiv', 'Alle', 'Anzeigen', 'Accounts hinzufügen', 'Arbeitsbereich', 'Archiv', 'Auswahl', 'Auswählen', 'Automatik', 'Bearbeiten', 'Benachrichtigungen', 'Bereit', 'Datei', 'Dateien', 'Deaktiviert', 'Diagnose', 'Einstellungen', 'Englisch', 'Entfernen', 'Erfolgreich', 'Erstellt', 'Fehler', 'Fernsteuerung', 'Fortschritt', 'Geschwindigkeit', 'Gestern', 'Gestoppt', 'Hilfe', 'Hinzufügen', 'Inaktiv', 'Keine', 'Konnte', 'Kopieren', 'Löschen', 'Nach', 'Neue', 'Nicht', 'Öffnen', 'Ordner', 'Primär', 'Priorität', 'Prüfen', 'Schließen', 'Sekunden', 'Speichern', 'Sprache', 'Stunden', 'Unbekannt', 'Verlauf', 'verwendet', 'Warteschlange', 'Wird', 'Zeigen', 'Ziel'];
+    const containsGermanTerm = value => { const lower = value.toLocaleLowerCase('de-DE'); const words = lower.match(/[A-Za-zÄÖÜäöüß]+/g) || []; return germanTerms.some(term => term.length === 1 ? value.includes(term) : term.includes(' ') ? lower.includes(term.toLocaleLowerCase('de-DE')) : words.includes(term.toLocaleLowerCase('de-DE'))); };
+    const englishResidue = englishValues.filter(containsGermanTerm);
+    if (englishResidue.length) console.log('English residue: ' + JSON.stringify(englishResidue, null, 2));
+    check('English default leaves no German interface copy behind', englishResidue.length === 0);
+    const englishSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
+    check('English sidebar hierarchy uses distinct translated kickers', englishSidebarHeadings.join('::') === 'Workspace|Uploads::Manage accounts|Accounts::Archive|History');
+    const englishLayoutFits = await wc.executeJavaScript('(() => { const states = [...document.querySelectorAll(".tab")].map(tab => { tab.click(); const view = document.querySelector(".view.active"); return view && view.scrollWidth <= view.clientWidth + 1; }); document.querySelector(".tab[data-view=upload]")?.click(); return states.every(Boolean) && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1; })()');
+    check('English labels fit every main view without horizontal overflow', englishLayoutFits === true);
+    const liveLanguageSwitch = await wc.executeJavaScript('(() => { const input = document.getElementById("languageInput"); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); const german = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "en"; input.dispatchEvent(new Event("change", { bubbles: true })); const english = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); return [german, english, document.documentElement.lang].join("|"); })()');
+    check('Language changes apply immediately in both directions', liveLanguageSwitch === 'Upload,Accounts,Einstellungen,Verlauf|Upload,Accounts,Settings,History|de');
+    const germanSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
+    check('German sidebar hierarchy uses distinct localized kickers', germanSidebarHeadings.join('::') === 'Arbeitsbereich|Uploads::Accounts verwalten|Accounts::Archiv|Verlauf');
+    const saveAfterLanguageChange = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-success")].join("|"); })()');
+    check('Changing language enables the green save action', saveAfterLanguageChange === 'false|true');
+    await wc.executeJavaScript('document.getElementById("saveSettingsBtn").click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("saveSettingsBtn").disabled'));
+    const saveAfterCommit = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-secondary")].join("|"); })()');
+    check('Saving returns the action to its disabled gray state', saveAfterCommit === 'true|true');
+
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
 
@@ -257,8 +293,24 @@ setTimeout(async () => {
     const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#upload-view .view-sidebar-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && document.getElementById("uploadSidebarAccountsCount")); })()');
     check('Upload sidebar keeps availability information in its lower area', uploadSidebarInformation === true);
 
-    const uploadSidebarBorders = await wc.executeJavaScript('(() => { const items = [...document.querySelectorAll("#upload-view .view-sidebar-item")]; const visible = items.every(item => { const style = getComputedStyle(item); return style.borderTopWidth === "1px" && style.borderTopStyle === "solid" && !style.borderTopColor.endsWith(", 0)"); }); const active = items.find(item => item.classList.contains("active")); const inactive = items.find(item => !item.classList.contains("active")); return [items.length, visible, active && inactive && getComputedStyle(active).borderTopColor !== getComputedStyle(inactive).borderTopColor].join("|"); })()');
-    check('Upload sidebar filters use visible borders with a stronger active state', uploadSidebarBorders === '5|true|true');
+    const uploadSidebarBorders = await wc.executeJavaScript('(() => { const items = [...document.querySelectorAll("#upload-view .view-sidebar-item")]; const inactive = items.filter(item => !item.classList.contains("active")); const inactiveBorders = inactive.every(item => { const style = getComputedStyle(item); return style.borderTopWidth === "1px" && style.borderTopStyle === "solid" && !style.borderTopColor.endsWith(", 0)"); }); const active = items.find(item => item.classList.contains("active")); const indicator = document.querySelector("#upload-view .view-sidebar-indicator"); const activeTransparent = active && getComputedStyle(active).backgroundColor === "rgba(0, 0, 0, 0)"; const indicatorVisible = indicator && getComputedStyle(indicator).borderTopWidth === "1px" && !getComputedStyle(indicator).borderTopColor.endsWith(", 0)"); return [items.length, inactiveBorders, activeTransparent, indicatorVisible].join("|"); })()');
+    check('Upload sidebar filters keep individual borders and move the active surface to the indicator', uploadSidebarBorders === '5|true|true|true');
+
+    const sidebarIndicatorCount = await wc.executeJavaScript('document.querySelectorAll(".view-sidebar-navigation > .view-sidebar-indicator").length');
+    check('Upload, account and history sidebars expose moving selection indicators', sidebarIndicatorCount === 3);
+
+    await wc.executeJavaScript('window.__uiUploadIndicatorStart = document.querySelector("#upload-view .view-sidebar-indicator")?.getBoundingClientRect().top; document.querySelector("[data-upload-sidebar-target=error]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 90));
+    const uploadIndicatorMovingDown = await wc.executeJavaScript('(() => { const indicator = document.querySelector("#upload-view .view-sidebar-indicator"); const target = document.querySelector("[data-upload-sidebar-target=error]"); const start = window.__uiUploadIndicatorStart; if (!indicator || !target || !Number.isFinite(start)) return "missing"; const current = indicator.getBoundingClientRect().top; const targetTop = target.getBoundingClientRect().top; const duration = parseFloat(getComputedStyle(indicator).transitionDuration); return [current > start + 2 && current < targetTop - 2, duration >= .15].join("|"); })()');
+    check('Upload sidebar indicator remains visibly in motion while gliding down', uploadIndicatorMovingDown === 'true|true');
+    await new Promise(resolve => setTimeout(resolve, 170));
+    const uploadIndicatorAtError = await wc.executeJavaScript('(() => { const indicator = document.querySelector("#upload-view .view-sidebar-indicator"); const target = document.querySelector("[data-upload-sidebar-target=error]"); if (!indicator || !target) return "missing"; const indicatorRect = indicator.getBoundingClientRect(); const targetRect = target.getBoundingClientRect(); window.__uiUploadIndicatorErrorTop = indicatorRect.top; return [Math.abs(indicatorRect.top - targetRect.top) <= 1, Math.abs(indicatorRect.height - targetRect.height) <= 1].join("|"); })()');
+    check('Upload sidebar indicator glides to a lower filter', uploadIndicatorAtError === 'true|true');
+    await wc.executeJavaScript('document.querySelector("[data-upload-sidebar-target=all]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 90));
+    const uploadIndicatorMovingUp = await wc.executeJavaScript('(() => { const indicator = document.querySelector("#upload-view .view-sidebar-indicator"); const target = document.querySelector("[data-upload-sidebar-target=all]"); const start = window.__uiUploadIndicatorErrorTop; if (!indicator || !target || !Number.isFinite(start)) return false; const current = indicator.getBoundingClientRect().top; const targetTop = target.getBoundingClientRect().top; return current < start - 2 && current > targetTop + 2; })()');
+    check('Upload sidebar indicator remains visibly in motion while gliding up', uploadIndicatorMovingUp === true);
+    await new Promise(resolve => setTimeout(resolve, 170));
 
     const uploadFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
     check('Upload view and statusbar fit inside the viewport', uploadFrameFit === true);
@@ -577,9 +629,34 @@ setTimeout(async () => {
 
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
+
+    const settingsIndicatorContract = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".settings-navigation > .settings-nav-indicator"); const active = document.querySelector(".settings-nav-button.active"); if (!indicator || !active) return "missing"; const indicatorStyle = getComputedStyle(indicator); const activeStyle = getComputedStyle(active); const indicatorRect = indicator.getBoundingClientRect(); const activeRect = active.getBoundingClientRect(); return [activeStyle.backgroundColor === "rgba(0, 0, 0, 0)", indicatorStyle.borderTopWidth === "1px", parseFloat(indicatorStyle.transitionDuration) >= .15, Math.abs(indicatorRect.top - activeRect.top) <= 1, Math.abs(indicatorRect.height - activeRect.height) <= 1].join("|"); })()');
+    check('Settings navigation moves its active surface onto one sliding indicator', settingsIndicatorContract === 'true|true|true|true|true');
+
+    await wc.executeJavaScript('window.__uiSettingsIndicatorStart = document.querySelector(".settings-nav-indicator")?.getBoundingClientRect().top; document.querySelector("[data-settings-page=backup]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 90));
+    const settingsIndicatorMovingDown = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".settings-nav-indicator"); const target = document.querySelector("[data-settings-page=backup]"); const start = window.__uiSettingsIndicatorStart; if (!indicator || !target || !Number.isFinite(start)) return false; const current = indicator.getBoundingClientRect().top; const targetTop = target.getBoundingClientRect().top; return current > start + 2 && current < targetTop - 2; })()');
+    check('Settings indicator remains visibly in motion while gliding down', settingsIndicatorMovingDown === true);
+    await new Promise(resolve => setTimeout(resolve, 170));
+    const settingsIndicatorAtBackup = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".settings-nav-indicator"); const target = document.querySelector("[data-settings-page=backup]"); if (!indicator || !target) return "missing"; const indicatorRect = indicator.getBoundingClientRect(); const targetRect = target.getBoundingClientRect(); window.__uiSettingsIndicatorBackupTop = indicatorRect.top; return [Math.abs(indicatorRect.top - targetRect.top) <= 1, Math.abs(indicatorRect.height - targetRect.height) <= 1].join("|"); })()');
+    check('Settings indicator glides to a lower category', settingsIndicatorAtBackup === 'true|true');
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=allgemein]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 90));
+    const settingsIndicatorMovingUp = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".settings-nav-indicator"); const target = document.querySelector("[data-settings-page=allgemein]"); const start = window.__uiSettingsIndicatorBackupTop; if (!indicator || !target || !Number.isFinite(start)) return false; const current = indicator.getBoundingClientRect().top; const targetTop = target.getBoundingClientRect().top; return current < start - 2 && current > targetTop + 2; })()');
+    check('Settings indicator remains visibly in motion while gliding up', settingsIndicatorMovingUp === true);
+    await new Promise(resolve => setTimeout(resolve, 170));
+
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\\'automatik\\\']")?.click()');
     const automationInputAlignment = await wc.executeJavaScript('(() => { const first = document.getElementById("autoRetryRoundsInput")?.getBoundingClientRect(); const second = document.getElementById("autoRetryDelayMinInput")?.getBoundingClientRect(); const firstHintEl = document.getElementById("autoRetryRoundsInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const secondHintEl = document.getElementById("autoRetryDelayMinInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const firstHint = firstHintEl?.getBoundingClientRect(); const secondHint = secondHintEl?.getBoundingClientRect(); if (!first || !second || !firstHint || !secondHint || !firstHintEl || !secondHintEl) return "missing"; const firstTextLeft = firstHint.left + parseFloat(getComputedStyle(firstHintEl).paddingLeft); const secondTextLeft = secondHint.left + parseFloat(getComputedStyle(secondHintEl).paddingLeft); return [Math.round(Math.abs(first.left - second.left)), Math.round(first.width), Math.round(second.width), firstHint.top >= first.bottom + 6, secondHint.top >= second.bottom + 6, Math.round(Math.abs(firstTextLeft - first.left)) <= 1, Math.round(Math.abs(secondTextLeft - second.left)) <= 1].join("|"); })()');
     check('Automation retry hints start directly below their aligned inputs', automationInputAlignment === '0|100|100|true|true|true|true');
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=allgemein]")?.click()');
+    const updateActionAlignment = await wc.executeJavaScript('(() => { const row = document.querySelector(".program-update-row")?.getBoundingClientRect(); const button = document.getElementById("manualUpdateCheckBtn")?.getBoundingClientRect(); return row && button ? [Math.abs(row.right - button.right) <= 12, button.bottom <= row.bottom, button.left > row.left + row.width / 2].join("|") : "missing"; })()');
+    check('Program update action sits at the lower right of its card', updateActionAlignment === 'true|true|true');
+    const updateCardContract = await wc.executeJavaScript('(() => { const card = document.querySelector(".program-update-card"); const title = card?.querySelector(".program-update-title"); const description = card?.querySelector(".program-update-description"); const button = document.getElementById("manualUpdateCheckBtn"); if (!card || !title || !description || !button) return "missing"; const cardRect = card.getBoundingClientRect(); const titleRect = title.getBoundingClientRect(); const descriptionRect = description.getBoundingClientRect(); const buttonRect = button.getBoundingClientRect(); const center = rect => rect.top + rect.height / 2; return [title.textContent.trim(), description.textContent.trim(), titleRect.top < descriptionRect.top, Math.abs(center(buttonRect) - center(cardRect)) <= 2, buttonRect.right <= cardRect.right - 10, titleRect.left >= cardRect.left + 10].join("|"); })()');
+    check('Program update card uses a clear title, description and vertically centered action', updateCardContract === 'Nach neuer Version suchen|Verfügbare Updates werden zusammen mit dem Changelog angezeigt.|true|true|true|true');
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=logs]")?.click()');
+    const logPathAlignment = await wc.executeJavaScript('(() => { const row = document.querySelector(".log-file-path-row")?.getBoundingClientRect(); const input = document.getElementById("logFilePathInput")?.getBoundingClientRect(); const choose = document.getElementById("chooseLogFilePathBtn")?.getBoundingClientRect(); const open = document.getElementById("openLogFolderBtn")?.getBoundingClientRect(); if (!row || !input || !choose || !open) return "missing"; const center = rect => rect.top + rect.height / 2; return [Math.abs(center(input) - center(choose)) <= 1, Math.abs(center(choose) - center(open)) <= 1, open.left > choose.right, open.right <= row.right + 1].join("|"); })()');
+    check('FileUploader Log actions stay in one row with Open on the right', logPathAlignment === 'true|true|true|true');
 
     const settingsSidebarInformation = await wc.executeJavaScript('(() => { const feedback = document.getElementById("saveFeedback"); const sidebar = document.querySelector(".settings-sidebar"); const status = document.querySelector(".settings-sidebar-status"); return Boolean(feedback && sidebar?.contains(feedback) && status && !document.querySelector(".settings-header #saveFeedback")); })()');
     check('Settings sidebar owns the persistent save information', settingsSidebarInformation === true);
@@ -610,7 +687,7 @@ setTimeout(async () => {
     check('Upload completion behavior is immediately findable', uploadSettingsState === 'uploads|Upload-Verhalten|Nach Abschluss aus der Liste entfernen|Erfolgreich hochgeladene Dateien verschwinden automatisch aus der Upload-Liste.');
 
     const settingsReadingWidth = await wc.executeJavaScript('(() => { const activePage = document.querySelector(".settings-subpage.active"); if (!activePage) return 0; return activePage.getBoundingClientRect().width; })()');
-    check('Active settings page keeps a readable content width', settingsReadingWidth > 0 && settingsReadingWidth <= 640);
+    check('Active settings page keeps a readable content width', settingsReadingWidth > 0 && settingsReadingWidth <= 760);
 
     const settingsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("settings-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
     check('Settings view and statusbar fit inside the viewport', settingsFrameFit === true);
@@ -658,7 +735,7 @@ setTimeout(async () => {
     check('Online restore menu opens the backup page and focuses the key', onlineRestoreNavigation === 'onlineBackupKeyInput|backup');
 
     // Test save
-    await wc.executeJavaScript('document.getElementById("saveSettingsBtn").click()');
+    await wc.executeJavaScript('document.getElementById("alwaysOnTopInput").click(); document.getElementById("saveSettingsBtn").click()');
     let feedback = '';
     for (let attempt = 0; attempt < 50; attempt++) {
       feedback = await wc.executeJavaScript('document.getElementById("saveFeedback")?.textContent');
@@ -669,6 +746,23 @@ setTimeout(async () => {
 
     const originalShowSaveDialog = dialog.showSaveDialog;
     const originalShowOpenDialog = dialog.showOpenDialog;
+    const selectedBrowseDirectory = path.join(app.getPath('userData'), 'selected-upload-directory');
+    const selectedBrowseFile = path.join(selectedBrowseDirectory, 'video.mp4');
+    fs.mkdirSync(selectedBrowseDirectory, { recursive: true });
+    fs.writeFileSync(selectedBrowseFile, 'video', 'utf-8');
+    const browseDialogStarts = [];
+    dialog.showOpenDialog = async (_window, options) => {
+      browseDialogStarts.push(options.defaultPath);
+      return browseDialogStarts.length === 1
+        ? { canceled: false, filePaths: [selectedBrowseFile] }
+        : { canceled: true, filePaths: [] };
+    };
+    const selectedBrowseFiles = await wc.executeJavaScript('window.api.selectFiles()');
+    const canceledBrowseFiles = await wc.executeJavaScript('window.api.selectFiles()');
+    const persistedBrowseDirectory = (await wc.executeJavaScript('window.api.getConfig()')).globalSettings.lastBrowseDirectory;
+    check('File picker starts in Downloads and reopens in the last selected directory', browseDialogStarts[0] === app.getPath('downloads') && browseDialogStarts[1] === selectedBrowseDirectory && selectedBrowseFiles?.[0] === selectedBrowseFile && canceledBrowseFiles === null && persistedBrowseDirectory === selectedBrowseDirectory);
+    dialog.showOpenDialog = originalShowOpenDialog;
+    try { fs.rmSync(selectedBrowseDirectory, { recursive: true, force: true }); } catch {}
     const exportRacePath = path.join(app.getPath('userData'), 'ui-export-race.json');
     dialog.showSaveDialog = async () => ({ canceled: false, filePath: exportRacePath });
     const exportRaceConfig = await wc.executeJavaScript('window.api.getConfig()');
@@ -1005,15 +1099,23 @@ setTimeout(async () => {
 
     console.log('\\n=== History View ===');
 
-    ipcMain.removeHandler('get-history');
-    ipcMain.handle('get-history', () => [{
+    let historyFixture = [{
       timestamp: '2026-08-10T10:00:00.000Z',
       files: [
         { name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] },
         { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] },
         { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }
       ]
-    }]);
+    }];
+    ipcMain.removeHandler('get-history');
+    ipcMain.handle('get-history', () => historyFixture);
+    let clearHistoryCallCount = 0;
+    ipcMain.removeHandler('clear-history');
+    ipcMain.handle('clear-history', () => {
+      clearHistoryCallCount++;
+      historyFixture = [];
+      return true;
+    });
 
     await wc.executeJavaScript('_historyDirty = true; document.querySelector(".tab[data-view=\\'history\\']").click()');
     await new Promise(r => setTimeout(r, 1000)); // Wait for async loadHistory
@@ -1026,6 +1128,53 @@ setTimeout(async () => {
 
     const historySidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#history-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#history-view .view-sidebar-section")?.getBoundingClientRect(); const retention = document.getElementById("historySidebarRetention")?.textContent?.trim(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && retention === "Alles behalten"); })()');
     check('History sidebar shows the active retention in its lower area', historySidebarInformation === true);
+
+    const historyRetentionPickerContract = await wc.executeJavaScript('(() => { const label = document.querySelector(".history-retention-label"); const value = document.getElementById("historyRetentionValue"); const select = document.getElementById("historyRetentionSelect"); const trigger = document.getElementById("historyRetentionTrigger"); const menu = document.getElementById("historyRetentionMenu"); const exportButton = document.getElementById("exportHistoryBtn"); if (!label || !value || !select || !trigger || !menu || !exportButton) return "missing"; const textRect = element => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect(); }; const labelTextRect = textRect(label); const valueTextRect = textRect(value); const triggerRect = trigger.getBoundingClientRect(); const exportRect = exportButton.getBoundingClientRect(); const textAligned = Math.abs(labelTextRect.bottom - valueTextRect.bottom) <= .5; return [select.hidden, trigger.textContent.trim(), menu.querySelectorAll("[role=option]").length, trigger.getAttribute("aria-haspopup"), trigger.getAttribute("aria-expanded"), parseFloat(getComputedStyle(label).fontSize), parseFloat(getComputedStyle(trigger).fontSize), textAligned, Math.abs(triggerRect.height - exportRect.height) <= 1].join("|"); })()');
+    check('History retention uses a compact accessible picker with aligned text and export action', historyRetentionPickerContract === 'true|Alles behalten|6|listbox|false|13|13|true|true');
+
+    await wc.executeJavaScript('document.getElementById("historyRetentionTrigger")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const historyRetentionOpening = await wc.executeJavaScript('(() => { const menu = document.getElementById("historyRetentionMenu"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", menu.classList.contains("menu-opening"), clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip), parseFloat(style.animationDuration) >= .12, document.getElementById("historyRetentionTrigger")?.getAttribute("aria-expanded")].join("|"); })()');
+    check('History retention menu visibly unfolds from top to bottom', historyRetentionOpening === 'true|true|true|true|true');
+    await new Promise(resolve => setTimeout(resolve, 160));
+    await captureVisual('04-history-retention-open.png');
+    await wc.executeJavaScript('document.getElementById("historyRetentionTrigger")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const historyRetentionClosing = await wc.executeJavaScript('(() => { const menu = document.getElementById("historyRetentionMenu"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", menu.classList.contains("menu-closing"), clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip), document.getElementById("historyRetentionTrigger")?.getAttribute("aria-expanded")].join("|"); })()');
+    check('History retention menu remains visible while folding from bottom to top', historyRetentionClosing === 'true|true|true|false');
+    await new Promise(resolve => setTimeout(resolve, 160));
+    const historyRetentionClosed = await wc.executeJavaScript('document.getElementById("historyRetentionMenu") ? getComputedStyle(document.getElementById("historyRetentionMenu")).display : "missing"');
+    check('History retention menu is hidden after its closing motion', historyRetentionClosed === 'none');
+
+    await wc.executeJavaScript('document.getElementById("historyRetentionTrigger")?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }))');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const historyRetentionKeyboardOpen = await wc.executeJavaScript('(() => { const trigger = document.getElementById("historyRetentionTrigger"); const selected = document.querySelector("#historyRetentionMenu [aria-selected=true]"); return [trigger?.getAttribute("aria-expanded"), document.activeElement === selected].join("|"); })()');
+    check('History retention picker opens from the keyboard and focuses the selected option', historyRetentionKeyboardOpen === 'true|true');
+    await wc.executeJavaScript('document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const historyRetentionKeyboardClosed = await wc.executeJavaScript('(() => { const trigger = document.getElementById("historyRetentionTrigger"); const menu = document.getElementById("historyRetentionMenu"); return [trigger?.getAttribute("aria-expanded"), getComputedStyle(menu).display, document.activeElement === trigger].join("|"); })()');
+    check('Escape closes the history retention picker and restores trigger focus', historyRetentionKeyboardClosed === 'false|none|true');
+
+    await wc.executeJavaScript('document.getElementById("historyRetentionTrigger")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await wc.executeJavaScript('document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const historyRetentionOutsideClosing = await wc.executeJavaScript('document.getElementById("historyRetentionMenu")?.classList.contains("menu-closing")');
+    check('Clicking outside starts the history retention closing motion', historyRetentionOutsideClosing === true);
+    await new Promise(resolve => setTimeout(resolve, 160));
+
+    const historyClearAction = await wc.executeJavaScript('(() => { const button = document.getElementById("clearHistoryBtn"); window.__historyOriginalConfirm = window.confirm; window.__historyNativeConfirmCalls = 0; window.confirm = () => { window.__historyNativeConfirmCalls++; return false; }; button?.click(); const modal = document.getElementById("historyClearModal"); return [button?.classList.contains("btn-danger"), button?.disabled, window.__historyNativeConfirmCalls, modal?.style.display, modal?.getAttribute("aria-hidden"), document.getElementById("historyClearModalTitle")?.textContent?.trim(), document.activeElement?.id].join("|"); })()');
+    check('History clear uses a red enabled action and opens the styled confirmation dialog', historyClearAction === 'true|false|0|flex|false|Verlauf löschen?|confirmHistoryClearBtn');
+    const historyClearMessage = await wc.executeJavaScript('document.getElementById("historyClearModalMessage")?.textContent?.trim()');
+    check('History clear dialog explains that deletion is permanent', historyClearMessage === 'Alle Verlaufseinträge werden dauerhaft gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden.');
+    await captureVisual('04-history-clear-modal.png');
+    await wc.executeJavaScript('document.getElementById("confirmHistoryClearBtn")?.click(); true');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("clearHistoryBtn")?.disabled'));
+    const clearedHistoryState = await wc.executeJavaScript('(() => { const modal = document.getElementById("historyClearModal"); const button = document.getElementById("clearHistoryBtn"); button?.click(); return [modal?.style.display, modal?.getAttribute("aria-hidden"), button?.disabled, document.querySelector("#historyContainer .empty-state")?.textContent?.trim()].join("|"); })()');
+    check('Clearing history closes the dialog and disables the action for the empty state', clearHistoryCallCount === 1 && clearedHistoryState === 'none|true|true|Noch keine Uploads.');
+    await captureVisual('04-history-empty.png');
+    historyFixture = [{ timestamp: '2026-08-10T10:00:00.000Z', files: [{ name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] }, { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] }, { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }] }];
+    await wc.executeJavaScript('loadHistory().then(() => { window.confirm = window.__historyOriginalConfirm; delete window.__historyOriginalConfirm; })');
 
     const historyFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
     check('History view and statusbar fit inside the viewport', historyFrameFit === true);
@@ -1097,6 +1246,13 @@ setTimeout(async () => {
     })()\`);
     check('Failed history rows keep readable text contrast (' + historyErrorContrast.toFixed(2) + ':1)', historyErrorContrast >= 4.5);
 
+    await wc.executeJavaScript('setUiLanguage("en")');
+    const dynamicEnglishValues = await wc.executeJavaScript('(() => { const values = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { const value = node.nodeValue.trim(); if (value) values.push(value); node = walker.nextNode(); } values.push(...[...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => [element.title, element.getAttribute("aria-label"), element.getAttribute("placeholder"), element.getAttribute("data-tooltip")])); return [...new Set(values.filter(Boolean))]; })()');
+    const dynamicEnglishResidue = dynamicEnglishValues.filter(containsGermanTerm);
+    if (dynamicEnglishResidue.length) console.log('Dynamic English residue: ' + JSON.stringify(dynamicEnglishResidue, null, 2));
+    check('English translation covers dynamically rendered interface states', dynamicEnglishResidue.length === 0);
+    await wc.executeJavaScript('setUiLanguage("de")');
+
     console.log('\\n=== Global UI ===');
 
     const shutdownHidden = await wc.executeJavaScript('document.getElementById("shutdownOverlay")?.style.display');
@@ -1128,11 +1284,14 @@ setTimeout(async () => {
         const containerRect = container.getBoundingClientRect();
         const headerRect = header?.getBoundingClientRect();
         const cellRect = cell?.getBoundingClientRect();
+        const sidebarIndicatorRect = document.querySelector('#upload-view .view-sidebar-indicator')?.getBoundingClientRect();
+        const activeSidebarRect = document.querySelector('#upload-view .view-sidebar-item.active')?.getBoundingClientRect();
         return {
           headerVisible: Boolean(headerRect && headerRect.width > 0 && headerRect.left >= containerRect.left - 1 && headerRect.right <= containerRect.right + 1),
           cellVisible: Boolean(cellRect && cellRect.width > 0 && cellRect.left >= containerRect.left - 1 && cellRect.right <= containerRect.right + 1),
           headerHeight: headerRect?.height,
-          rowHeight: row?.getBoundingClientRect().height
+          rowHeight: row?.getBoundingClientRect().height,
+          sidebarIndicatorAligned: Boolean(sidebarIndicatorRect && activeSidebarRect && Math.abs(sidebarIndicatorRect.top - activeSidebarRect.top) <= 1 && Math.abs(sidebarIndicatorRect.width - activeSidebarRect.width) <= 1 && Math.abs(sidebarIndicatorRect.height - activeSidebarRect.height) <= 1)
         };
       })()\`);
     }
@@ -1144,9 +1303,11 @@ setTimeout(async () => {
     check('Upload progress stays visible at the minimum window size', queueProgressVisibility.minimum.headerVisible && queueProgressVisibility.minimum.cellVisible);
     check('Responsive queue keeps a compact table header', queueProgressVisibility.standard.headerHeight <= 34 && queueProgressVisibility.minimum.headerHeight <= 34);
     check('Responsive queue keeps the fixed virtual row height', queueProgressVisibility.standard.rowHeight === 28 && queueProgressVisibility.minimum.rowHeight === 28);
+    check('Sidebar indicator stays aligned at the standard window size', queueProgressVisibility.standard.sidebarIndicatorAligned);
+    check('Sidebar indicator stays aligned at the minimum window size', queueProgressVisibility.minimum.sidebarIndicatorAligned);
     check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
 
-    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "Added live language switching.\\\\nImproved settings layout." }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
     check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');
 
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -1172,7 +1333,9 @@ setTimeout(async () => {
     check('Update dialog names the available version', updateDialogCopy === 'Eine neue Version ist verfügbar|Update v9.9.9 verfügbar');
 
     const updateDialogActions = await wc.executeJavaScript('[document.getElementById("dismissUpdateBtn")?.textContent?.trim(), document.getElementById("installUpdateBtn")?.textContent?.trim()].join("|")');
-    check('Update dialog offers later and install actions', updateDialogActions === 'Später erinnern|Jetzt updaten');
+    check('Update dialog offers cancel and install actions', updateDialogActions === 'Abbrechen|Jetzt installieren');
+    const updateDialogChangelog = await wc.executeJavaScript('document.getElementById("updateReleaseNotes")?.hidden + "|" + document.querySelector(".update-release-notes-title")?.textContent?.trim() + "|" + document.getElementById("updateReleaseNotesBody")?.textContent');
+    check('Update dialog shows the GitHub changelog with real line breaks', updateDialogChangelog === 'false|Changelog|Added live language switching.\\nImproved settings layout.');
 
     const updateHeaderHint = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.textContent?.trim(), button?.getAttribute("aria-label"), button?.dataset.tooltip].join("|"); })()');
     check('Available update gives the header action a matching hint', updateHeaderHint === 'Update verfügbar|Update v9.9.9 verfügbar. Klicken zum Installieren.|Update v9.9.9 verfügbar. Klicken zum Installieren.');
@@ -1319,7 +1482,7 @@ setTimeout(async () => {
     releaseBlockedHistoryWrite = null;
     const pendingCloseHistoryWrite = activeConfigStore.appendHistory({ id: 'ui-close-history-write', files: [] });
     await waitUntil(() => blockedHistoryWriteStarted);
-    await wc.executeJavaScript('(() => { config.globalSettings = { ...(config.globalSettings || {}), webhookUrl: "' + closeSnapshotWebhook + '" }; const webhookInput = document.getElementById("webhookUrlInput"); if (webhookInput) webhookInput.value = "' + closeSnapshotWebhook + '"; selectedFiles = []; queueJobs = [{ id: "' + closeSnapshotJobId + '", file: "C:/ui/close-persist.bin", fileName: "close-persist.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 4096, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); scheduleSettingsSave(); persistQueueStateSoon(false); return true; })()');
+    await wc.executeJavaScript('(() => { config.globalSettings = { ...(config.globalSettings || {}), webhookUrl: "' + closeSnapshotWebhook + '" }; const webhookInput = document.getElementById("webhookUrlInput"); if (webhookInput) webhookInput.value = "' + closeSnapshotWebhook + '"; selectedFiles = []; queueJobs = [{ id: "' + closeSnapshotJobId + '", file: "C:/ui/close-persist.bin", fileName: "close-persist.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 4096, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); markSettingsDirty(); persistQueueStateSoon(false); return saveSettings({ feedbackText: "Gespeichert!" }); })()');
     let mainWindowClosed = false;
     win.once('closed', () => { mainWindowClosed = true; });
     await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate()');
