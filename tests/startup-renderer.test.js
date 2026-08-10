@@ -27,10 +27,10 @@ class TestBrowserWindow extends EventEmitter {
   }
 }
 
-test('configureStartupRenderer disables hardware acceleration', () => {
+test('configureStartupRenderer leaves hardware acceleration enabled', () => {
   let calls = 0;
   configureStartupRenderer({ disableHardwareAcceleration() { calls++; } });
-  assert.equal(calls, 1);
+  assert.equal(calls, 0);
 });
 
 test('createStartupWindow forces the main window to start hidden', () => {

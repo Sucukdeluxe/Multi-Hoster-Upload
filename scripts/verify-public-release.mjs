@@ -65,6 +65,7 @@ const sourceFiles = [
   'renderer/index.html',
   'renderer/styles.css',
   'scripts/afterPack.cjs',
+  'scripts/dev-runner.cjs',
   'scripts/release-plan.mjs',
   'scripts/verify-public-release.mjs',
   'services/backup-api/package-lock.json',
@@ -126,6 +127,7 @@ const textExtensions = new Set(['.cjs', '.css', '.html', '.js', '.json', '.md', 
 const binaryExtensions = new Set(['.ico', '.png']);
 const expectedScripts = {
   start: 'electron .',
+  dev: 'node scripts/dev-runner.cjs',
   test: 'node --test tests/*.test.js tests/ui-smoke.js',
   'test:backup-api': 'npm --prefix services/backup-api test',
   lint: 'eslint .',

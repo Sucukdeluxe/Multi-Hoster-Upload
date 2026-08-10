@@ -1358,6 +1358,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
 
 function createWindow() {
   const startupWindow = createStartupWindow(BrowserWindow, {
+    title: 'Multi Hoster Uploader',
     width: 1100,
     height: 750,
     minWidth: 800,

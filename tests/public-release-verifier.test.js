@@ -18,7 +18,8 @@ const rootFiles = [
   'preload.js'
 ];
 const directoryRoots = ['assets', 'lib', 'renderer', 'services/backup-api', 'tests'];
-const scriptFiles = ['scripts/afterPack.cjs', 'scripts/release-plan.mjs', 'scripts/verify-public-release.mjs'];
+const scriptFiles = ['scripts/afterPack.cjs', 'scripts/dev-runner.cjs', 'scripts/release-plan.mjs', 'scripts/verify-public-release.mjs'];
+const currentVersion = require('../package.json').version;
 
 function copyDirectory(source, destination) {
   fs.mkdirSync(destination, { recursive: true });
@@ -48,7 +49,7 @@ function createStage() {
   return stage;
 }
 
-function verify(stage, version = '2.0.7') {
+function verify(stage, version = currentVersion) {
   return spawnSync(process.execPath, ['scripts/verify-public-release.mjs', '--source-only', '--version', version], {
     cwd: stage,
     encoding: 'utf8'

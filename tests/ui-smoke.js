@@ -195,6 +195,24 @@ setTimeout(async () => {
     const tabStops = await wc.executeJavaScript('[...document.querySelectorAll(".tab")].map(el => el.tabIndex).join("|")');
     check('Tab navigation exposes one keyboard stop', tabStops === '0|-1|-1|-1');
 
+    await wc.executeJavaScript('document.querySelector("[data-menu-trigger=datei]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const mainMenuOpeningMotion = await wc.executeJavaScript('(() => { const menu = document.querySelector("[data-menu-dropdown=datei]"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip), style.transform !== "none", parseFloat(style.animationDuration) >= .12].join("|"); })()');
+    check('Header dropdown visibly unfolds from top to bottom', mainMenuOpeningMotion === 'true|true|true|true');
+    await new Promise(resolve => setTimeout(resolve, 160));
+    await wc.executeJavaScript('document.querySelector(".menu-submenu")?.dispatchEvent(new MouseEvent("mouseenter"))');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const submenuOpeningMotion = await wc.executeJavaScript('(() => { const menu = document.querySelector(".menu-submenu-dropdown"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip), style.transform !== "none", parseFloat(style.animationDuration) >= .12].join("|"); })()');
+    check('Nested header menu visibly unfolds from top to bottom', submenuOpeningMotion === 'true|true|true|true');
+    await new Promise(resolve => setTimeout(resolve, 160));
+    await wc.executeJavaScript('document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }))');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const mainMenuClosingMotion = await wc.executeJavaScript('(() => { const menu = document.querySelector("[data-menu-dropdown=datei]"); if (!menu) return "missing"; const style = getComputedStyle(menu); const clip = style.clipPath; return [style.display !== "none", menu.classList.contains("menu-closing"), clip !== "none" && !/^inset\\(0(px)?\\)$/.test(clip)].join("|"); })()');
+    check('Header dropdown remains visible while folding from bottom to top', mainMenuClosingMotion === 'true|true|true');
+    await new Promise(resolve => setTimeout(resolve, 160));
+    const mainMenuClosed = await wc.executeJavaScript('getComputedStyle(document.querySelector("[data-menu-dropdown=datei]")).display');
+    check('Header dropdown is hidden after its closing motion', mainMenuClosed === 'none');
+
     const dropVisible = await wc.executeJavaScript('document.getElementById("dropZone")?.style.display !== "none"');
     check('Drop zone visible (no files)', dropVisible);
 
@@ -206,9 +224,20 @@ setTimeout(async () => {
 
     const sbState = await wc.executeJavaScript('document.getElementById("sbState")?.textContent');
     check('Statusbar: Bereit', sbState === 'Bereit');
+    const readyDotColor = await wc.executeJavaScript('getComputedStyle(document.getElementById("sbState"), "::before").backgroundColor');
+    check('Ready status uses a green indicator', readyDotColor === 'rgb(67, 209, 123)');
 
     const version = await wc.executeJavaScript('document.getElementById("versionLabel")?.textContent');
     check('Version label present', version && version.startsWith('v'));
+    const versionMonogram = await wc.executeJavaScript('document.querySelector(".version-monogram")');
+    check('Header version badge has no meaningless monogram', versionMonogram === null);
+    const windowTitle = await wc.executeJavaScript('document.title');
+    check('Window uses the Multi Hoster Uploader title', windowTitle === 'Multi Hoster Uploader');
+    const appAlertState = await wc.executeJavaScript('showAppAlert("Keine Hoster mit Zugangsdaten für einen Check."); (() => { const modal = document.getElementById("appAlertModal"); return [modal?.style.display, modal?.getAttribute("aria-hidden"), document.getElementById("appAlertTitle")?.textContent, document.getElementById("appAlertMessage")?.textContent, document.activeElement?.id].join("|"); })()');
+    check('Hoster check uses the styled app dialog', appAlertState === 'flex|false|Hinweis|Keine Hoster mit Zugangsdaten für einen Check.|appAlertConfirmBtn');
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click(); true');
+    const appAlertClosed = await wc.executeJavaScript('document.getElementById("appAlertModal")?.style.display');
+    check('Styled app dialog closes with its confirmation action', appAlertClosed === 'none');
 
     const localizedQueueHeaders = await wc.executeJavaScript('[...document.querySelectorAll("#queueTable thead th")].map(el => el.childNodes[0]?.textContent.trim()).join("|")');
     check('Upload table labels are consistently German', localizedQueueHeaders === 'Dateiname|Hochgeladen / Größe|Hoster|Status|Zeit|Rest|Geschwindigkeit|Fortschritt');
@@ -227,6 +256,9 @@ setTimeout(async () => {
 
     const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#upload-view .view-sidebar-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && document.getElementById("uploadSidebarAccountsCount")); })()');
     check('Upload sidebar keeps availability information in its lower area', uploadSidebarInformation === true);
+
+    const uploadSidebarBorders = await wc.executeJavaScript('(() => { const items = [...document.querySelectorAll("#upload-view .view-sidebar-item")]; const visible = items.every(item => { const style = getComputedStyle(item); return style.borderTopWidth === "1px" && style.borderTopStyle === "solid" && !style.borderTopColor.endsWith(", 0)"); }); const active = items.find(item => item.classList.contains("active")); const inactive = items.find(item => !item.classList.contains("active")); return [items.length, visible, active && inactive && getComputedStyle(active).borderTopColor !== getComputedStyle(inactive).borderTopColor].join("|"); })()');
+    check('Upload sidebar filters use visible borders with a stronger active state', uploadSidebarBorders === '5|true|true');
 
     const uploadFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
     check('Upload view and statusbar fit inside the viewport', uploadFrameFit === true);
@@ -326,6 +358,18 @@ setTimeout(async () => {
 
     const keyboardTab = await wc.executeJavaScript('document.getElementById("upload-tab").focus(); document.getElementById("upload-tab").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); document.querySelector(".tab.active")?.textContent?.trim() + "|" + document.activeElement?.id');
     check('Arrow keys move and activate main tabs', keyboardTab === 'Accounts|accounts-tab');
+
+    await wc.executeJavaScript('window.__uiTabIndicatorStart = document.querySelector(".tab-indicator")?.getBoundingClientRect().left; document.getElementById("history-tab")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 90));
+    const tabIndicatorInFlight = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".tab-indicator"); const target = document.getElementById("history-tab"); const start = window.__uiTabIndicatorStart; if (!indicator || !target || !Number.isFinite(start)) return "missing"; const current = indicator.getBoundingClientRect().left; const targetLeft = target.getBoundingClientRect().left; const duration = parseFloat(getComputedStyle(indicator).transitionDuration); return [current > start + 2 && current < targetLeft - 2, duration >= .15].join("|"); })()');
+    check('Main navigation indicator remains visibly in motion while gliding right', tabIndicatorInFlight === 'true|true');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const tabIndicatorAtHistory = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".tab-indicator"); const tab = document.getElementById("history-tab"); if (!indicator || !tab) return "missing"; const indicatorRect = indicator.getBoundingClientRect(); const tabRect = tab.getBoundingClientRect(); const style = getComputedStyle(indicator); return [Math.abs(indicatorRect.left - tabRect.left) <= 1, Math.abs(indicatorRect.width - tabRect.width) <= 1, style.transitionProperty.includes("transform")].join("|"); })()');
+    check('Main navigation indicator glides to a tab selected on the right', tabIndicatorAtHistory === 'true|true|true');
+    await wc.executeJavaScript('document.getElementById("upload-tab")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 240));
+    const tabIndicatorAtUpload = await wc.executeJavaScript('(() => { const indicator = document.querySelector(".tab-indicator"); const tab = document.getElementById("upload-tab"); if (!indicator || !tab) return "missing"; const indicatorRect = indicator.getBoundingClientRect(); const tabRect = tab.getBoundingClientRect(); return [Math.abs(indicatorRect.left - tabRect.left) <= 1, Math.abs(indicatorRect.width - tabRect.width) <= 1].join("|"); })()');
+    check('Main navigation indicator glides back to a tab selected on the left', tabIndicatorAtUpload === 'true|true');
 
     const ctxHidden = await wc.executeJavaScript('document.getElementById("contextMenu")?.style.display');
     check('Context menu hidden', ctxHidden === 'none');
@@ -533,9 +577,31 @@ setTimeout(async () => {
 
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\\'automatik\\\']")?.click()');
+    const automationInputAlignment = await wc.executeJavaScript('(() => { const first = document.getElementById("autoRetryRoundsInput")?.getBoundingClientRect(); const second = document.getElementById("autoRetryDelayMinInput")?.getBoundingClientRect(); const firstHintEl = document.getElementById("autoRetryRoundsInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const secondHintEl = document.getElementById("autoRetryDelayMinInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const firstHint = firstHintEl?.getBoundingClientRect(); const secondHint = secondHintEl?.getBoundingClientRect(); if (!first || !second || !firstHint || !secondHint || !firstHintEl || !secondHintEl) return "missing"; const firstTextLeft = firstHint.left + parseFloat(getComputedStyle(firstHintEl).paddingLeft); const secondTextLeft = secondHint.left + parseFloat(getComputedStyle(secondHintEl).paddingLeft); return [Math.round(Math.abs(first.left - second.left)), Math.round(first.width), Math.round(second.width), firstHint.top >= first.bottom + 6, secondHint.top >= second.bottom + 6, Math.round(Math.abs(firstTextLeft - first.left)) <= 1, Math.round(Math.abs(secondTextLeft - second.left)) <= 1].join("|"); })()');
+    check('Automation retry hints start directly below their aligned inputs', automationInputAlignment === '0|100|100|true|true|true|true');
 
     const settingsSidebarInformation = await wc.executeJavaScript('(() => { const feedback = document.getElementById("saveFeedback"); const sidebar = document.querySelector(".settings-sidebar"); const status = document.querySelector(".settings-sidebar-status"); return Boolean(feedback && sidebar?.contains(feedback) && status && !document.querySelector(".settings-header #saveFeedback")); })()');
     check('Settings sidebar owns the persistent save information', settingsSidebarInformation === true);
+    const settingsSearchPadding = await wc.executeJavaScript('parseFloat(getComputedStyle(document.getElementById("settingsSearchInput")).paddingLeft)');
+    check('Settings search text clears the search icon', settingsSearchPadding >= 24);
+    const settingsSearchIconAlignment = await wc.executeJavaScript('(() => { const icon = document.querySelector(".settings-search-icon"); const style = getComputedStyle(icon); return [style.display, style.alignItems, Boolean(icon?.querySelector("svg"))].join("|"); })()');
+    check('Settings search icon aligns to the input text line', settingsSearchIconAlignment === 'flex|center|true');
+    const settingsSearchControlGeometry = await wc.executeJavaScript('(() => { const control = document.querySelector(".settings-search-control"); const input = document.getElementById("settingsSearchInput"); const icon = document.querySelector(".settings-search-icon"); const svg = icon?.querySelector("svg"); if (!control || !input || !icon || !svg) return "missing"; const controlRect = control.getBoundingClientRect(); const inputRect = input.getBoundingClientRect(); const iconRect = icon.getBoundingClientRect(); const inputStyle = getComputedStyle(input); const iconStyle = getComputedStyle(icon); return [Math.round(controlRect.height), Math.round(inputRect.height), Math.round(Math.abs((inputRect.top + inputRect.height / 2) - (iconRect.top + iconRect.height / 2))), svg.getAttribute("viewBox"), inputStyle.lineHeight, inputStyle.paddingTop, inputStyle.paddingBottom, iconStyle.display, iconStyle.alignItems].join("|"); })()');
+    check('Settings search control keeps icon and text on one shared center line', settingsSearchControlGeometry === '40|40|0|0 0 24 24|18px|0px|0px|flex|center');
+
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'logs\\']")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const logPathLayout = await wc.executeJavaScript('(() => { const block = document.getElementById("logPathsBlock")?.getBoundingClientRect(); const rows = [...document.querySelectorAll("#logPathsList > div")]; const visible = rows.length > 0 && rows.every(row => { const rect = row.getBoundingClientRect(); const code = row.querySelector("code")?.getBoundingClientRect(); const button = row.querySelector("button")?.getBoundingClientRect(); return block && rect.right <= block.right + 1 && code && button && code.right <= button.left - 6 && button.right <= block.right + 1; }); return [rows.length, visible].join("|"); })()');
+    check('Log file rows keep paths and buttons inside the Diagnose panel', logPathLayout === '4|true');
+
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'remote\\']")?.click()');
+    const remoteSettingsSpacing = await wc.executeJavaScript('(() => { const grid = document.querySelector("[data-subpage=remote] .settings-grid-mini")?.getBoundingClientRect(); const port = document.getElementById("remotePortInput")?.closest(".settings-row")?.getBoundingClientRect(); return grid && port ? Math.round(port.top - grid.bottom) : -1; })()');
+    check('Remote settings keep space before Port', remoteSettingsSpacing >= 8);
+
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'diagnose\\']")?.click()');
+    const diagnoseSettingsSpacing = await wc.executeJavaScript('(() => { const grid = document.querySelector("[data-subpage=diagnose] .settings-grid-mini")?.getBoundingClientRect(); const port = document.getElementById("diagPortInput")?.closest(".settings-row")?.getBoundingClientRect(); return grid && port ? Math.round(port.top - grid.bottom) : -1; })()');
+    check('Diagnose settings keep space before Port', diagnoseSettingsSpacing >= 8);
 
     await captureVisual('03-settings.png');
 
@@ -993,6 +1059,12 @@ setTimeout(async () => {
     check('History keeps failed results in the renderer data model and All view', historyFilterState.initial.data === 3 && historyFilterState.initial.rows.join('|') === 'bad.bin|ok.bin|stopped.bin' && historyFilterState.initial.errors === 2 && historyFilterState.initial.counts.join('|') === '3|1|2');
     check('History sidebar filters successful and failed rows without dropping source data', historyFilterState.success.rows.join('|') === 'ok.bin' && historyFilterState.success.errors === 0 && historyFilterState.error.rows.join('|') === 'bad.bin|stopped.bin' && historyFilterState.error.errors === 2 && historyFilterState.all.rows.length === 3 && historyFilterState.sourceLength === 3);
     check('History sidebar exposes exactly one pressed filter', historyFilterState.success.pressed.join('|') === 'success' && historyFilterState.success.active.join('|') === 'success' && historyFilterState.error.pressed.join('|') === 'error' && historyFilterState.error.active.join('|') === 'error' && historyFilterState.all.pressed.join('|') === 'all' && historyFilterState.all.active.join('|') === 'all');
+
+    const historyCopyControls = await wc.executeJavaScript('(() => { const rows = [...document.querySelectorAll("#historyBody .history-row")]; const buttons = rows.map(row => row.querySelector(".history-copy-link")); const inside = buttons.every(button => { const cell = button?.closest(".col-link"); const cellRect = cell?.getBoundingClientRect(); const buttonRect = button?.getBoundingClientRect(); return cellRect && buttonRect && buttonRect.right <= cellRect.right + 1 && buttonRect.left >= cellRect.left; }); return [buttons.length, buttons.every(button => button?.getAttribute("aria-label") === "Link kopieren"), inside].join("|"); })()');
+    check('History links expose an in-cell copy action', historyCopyControls === '3|true|true');
+    const historyCopyAction = await wc.executeJavaScript('document.querySelector(".history-copy-link")?.click(); document.getElementById("copyToast")?.textContent?.trim()');
+    check('History copy action confirms the copied link', historyCopyAction === 'Link kopiert');
+    await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
 
     const historyErrorContrast = await wc.executeJavaScript(\`(() => {
       document.querySelector('[data-history-filter="error"]').click();

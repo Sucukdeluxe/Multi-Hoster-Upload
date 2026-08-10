@@ -526,13 +526,26 @@ function _isHistoryTabActive() {
     const nextView = viewsById[`${tab.dataset.view}-view`];
     if (nextView) nextView.classList.add('active');
     activeTab = tab;
+    syncTabIndicator(tab);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
       loadHistory();
     }
   };
 
   const tabBar = tabs[0] && tabs[0].parentElement;
+  const tabIndicator = tabBar?.querySelector('.tab-indicator');
+  function syncTabIndicator(tab) {
+    if (!tabIndicator || !tab) return;
+    tabIndicator.style.width = `${tab.offsetWidth}px`;
+    tabIndicator.style.transform = `translateX(${tab.offsetLeft}px)`;
+  }
   if (tabBar) {
+    if (tabIndicator) {
+      tabIndicator.style.transition = 'none';
+      syncTabIndicator(activeTab);
+      requestAnimationFrame(() => { tabIndicator.style.transition = ''; });
+      window.addEventListener('resize', () => syncTabIndicator(activeTab));
+    }
     tabBar.addEventListener('click', (e) => handle(e.target));
     tabBar.addEventListener('keydown', (e) => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
@@ -562,19 +575,45 @@ function initMenuBar() {
   menuBar.querySelectorAll('[data-menu-dropdown]').forEach(d => { dropdowns[d.dataset.menuDropdown] = d; });
   const triggers = {};
   menuBar.querySelectorAll('[data-menu-trigger]').forEach(t => { triggers[t.dataset.menuTrigger] = t; });
+  const panelTokens = new WeakMap();
+
+  function openPanel(panel) {
+    if (!panel) return;
+    panelTokens.set(panel, (panelTokens.get(panel) || 0) + 1);
+    panel.classList.remove('menu-closing', 'menu-opening');
+    panel.style.display = '';
+    void panel.offsetHeight;
+    panel.classList.add('menu-opening');
+  }
+
+  function closePanel(panel) {
+    if (!panel || window.getComputedStyle(panel).display === 'none') return;
+    const token = (panelTokens.get(panel) || 0) + 1;
+    panelTokens.set(panel, token);
+    panel.classList.remove('menu-opening', 'menu-closing');
+    void panel.offsetHeight;
+    panel.classList.add('menu-closing');
+    const finish = () => {
+      if (panelTokens.get(panel) !== token) return;
+      panel.style.display = 'none';
+      panel.classList.remove('menu-closing');
+    };
+    panel.addEventListener('animationend', finish, { once: true });
+    setTimeout(finish, 220);
+  }
 
   function closeMenus() {
     openMenu = null;
-    for (const k in dropdowns) dropdowns[k].style.display = 'none';
+    for (const k in dropdowns) closePanel(dropdowns[k]);
     for (const k in triggers) triggers[k].classList.remove('open');
-    menuBar.querySelectorAll('.menu-submenu-dropdown').forEach(s => { s.style.display = 'none'; });
+    menuBar.querySelectorAll('.menu-submenu-dropdown').forEach(closePanel);
   }
 
   function openMenuNamed(name) {
     if (openMenu === name) return;
     closeMenus();
     openMenu = name;
-    if (dropdowns[name]) dropdowns[name].style.display = '';
+    openPanel(dropdowns[name]);
     if (triggers[name]) triggers[name].classList.add('open');
     if (name === 'einstellungen') _syncMenuSettings();
   }
@@ -590,8 +629,8 @@ function initMenuBar() {
 
   menuBar.querySelectorAll('.menu-submenu').forEach(sm => {
     const sub = sm.querySelector('.menu-submenu-dropdown');
-    sm.addEventListener('mouseenter', () => { if (sub) sub.style.display = ''; });
-    sm.addEventListener('mouseleave', () => { if (sub) sub.style.display = 'none'; });
+    sm.addEventListener('mouseenter', () => openPanel(sub));
+    sm.addEventListener('mouseleave', () => closePanel(sub));
   });
 
   menuBar.querySelectorAll('[data-menu-action]').forEach(item => {
@@ -3544,6 +3583,33 @@ function renderHealthCheckResults(_results) {
   if (container) container.innerHTML = '';
 }
 
+let _appAlertResolve = null;
+
+function closeAppAlert() {
+  const modal = document.getElementById('appAlertModal');
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  const resolve = _appAlertResolve;
+  _appAlertResolve = null;
+  if (resolve) resolve();
+}
+
+function showAppAlert(message, title = 'Hinweis') {
+  const modal = document.getElementById('appAlertModal');
+  const titleEl = document.getElementById('appAlertTitle');
+  const messageEl = document.getElementById('appAlertMessage');
+  const confirm = document.getElementById('appAlertConfirmBtn');
+  if (!modal || !titleEl || !messageEl || !confirm) return Promise.resolve();
+  if (_appAlertResolve) closeAppAlert();
+  titleEl.textContent = title;
+  messageEl.textContent = String(message || '');
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  confirm.focus();
+  return new Promise(resolve => { _appAlertResolve = resolve; });
+}
+
 async function executeHealthCheck(hosters, _mode) {
   renderHealthCheckResults([]);
   const result = await window.api.runHealthCheck({ hosters });
@@ -3578,7 +3644,7 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
       .map(({ name, account }) => ({ hoster: name, accountId: account.id }));
   }
   if (hosters.length === 0) {
-    if (mode === 'manual') alert('Keine Hoster mit Zugangsdaten für einen Check.');
+    if (mode === 'manual') await showAppAlert('Keine Hoster mit Zugangsdaten für einen Check.');
     return [];
   }
   healthCheckRunning = true;
@@ -3662,7 +3728,7 @@ function renderSettings() {
       <div class="settings-search-wrap">
         <label for="settingsSearchInput">Schnell finden</label>
         <div class="settings-search-control">
-          <span class="settings-search-icon" aria-hidden="true">⌕</span>
+          <span class="settings-search-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="10.8" cy="10.8" r="5.8"></circle><path d="m15.2 15.2 4.3 4.3"></path></svg></span>
           <input type="search" id="settingsSearchInput" placeholder="Einstellungen durchsuchen" autocomplete="off" spellcheck="false">
         </div>
       </div>
@@ -3750,15 +3816,19 @@ function renderSettings() {
   pages.automatik.innerHTML = `
       ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
-      <div class="settings-row">
+      <div class="settings-row automation-retry-row">
         <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
-        <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
-        <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
+        <div class="automation-retry-control">
+          <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
+          <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
+        </div>
       </div>
-      <div class="settings-row">
+      <div class="settings-row automation-retry-row">
         <label for="autoRetryDelayMinInput">Wartezeit zwischen Runden</label>
-        <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
-        <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
+        <div class="automation-retry-control">
+          <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
+          <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
+        </div>
       </div>
       <div class="settings-section-label">Ordnerüberwachung <span class="panel-status${fm.enabled && fm.folderPath ? ' active' : ''}" id="folderMonitorStatusBadge">${fm.enabled && fm.folderPath ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-row">
@@ -5682,9 +5752,11 @@ function _renderHistoryVirtualRows() {
     parts.push(escapeHtml(row.filename));
     parts.push('</td><td class="col-host">');
     parts.push(escapeHtml(row.host));
-    parts.push('</td><td class="col-link">');
+    parts.push('</td><td class="col-link"><div class="history-link-cell"><span class="history-link-text" title="');
+    parts.push(escapeAttr(link));
+    parts.push('">');
     parts.push(escapeHtml(link));
-    parts.push('</td></tr>');
+    parts.push('</span><button class="history-copy-link" type="button" data-copy-link aria-label="Link kopieren" title="Link kopieren">⧉</button></div></td></tr>');
   }
   if (bottomPad > 0) parts.push(`<tr class="virtual-spacer" style="height:${bottomPad}px"><td colspan="4"></td></tr>`);
   tbody.innerHTML = parts.join('');
@@ -5748,6 +5820,13 @@ function renderHistoryTable(container) {
         }
         container.scrollTop = 0;
         renderHistoryTable(container);
+        return;
+      }
+      const copyButton = e.target.closest('.history-copy-link');
+      if (copyButton && container.contains(copyButton)) {
+        const link = copyButton.closest('.history-row')?.dataset.link;
+        if (link) { window.api.copyToClipboard(link); showCopyToast('Link kopiert'); }
+        e.stopPropagation();
         return;
       }
       const row = e.target.closest('.history-row');
@@ -5971,6 +6050,19 @@ function setupListeners() {
     });
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  document.getElementById('appAlertConfirmBtn').addEventListener('click', closeAppAlert);
+  document.getElementById('appAlertCloseBtn').addEventListener('click', closeAppAlert);
+  document.getElementById('appAlertModal').addEventListener('click', event => {
+    if (event.target.id === 'appAlertModal') closeAppAlert();
+  });
+  document.addEventListener('keydown', event => {
+    const modal = document.getElementById('appAlertModal');
+    if (modal?.style.display !== 'flex') return;
+    if (event.key === 'Escape' || event.key === 'Enter') {
+      event.preventDefault();
+      closeAppAlert();
+    }
+  }, true);
 
   document.getElementById('clearHistoryBtn').addEventListener('click', async () => {
     if (!confirm('Verlauf wirklich löschen?')) return;
