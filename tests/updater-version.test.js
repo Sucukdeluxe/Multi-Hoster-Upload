@@ -120,7 +120,7 @@ test('release plan keeps product artifacts separate from the transport tag', asy
       'Multi-Hoster-Upload Setup 2.0.7.exe.blockmap',
       'latest.yml'
     ],
-    latestYml: "version: 2.0.7\nfiles:\n  - url: Multi-Hoster-Upload Setup 2.0.7.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload Setup 2.0.7.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
+    latestYml: "version: 2.0.7\nfiles:\n  - url: Multi-Hoster-Upload.Setup.2.0.7.exe\n    sha512: abc123\n    size: 456\npath: Multi-Hoster-Upload.Setup.2.0.7.exe\nsha512: abc123\nreleaseDate: '2026-08-07T12:00:00.000Z'\n"
   });
 });
 
