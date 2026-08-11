@@ -7,7 +7,6 @@ nativeTheme.themeSource = 'dark';
 const path = require('path');
 const fs = require('fs');
 const ConfigStore = require('./lib/config-store');
-const secretStore = require('./lib/secret-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
 const SourceDeleteJournal = require('./lib/source-delete-journal');
@@ -1698,8 +1697,6 @@ ipcMain.handle('debug-log', (_event, msg) => {
 ipcMain.handle('get-config', () => {
   return configStore.load();
 });
-
-ipcMain.handle('secret-store:status', () => ({ status: secretStore.getAvailabilityStatus() }));
 
 ipcMain.handle('save-config', async (_event, config) => {
   assertConfigWriteAllowed();
