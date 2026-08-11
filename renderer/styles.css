@@ -2518,13 +2518,18 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .view-sidebar-badge {
+  height: 22px;
   min-width: 22px;
-  padding: 2px 6px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 7px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, .055);
-  color: var(--text-dim);
-  font-size: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
+  line-height: 1;
   text-align: center;
 }
 
@@ -3768,9 +3773,12 @@ input[type="checkbox"] {
     display: grid;
   }
 
-  #upload-view .view-sidebar-copy,
-  #upload-view .view-sidebar-badge {
+  #upload-view .view-sidebar-copy {
     display: block;
+  }
+
+  #upload-view .view-sidebar-badge {
+    display: grid;
   }
 
   #upload-view .upload-sidebar-lower {

@@ -1563,40 +1563,37 @@ function suppressPreviewKeysStillSelected(keys) {
 // Build preview jobs from selected files x selected hosters (before upload starts)
 function buildQueuePreview() {
   const hosters = getSelectedHosters();
-  if (hosters.length === 0) {
-    queueJobs = queueJobs.filter(j => j.status !== 'preview');
-    rebuildJobIndex();
-    renderQueueTable();
-    persistQueueStateSoon();
-    return;
-  }
-  // Remove old preview jobs
   queueJobs = queueJobs.filter(j => j.status !== 'preview');
 
-  // Build a Set for fast existence checks
-  const existingKeys = new Set();
-  for (const j of queueJobs) {
-    existingKeys.add(`${j.file}|${j.hoster}`);
-  }
+  if (hosters.length > 0) {
+    const existingKeys = new Set();
+    for (const j of queueJobs) {
+      existingKeys.add(`${j.file}|${j.hoster}`);
+    }
 
-  for (const file of selectedFiles) {
-    for (const hoster of hosters) {
-      const key = `${file.path}|${hoster}`;
-      if (!existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
-        const job = {
-          id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          file: file.path, fileName: file.name, hoster,
-          status: 'preview', bytesUploaded: 0, bytesTotal: file.size || 0,
-          speedKbs: 0, elapsed: 0, remaining: 0,
-          error: null, result: null, attempt: 0, maxAttempts: 0, link: ''
-        };
-        queueJobs.push(job);
-        existingKeys.add(key);
+    for (const file of selectedFiles) {
+      for (const hoster of hosters) {
+        const key = `${file.path}|${hoster}`;
+        if (!existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
+          const job = {
+            id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            file: file.path, fileName: file.name, hoster,
+            status: 'preview', bytesUploaded: 0, bytesTotal: file.size || 0,
+            speedKbs: 0, elapsed: 0, remaining: 0,
+            error: null, result: null, attempt: 0, maxAttempts: 0, link: ''
+          };
+          queueJobs.push(job);
+          existingKeys.add(key);
+        }
       }
     }
   }
+
   rebuildJobIndex();
+  _queueStatsCache = null;
   renderQueueTable();
+  updateStatusBar();
+  updateStatsPanel();
   persistQueueStateSoon();
 }
 

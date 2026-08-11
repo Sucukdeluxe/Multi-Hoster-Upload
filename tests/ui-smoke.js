@@ -313,7 +313,7 @@ setTimeout(async () => {
       await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'drop', ...populatedDropPoint, data: dragData });
       await waitUntil(() => wc.executeJavaScript('document.getElementById("hosterModal")?.style.display === "flex"'));
       populatedDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, paths: _pendingFiles.map(file => file.path) }))()');
-      await wc.executeJavaScript('cancelHosterModal(); selectedFiles = []; queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable();');
+      await wc.executeJavaScript('cancelHosterModal(); selectedFiles = []; queueJobs = []; rebuildJobIndex(); _queueStatsCache = null; updateUploadView(); renderQueueTable(); updateStatusBar();');
     } finally {
       if (wc.debugger.isAttached()) wc.debugger.detach();
       try { fs.unlinkSync(populatedDropFixture); } catch {}
@@ -337,7 +337,7 @@ setTimeout(async () => {
       await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'drop', ...duplicateDropPoint, data: dragData });
       await new Promise(resolve => setTimeout(resolve, 100));
       duplicateDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, pending: _pendingFiles.length, toast: document.getElementById("copyToast")?.textContent, shown: document.getElementById("copyToast")?.classList.contains("show") }))()');
-      await wc.executeJavaScript('selectedFiles = []; queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable();');
+      await wc.executeJavaScript('selectedFiles = []; queueJobs = []; rebuildJobIndex(); _queueStatsCache = null; updateUploadView(); renderQueueTable(); updateStatusBar();');
     } finally {
       if (wc.debugger.isAttached()) wc.debugger.detach();
       try { fs.unlinkSync(duplicateDropFixture); } catch {}
@@ -373,6 +373,39 @@ setTimeout(async () => {
 
     const initialTelemetryValues = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-value")].map(el => el.getAttribute("aria-label") || el.textContent.trim()).join("|")');
     check('Upload telemetry starts with stable empty values', initialTelemetryValues === '0|0|0|0|0|0|0 B/s|--:--');
+
+    const previewQueueCounts = await wc.executeJavaScript(\`(() => {
+      queueJobs = [{ id: 'existing-done', file: 'C:/ui/existing-done.bin', fileName: 'existing-done.bin', hoster: 'doodstream.com', status: 'done', bytesUploaded: 1024, bytesTotal: 1024, speedKbs: 0, elapsed: 1, remaining: 0, progress: 1 }];
+      selectedFiles = [];
+      selectedUploadHosters = ['doodstream.com'];
+      _sessionDoneCount = 1;
+      _sessionErrorCount = 0;
+      _queueStatsCache = null;
+      updateStatusBar();
+      selectedFiles = [1, 2, 3].map(index => ({ path: 'C:/ui/new-' + index + '.bin', name: 'new-' + index + '.bin', size: 2048 }));
+      buildQueuePreview();
+      const result = {
+        queue: queueJobs.map(job => job.status).join('|'),
+        sidebar: ['All', 'Active', 'Waiting', 'Done', 'Error'].map(key => document.getElementById('uploadSidebar' + key + 'Count')?.textContent).join('|'),
+        telemetry: ['Total', 'Remaining', 'Running'].map(key => document.getElementById('uploadTelemetry' + key)?.getAttribute('aria-label')).join('|')
+      };
+      queueJobs = [];
+      selectedFiles = [];
+      selectedUploadHosters = [];
+      _sessionDoneCount = 0;
+      _queueStatsCache = null;
+      updateStatusBar();
+      return result;
+    })()\`);
+    check('Adding preview files immediately refreshes upload counts before the batch starts', previewQueueCounts.queue === 'done|preview|preview|preview' && previewQueueCounts.sidebar === '4|0|3|1|0' && previewQueueCounts.telemetry === '4|3|0');
+
+    const sidebarBadgeStyle = await wc.executeJavaScript(\`(() => {
+      const badge = document.getElementById('uploadSidebarAllCount');
+      const style = getComputedStyle(badge);
+      const rect = badge.getBoundingClientRect();
+      return { background: style.backgroundColor, color: style.color, fontSize: parseFloat(style.fontSize), fontWeight: parseInt(style.fontWeight, 10), width: rect.width, height: rect.height };
+    })()\`);
+    check('Sidebar count badges use a larger light-blue high-contrast pill', sidebarBadgeStyle.background === 'rgb(186, 208, 252)' && sidebarBadgeStyle.color === 'rgb(16, 23, 35)' && sidebarBadgeStyle.fontSize >= 12 && sidebarBadgeStyle.fontWeight >= 600 && sidebarBadgeStyle.width >= 22 && sidebarBadgeStyle.height >= 22);
 
     const speedSparklineState = await wc.executeJavaScript('(() => { const widget = document.getElementById("uploadSpeedSparkline"); const canvas = document.getElementById("uploadSpeedCanvas"); const rect = canvas?.getBoundingClientRect(); return [Boolean(widget), widget?.classList.contains("is-hidden"), rect?.width > 0, rect?.height > 0, document.getElementById("uploadSpeedValue")?.textContent].join("|"); })()');
     check('Upload header exposes the visible speed sparkline', speedSparklineState === 'true|false|true|true|0 B/s');
