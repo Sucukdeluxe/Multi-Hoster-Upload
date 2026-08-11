@@ -27,9 +27,9 @@
 
   <header class="app-header">
     <div class="header-cluster header-primary">
-      <div class="app-brand" aria-label="Multi-Hoster Upload">
+      <div class="app-brand" aria-label="Multi Hoster Uploader">
         <img src="../assets/app_icon.png" alt="" class="app-brand-icon" width="24" height="24">
-        <span class="app-brand-name">MULTI-HOSTER UPLOAD</span>
+        <span class="app-brand-name">MULTI HOSTER UPLOADER</span>
       </div>
       <span class="header-divider" aria-hidden="true"></span>
       <nav class="tab-bar" role="tablist" aria-label="Hauptbereiche">
@@ -74,8 +74,8 @@
             <button class="menu-dropdown-item" data-menu-action="add-folder"><span>Ordner hinzufügen</span></button>
             <div class="menu-separator"></div>
             <div class="menu-submenu" data-submenu="sicherung">
-              <button class="menu-submenu-trigger">Sicherung</button>
-              <div class="menu-submenu-dropdown" style="display:none">
+              <button class="menu-submenu-trigger" aria-haspopup="menu" aria-expanded="false">Sicherung</button>
+              <div class="menu-submenu-dropdown" role="menu" style="display:none">
                 <button class="menu-dropdown-item" data-menu-action="backup-export"><span>Exportieren</span></button>
                 <button class="menu-dropdown-item" data-menu-action="backup-import"><span>Importieren</span></button>
                 <button class="menu-dropdown-item" data-menu-action="online-backup-create"><span>Online-Schlüssel erstellen</span></button>
@@ -235,7 +235,7 @@
       </div>
 
       <div class="upload-workspace">
-        <div class="drop-zone" id="dropZone">
+        <div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Dateien oder Ordner hinzufügen">
           <div class="drop-icon" aria-hidden="true"><svg><use href="#icon-cloud"></use></svg></div>
           <p>Dateien hierher ziehen oder klicken</p>
           <span>Dateien und Ordner werden vor dem Upload geprüft.</span>
@@ -280,14 +280,14 @@
           <table class="queue-table" id="queueTable">
             <thead>
               <tr>
-                <th class="col-filename sortable" data-col="filename" data-sort="filename">Dateiname<span class="col-resizer"></span></th>
-                <th class="col-size sortable" data-col="size" data-sort="size">Hochgeladen / Größe<span class="col-resizer"></span></th>
-                <th class="col-host sortable" data-col="host" data-sort="host">Hoster<span class="col-resizer"></span></th>
-                <th class="col-status sortable" data-col="status" data-sort="status">Status<span class="col-resizer"></span></th>
+                <th class="col-filename sortable" data-col="filename" data-sort="filename" tabindex="0" aria-sort="ascending">Dateiname<span class="col-resizer"></span></th>
+                <th class="col-size sortable" data-col="size" data-sort="size" tabindex="0" aria-sort="none">Hochgeladen / Größe<span class="col-resizer"></span></th>
+                <th class="col-host sortable" data-col="host" data-sort="host" tabindex="0" aria-sort="none">Hoster<span class="col-resizer"></span></th>
+                <th class="col-status sortable" data-col="status" data-sort="status" tabindex="0" aria-sort="none">Status<span class="col-resizer"></span></th>
                 <th class="col-elapsed" data-col="elapsed">Zeit<span class="col-resizer"></span></th>
                 <th class="col-remaining" data-col="remaining">Rest<span class="col-resizer"></span></th>
-                <th class="col-speed sortable" data-col="speed" data-sort="speed">Geschwindigkeit<span class="col-resizer"></span></th>
-                <th class="col-progress sortable" data-col="progress" data-sort="progress">Fortschritt</th>
+                <th class="col-speed sortable" data-col="speed" data-sort="speed" tabindex="0" aria-sort="none">Geschwindigkeit<span class="col-resizer"></span></th>
+                <th class="col-progress sortable" data-col="progress" data-sort="progress" tabindex="0" aria-sort="none">Fortschritt</th>
               </tr>
             </thead>
             <tbody id="queueBody"></tbody>
@@ -324,10 +324,10 @@
               <table class="recent-files-table">
                 <thead id="recentFilesHead">
                   <tr>
-                    <th class="col-date sortable" data-recent-sort="date">Datum<span class="sort-indicator">▼</span></th>
-                    <th class="col-filename sortable" data-recent-sort="filename">Dateiname<span class="sort-indicator">↕</span></th>
-                    <th class="col-host sortable" data-recent-sort="host">Hoster<span class="sort-indicator">↕</span></th>
-                    <th class="col-link sortable" data-recent-sort="link">Link<span class="sort-indicator">↕</span></th>
+                    <th class="col-date sortable" data-recent-sort="date" tabindex="0" aria-sort="descending">Datum<span class="sort-indicator">▼</span></th>
+                    <th class="col-filename sortable" data-recent-sort="filename" tabindex="0" aria-sort="none">Dateiname<span class="sort-indicator">↕</span></th>
+                    <th class="col-host sortable" data-recent-sort="host" tabindex="0" aria-sort="none">Hoster<span class="sort-indicator">↕</span></th>
+                    <th class="col-link sortable" data-recent-sort="link" tabindex="0" aria-sort="none">Link<span class="sort-indicator">↕</span></th>
                   </tr>
                 </thead>
                 <tbody id="recentFilesBody"></tbody>
@@ -451,7 +451,7 @@
   </div>
 
   <div class="modal-overlay" id="jobLogModal" style="display:none">
-    <div class="modal-card" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="jobLogTitle" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
       <div class="modal-header">
         <div><h3 id="jobLogTitle">Upload-Log</h3></div>
         <button class="icon-btn" id="closeJobLogBtn" aria-label="Schließen">&times;</button>
@@ -467,9 +467,9 @@
   </div>
 
   <div class="modal-overlay" id="deleteAccountModal" style="display:none">
-    <div class="modal-card" style="width:min(400px,100%)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteAccountTitle" aria-describedby="deleteAccountMessage" style="width:min(400px,100%)">
       <div class="modal-header">
-        <div><h3>Account löschen?</h3></div>
+        <div><h3 id="deleteAccountTitle">Account löschen?</h3></div>
         <button class="icon-btn" id="closeDeleteModalBtn" aria-label="Schließen">&times;</button>
       </div>
       <div class="modal-body">
@@ -492,7 +492,8 @@
         <p id="appAlertMessage"></p>
       </div>
       <div class="modal-footer">
-        <span></span>
+        <button class="btn btn-secondary" id="appAlertCancelBtn" hidden>Abbrechen</button>
+        <button class="btn btn-secondary" id="appAlertAlternateBtn" hidden>Alternative</button>
         <button class="btn btn-primary" id="appAlertConfirmBtn">OK</button>
       </div>
     </div>
@@ -577,8 +578,8 @@
               <button type="button" class="history-retention-option" role="option" data-history-retention="7d" aria-selected="false">Letzte 7 Tage</button>
               <button type="button" class="history-retention-option" role="option" data-history-retention="30d" aria-selected="false">Letzte 30 Tage</button>
               <button type="button" class="history-retention-option" role="option" data-history-retention="90d" aria-selected="false">Letzte 90 Tage</button>
-              <button type="button" class="history-retention-option" role="option" data-history-retention="1000" aria-selected="false">Letzte 1000 Uploads</button>
               <button type="button" class="history-retention-option" role="option" data-history-retention="100" aria-selected="false">Letzte 100 Uploads</button>
+              <button type="button" class="history-retention-option" role="option" data-history-retention="1000" aria-selected="false">Letzte 1000 Uploads</button>
             </div>
           </div>
           <select id="historyRetentionSelect" class="history-retention-select" hidden aria-hidden="true" tabindex="-1">
@@ -586,8 +587,8 @@
             <option value="7d">Letzte 7 Tage</option>
             <option value="30d">Letzte 30 Tage</option>
             <option value="90d">Letzte 90 Tage</option>
-            <option value="1000">Letzte 1000 Uploads</option>
             <option value="100">Letzte 100 Uploads</option>
+            <option value="1000">Letzte 1000 Uploads</option>
           </select>
           <button class="btn btn-secondary" id="exportHistoryBtn">Verlauf exportieren</button>
           <button class="btn btn-danger" id="clearHistoryBtn" disabled>Verlauf löschen</button>
@@ -598,42 +599,42 @@
     </main>
   </div>
 
-  <div class="context-menu" id="contextMenu" style="display:none">
-    <div class="ctx-item" data-action="start-selected">Ausgewählte starten</div>
-    <div class="ctx-item" data-action="retry-selected">Erneut versuchen</div>
-    <div class="ctx-item" data-action="show-log">Log anzeigen</div>
+  <div class="context-menu" id="contextMenu" role="menu" style="display:none">
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="start-selected">Ausgewählte starten</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="retry-selected">Erneut versuchen</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="show-log">Log anzeigen</div>
     <div class="ctx-separator"></div>
-	<div class="ctx-item" data-action="copy-links">Links kopieren</div>
-    <div class="ctx-item" data-action="copy-all-links">Alle Links kopieren</div>
+	<div class="ctx-item" role="menuitem" tabindex="-1" data-action="copy-links">Links kopieren</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="copy-all-links">Alle Links kopieren</div>
     <div class="ctx-separator"></div>
-    <div class="ctx-item" data-action="delete-selected">Entfernen</div>
-    <div class="ctx-item" data-action="delete-all">Alle entfernen</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="delete-selected">Entfernen</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="delete-all">Alle entfernen</div>
     <div class="ctx-submenu ctx-hoster-delete-submenu" style="display:none">
-      <div class="ctx-item ctx-item-danger">Hoster entfernen &#9656;</div>
+      <div class="ctx-item ctx-item-danger" role="menuitem" tabindex="-1">Hoster entfernen &#9656;</div>
       <div class="ctx-submenu-items ctx-hoster-delete-items"></div>
     </div>
   </div>
 
-  <div class="context-menu" id="recentContextMenu" style="display:none">
-    <div class="ctx-item" data-action="recent-copy-links">Links kopieren</div>
-    <div class="ctx-item" data-action="recent-delete">Entfernen</div>
+  <div class="context-menu" id="recentContextMenu" role="menu" style="display:none">
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="recent-copy-links">Links kopieren</div>
+    <div class="ctx-item" role="menuitem" tabindex="-1" data-action="recent-delete">Entfernen</div>
   </div>
 
-  <div class="copy-toast" id="copyToast"></div>
+  <div class="copy-toast" id="copyToast" role="status" aria-live="polite" aria-atomic="true"></div>
 
-  <div class="shutdown-overlay" id="shutdownOverlay" style="display:none">
-    <div class="shutdown-box">
+  <div class="shutdown-overlay" id="shutdownOverlay" style="display:none" aria-hidden="true">
+    <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage">
       <p id="shutdownMessage">System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...</p>
       <button class="btn btn-danger" id="cancelShutdownBtn">Abbrechen</button>
     </div>
   </div>
 
-  <div class="modal-overlay" id="hosterModal" style="display:none">
-    <div class="modal-card">
+  <div class="modal-overlay" id="hosterModal" style="display:none" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hosterModalTitle" aria-describedby="hosterModalDescription">
       <div class="modal-header">
         <div>
-          <h3>Upload-Ziele auswählen</h3>
-          <p>Dateien wurden hinzugefügt. Wähle jetzt die Hoster für den Upload.</p>
+          <h3 id="hosterModalTitle">Upload-Ziele auswählen</h3>
+          <p id="hosterModalDescription">Dateien wurden hinzugefügt. Wähle jetzt die Hoster für den Upload.</p>
         </div>
         <button class="icon-btn" id="closeHosterModalBtn" aria-label="Schließen">&times;</button>
       </div>

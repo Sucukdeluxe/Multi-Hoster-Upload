@@ -164,7 +164,7 @@ setTimeout(async () => {
     await captureVisual('00-language-picker.png');
     await wc.executeJavaScript('document.getElementById("upload-tab").click()');
     const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
-    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI-HOSTER UPLOAD', 'Markdown', 'Multi-Hoster Upload', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'mp4,mkv,avi']);
+    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-debug.log', 'mp4,mkv,avi']);
     const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !value.includes('Multi-Hoster-Uploader'));
     if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
     check('Every mounted human-facing value is translated or explicitly language-neutral', unexpectedUnchangedValues.length === 0);
@@ -207,7 +207,7 @@ setTimeout(async () => {
     check('App shell exposes the primary header', appHeaderExists);
 
     const appBrandText = await wc.executeJavaScript('document.querySelector(".app-brand-name")?.textContent?.trim()');
-    check('App header shows the Multi-Hoster Upload brand', appBrandText === 'MULTI-HOSTER UPLOAD');
+    check('App header shows the Multi Hoster Uploader brand', appBrandText === 'MULTI HOSTER UPLOADER');
 
     const topbarIconCount = await wc.executeJavaScript('document.querySelectorAll(".app-header .tab .top-nav-icon").length');
     check('App header exposes exactly four topbar icons', topbarIconCount === 4);
@@ -897,6 +897,8 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'diagnose\\']")?.click()');
     const diagnoseSettingsSpacing = await wc.executeJavaScript('(() => { const grid = document.querySelector("[data-subpage=diagnose] .settings-grid-mini")?.getBoundingClientRect(); const port = document.getElementById("diagPortInput")?.closest(".settings-row")?.getBoundingClientRect(); return grid && port ? Math.round(port.top - grid.bottom) : -1; })()');
     check('Diagnose settings keep space before Port', diagnoseSettingsSpacing >= 8);
+    const diagnosticsDirtyTracking = await wc.executeJavaScript('(async () => { const original = await window.api.diagnosticsGetSettings(); const input = document.getElementById("diagPublicHostInput"); establishSettingsBaseline(); input.value = "ui-diagnostics-save.invalid"; input.dispatchEvent(new Event("input", { bubbles: true })); const button = document.getElementById("saveSettingsBtn"); const enabled = button.disabled === false && button.classList.contains("btn-success"); if (enabled) await saveSettings({ feedbackText: "Gespeichert" }); const persisted = await window.api.diagnosticsGetSettings(); await saveDiagnosticsSettingsTracked(original); input.value = original.publicHost || ""; establishSettingsBaseline(); return { enabled, persisted: persisted.publicHost }; })()');
+    check('Diagnostics changes enable Save and persist with the full settings form', diagnosticsDirtyTracking.enabled === true && diagnosticsDirtyTracking.persisted === 'ui-diagnostics-save.invalid');
 
     await captureVisual('03-settings.png');
 
@@ -1382,7 +1384,7 @@ setTimeout(async () => {
     await new Promise(resolve => setTimeout(resolve, 160));
 
     const historyClearAction = await wc.executeJavaScript('(() => { const button = document.getElementById("clearHistoryBtn"); window.__historyOriginalConfirm = window.confirm; window.__historyNativeConfirmCalls = 0; window.confirm = () => { window.__historyNativeConfirmCalls++; return false; }; button?.click(); const modal = document.getElementById("historyClearModal"); return [button?.classList.contains("btn-danger"), button?.disabled, window.__historyNativeConfirmCalls, modal?.style.display, modal?.getAttribute("aria-hidden"), document.getElementById("historyClearModalTitle")?.textContent?.trim(), document.activeElement?.id].join("|"); })()');
-    check('History clear uses a red enabled action and opens the styled confirmation dialog', historyClearAction === 'true|false|0|flex|false|Verlauf löschen?|confirmHistoryClearBtn');
+    check('History clear uses a red enabled action and opens the styled confirmation dialog with safe default focus', historyClearAction === 'true|false|0|flex|false|Verlauf löschen?|cancelHistoryClearBtn');
     const historyClearMessage = await wc.executeJavaScript('document.getElementById("historyClearModalMessage")?.textContent?.trim()');
     check('History clear dialog explains that deletion is permanent', historyClearMessage === 'Alle Verlaufseinträge werden dauerhaft gelöscht. Dieser Vorgang kann nicht rückgängig gemacht werden.');
     await captureVisual('04-history-clear-modal.png');
@@ -1469,6 +1471,54 @@ setTimeout(async () => {
     const dynamicEnglishResidue = dynamicEnglishValues.filter(containsGermanTerm);
     if (dynamicEnglishResidue.length) console.log('Dynamic English residue: ' + JSON.stringify(dynamicEnglishResidue, null, 2));
     check('English translation covers dynamically rendered interface states', dynamicEnglishResidue.length === 0);
+
+    const explicitDynamicEnglish = await wc.executeJavaScript(\`(() => {
+      queueJobs = [
+        { id: 'ui-waiting', file: 'C:/ui/waiting.bin', fileName: 'waiting.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 },
+        { id: 'ui-aborted', file: 'C:/ui/aborted.bin', fileName: 'aborted.bin', hoster: 'byse.sx', status: 'aborted', error: 'Abgebrochen', bytesUploaded: 0, bytesTotal: 100, progress: 0 },
+        { id: 'ui-failed', file: 'C:/ui/failed.bin', fileName: 'failed.bin', hoster: 'byse.sx', status: 'error', error: 'Fehlgeschlagen: Verbindung verloren', bytesUploaded: 0, bytesTotal: 100, progress: 0 }
+      ];
+      rebuildJobIndex();
+      setUploadSidebarFilter('all');
+      updateUploadView();
+      renderQueueTable();
+      showCopyToast('Link kopiert', 5000);
+      handleShutdownCountdown({ mode: 'sleep', seconds: 30 });
+      const values = [...document.querySelectorAll('#queueBody .col-status')].map(cell => cell.textContent.trim());
+      const titles = [...document.querySelectorAll('#queueBody .col-status')].map(cell => cell.title);
+      const result = { values, titles, toast: document.getElementById('copyToast').textContent.trim(), shutdown: document.getElementById('shutdownMessage').textContent.trim() };
+      clearInterval(shutdownCountdownInterval);
+      document.getElementById('shutdownOverlay').style.display = 'none';
+      document.getElementById('copyToast').classList.remove('show');
+      return result;
+    })()\`);
+    const expectedDynamicEnglish = ['Waiting', 'Canceled', 'Failed: Connection lost'].sort().join('|');
+    const explicitDynamicEnglishValid = [...explicitDynamicEnglish.values].sort().join('|') === expectedDynamicEnglish && [...explicitDynamicEnglish.titles].sort().join('|') === expectedDynamicEnglish && explicitDynamicEnglish.toast === 'Link copied' && explicitDynamicEnglish.shutdown === 'Sleep in 30s...';
+    if (!explicitDynamicEnglishValid) console.log('Explicit dynamic English: ' + JSON.stringify(explicitDynamicEnglish));
+    check('English runtime statuses, status tooltips, toast, and shutdown copy are localized', explicitDynamicEnglishValid);
+
+    const englishSettingsSearch = await wc.executeJavaScript(\`(() => {
+      document.querySelector('.tab[data-view="settings"]').click();
+      const search = document.getElementById('settingsSearchInput');
+      const inspect = value => {
+        search.value = value;
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        return [...document.querySelectorAll('.settings-nav-button')].filter(button => !button.hidden).map(button => button.dataset.settingsPage);
+      };
+      const notifications = inspect('notifications');
+      const windowSettings = inspect('window');
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      return { notifications, windowSettings };
+    })()\`);
+    check('English settings search finds localized concepts', englishSettingsSearch.notifications.includes('benachrichtigungen') && englishSettingsSearch.windowSettings.includes('allgemein'));
+
+    const productNaming = await wc.executeJavaScript(\`(() => ({
+      title: document.title,
+      brand: document.querySelector('.app-brand-name')?.textContent.trim(),
+      label: document.querySelector('.app-brand')?.getAttribute('aria-label')
+    }))()\`);
+    check('User-visible product naming is consistent', productNaming.title === 'Multi Hoster Uploader' && productNaming.brand === 'MULTI HOSTER UPLOADER' && productNaming.label === 'Multi Hoster Uploader');
     await wc.executeJavaScript('setUiLanguage("de")');
 
     console.log('\\n=== Global UI ===');
@@ -1478,6 +1528,77 @@ setTimeout(async () => {
 
     const toastHidden = await wc.executeJavaScript('!document.getElementById("copyToast")?.classList.contains("show")');
     check('Copy toast hidden', toastHidden);
+
+    const toastSemantics = await wc.executeJavaScript('document.getElementById("copyToast")?.getAttribute("role") + "|" + document.getElementById("copyToast")?.getAttribute("aria-live")');
+    check('Copy toast exposes polite status semantics', toastSemantics === 'status|polite');
+
+    const emptyActionState = await wc.executeJavaScript(\`(() => {
+      queueJobs = [];
+      sessionFilesData = [];
+      historyRowsData = [];
+      rebuildJobIndex();
+      renderQueueTable();
+      renderRecentUploadsPanel();
+      syncHistoryClearAction();
+      return [
+        document.getElementById('copyAllLinksBtn')?.disabled,
+        document.getElementById('clearRecentFilesBtn')?.disabled,
+        document.getElementById('exportRecentFilesBtn')?.disabled,
+        document.getElementById('exportHistoryBtn')?.disabled,
+        document.getElementById('clearHistoryBtn')?.disabled
+      ].join('|');
+    })()\`);
+    check('Unavailable recent, queue, and history actions are disabled', emptyActionState === 'true|true|true|true|true');
+
+    const keyboardInteractionContract = await wc.executeJavaScript(\`(() => {
+      queueJobs = [{ id: 'ui-keyboard-row', file: 'C:/ui/keyboard.bin', fileName: 'keyboard.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      setUploadSidebarFilter('all');
+      updateUploadView();
+      renderQueueTable();
+      const row = document.querySelector('#queueBody .queue-row');
+      row?.focus();
+      row?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      const sortable = [...document.querySelectorAll('#queueTable th.sortable')];
+      row?.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }));
+      const queueMenuKeyboard = document.getElementById('contextMenu')?.style.display === 'block' && document.activeElement?.closest('#contextMenu') !== null;
+      document.getElementById('contextMenu')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const recentSortable = [...document.querySelectorAll('#recentFilesHead th.sortable')];
+      const historySortable = [...document.querySelectorAll('#historyContainer th.sortable')];
+      const accountAccordions = [...document.querySelectorAll('[data-hoster-toggle], [data-hoster-settings-toggle]')];
+      const priorityHandles = [...document.querySelectorAll('.account-card-drag-handle')];
+      const submenuTrigger = document.querySelector('.menu-submenu-trigger');
+      return {
+        rowFocusable: row?.tabIndex === 0,
+        rowSelected: selectedJobIds.has('ui-keyboard-row'),
+        sortableKeyboard: sortable.every(header => header.tabIndex === 0 && header.hasAttribute('aria-sort')),
+        dropzoneButton: document.getElementById('dropZone')?.getAttribute('role') === 'button' && document.getElementById('dropZone')?.tabIndex === 0,
+        menus: document.getElementById('contextMenu')?.getAttribute('role') === 'menu' && [...document.querySelectorAll('#contextMenu .ctx-item')].every(item => item.getAttribute('role') === 'menuitem' && item.tabIndex === -1),
+        queueMenuKeyboard,
+        secondarySortKeyboard: [...recentSortable, ...historySortable].every(header => header.tabIndex === 0 && header.hasAttribute('aria-sort')),
+        accountKeyboard: accountAccordions.length > 0 && accountAccordions.every(header => header.getAttribute('role') === 'button' && header.tabIndex === 0) && priorityHandles.length > 0 && priorityHandles.every(handle => handle.getAttribute('role') === 'button' && handle.tabIndex === 0),
+        submenuExpanded: submenuTrigger?.hasAttribute('aria-expanded') && submenuTrigger?.getAttribute('aria-haspopup') === 'menu'
+      };
+    })()\`);
+    check('Queue, sorting, dropzone, context menus, and backup submenu expose keyboard interaction', Object.values(keyboardInteractionContract).every(Boolean));
+
+    const dialogContract = await wc.executeJavaScript(\`showAppConfirm({ title: 'Prüfung', message: 'Wirklich fortfahren?', confirmText: 'Fortfahren', danger: true }).then(result => window.__appDialogResult = result); (() => {
+      const modal = document.getElementById('appAlertModal');
+      const dialog = modal?.querySelector('[role="dialog"]');
+      const backgroundInert = document.querySelector('.app-header')?.inert === true && document.querySelector('.view.active')?.inert === true;
+      return [modal?.style.display, dialog?.getAttribute('aria-modal'), document.activeElement?.id, backgroundInert].join('|');
+    })()\`);
+    check('Styled app dialog focuses the safe action and makes background inert', dialogContract === 'flex|true|appAlertCancelBtn|true');
+    await wc.executeJavaScript('document.getElementById("appAlertCancelBtn")?.click()');
+
+    const modalSemantics = await wc.executeJavaScript(\`(() => [
+      document.querySelector('#hosterModal .modal-card')?.getAttribute('role'),
+      document.querySelector('#jobLogModal .modal-card')?.getAttribute('role'),
+      document.querySelector('#deleteAccountModal .modal-card')?.getAttribute('role'),
+      document.querySelector('#shutdownOverlay .shutdown-box')?.getAttribute('role')
+    ].join('|'))()\`);
+    check('Hoster, job log, delete-account, and shutdown surfaces expose dialog semantics', modalSemantics === 'dialog|dialog|dialog|dialog');
 
     const updateHidden = await wc.executeJavaScript('document.getElementById("updateBanner")?.style.display');
     check('Update banner hidden', updateHidden === 'none');
@@ -1514,6 +1635,30 @@ setTimeout(async () => {
       })()\`);
     }
     const compactSettingsHeader = await wc.executeJavaScript('document.querySelector(".tab[data-view=settings]").click(); document.querySelector(".settings-header")?.getBoundingClientRect().height');
+    const minimumResponsiveContract = await wc.executeJavaScript(\`(() => {
+      const fits = element => !element || element.scrollWidth <= element.clientWidth + 1;
+      const settingsSidebar = document.querySelector('.settings-sidebar');
+      const settingsSearch = document.querySelector('.settings-search-control');
+      document.querySelector('[data-settings-page="logs"]')?.click();
+      const logRowsFit = [...document.querySelectorAll('[data-subpage="logs"] .settings-row')].every(fits);
+      document.querySelector('.tab[data-view="accounts"]').click();
+      const autoCheck = document.querySelector('.accounts-auto-check');
+      const autoCheckVisible = Boolean(autoCheck && getComputedStyle(autoCheck).display !== 'none' && autoCheck.getBoundingClientRect().width > 0);
+      const accountsMain = document.querySelector('#accounts-view .view-main');
+      const accountsMainFits = fits(accountsMain);
+      document.querySelector('.tab[data-view="upload"]').click();
+      const telemetry = document.getElementById('uploadTelemetry');
+      const availability = document.getElementById('uploadAvailability');
+      return {
+        settingsSidebarFits: fits(settingsSidebar),
+        settingsSearchFits: fits(settingsSearch),
+        logRowsFit,
+        autoCheckVisible,
+        accountsMainFits,
+        telemetryVisible: Boolean(telemetry && getComputedStyle(telemetry).display !== 'none'),
+        availabilityVisible: Boolean(availability && getComputedStyle(availability).display !== 'none')
+      };
+    })()\`);
     win.setBounds(originalBounds);
     await new Promise(resolve => setTimeout(resolve, 150));
     await wc.executeJavaScript('queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable(); updateStatusBar();');
@@ -1524,6 +1669,10 @@ setTimeout(async () => {
     check('Sidebar indicator stays aligned at the standard window size', queueProgressVisibility.standard.sidebarIndicatorAligned);
     check('Sidebar indicator stays aligned at the minimum window size', queueProgressVisibility.minimum.sidebarIndicatorAligned);
     check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
+    check('Minimum settings sidebar, search, and log rows stay contained', minimumResponsiveContract.settingsSidebarFits && minimumResponsiveContract.settingsSearchFits && minimumResponsiveContract.logRowsFit);
+    if (!(minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits)) console.log('Minimum responsive contract: ' + JSON.stringify(minimumResponsiveContract));
+    check('Minimum Accounts keeps auto-check reachable and content contained', minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits);
+    check('Minimum Uploads preserves availability and telemetry information', minimumResponsiveContract.telemetryVisible && minimumResponsiveContract.availabilityVisible);
 
     const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "\\\\n\\\\n\\\\n## New in this version\\\\n\\\\n\\\\n### Menus and navigation\\\\n\\\\n- Added live language switching.\\\\n- Improved settings layout.\\\\n\\\\n\\\\n" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
     check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');

@@ -3,11 +3,41 @@ const uiLocalizer = window.I18n.createDomLocalizer(document);
 uiLocalizer.start('en');
 
 function setUiLanguage(value) {
-  return uiLocalizer.setLanguage(window.I18n.normalizeLanguage(value));
+  const language = uiLocalizer.setLanguage(window.I18n.normalizeLanguage(value));
+  if (document.body && typeof queueJobs !== 'undefined') refreshLocalizedRuntimeUi();
+  return language;
 }
 
 function getUiLocale() {
   return uiLocalizer.getLanguage() === 'de' ? 'de-DE' : 'en-US';
+}
+
+function localizeUiText(value) {
+  return window.I18n.translateText(value, uiLocalizer.getLanguage());
+}
+
+function formatRemoteClientStatus(port, count) {
+  const clients = count === 1 ? '1 Client' : `${count} Clients`;
+  return localizeUiText(`Aktiv auf Port ${port} — ${clients} verbunden`);
+}
+
+function refreshLocalizedRuntimeUi() {
+  renderQueueTable();
+  renderAccounts();
+  renderRecentUploadsPanel();
+  historyRowsData.forEach(row => {
+    if (row.rawTimestamp !== undefined) {
+      const formatted = formatDateTime(row.rawTimestamp);
+      row.date = formatted.text;
+      row.dateTs = formatted.ts;
+    }
+  });
+  const historyContainer = document.getElementById('historyContainer');
+  if (historyContainer && historyRowsData.length) renderHistoryTable(historyContainer);
+  updateStatusBar();
+  const activeRecentTab = document.querySelector('.recent-tab.active');
+  const hint = document.getElementById('recentFilesHint');
+  if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -492,7 +522,7 @@ async function init() {
     if (el && el.style.color === 'rgb(16, 185, 129)') {
       window.api.remoteStatus().then(status => {
         if (status.running) {
-          el.textContent = `Aktiv auf Port ${status.port} — ${status.clientCount} Client(s) verbunden`;
+          el.textContent = formatRemoteClientStatus(status.port, status.clientCount);
         }
       }).catch(() => {});
     }
@@ -627,6 +657,7 @@ function initMenuBar() {
     for (const k in dropdowns) closePanel(dropdowns[k]);
     for (const k in triggers) triggers[k].classList.remove('open');
     menuBar.querySelectorAll('.menu-submenu-dropdown').forEach(closePanel);
+    menuBar.querySelectorAll('.menu-submenu-trigger').forEach(trigger => trigger.setAttribute('aria-expanded', 'false'));
   }
 
   function openMenuNamed(name) {
@@ -649,8 +680,34 @@ function initMenuBar() {
 
   menuBar.querySelectorAll('.menu-submenu').forEach(sm => {
     const sub = sm.querySelector('.menu-submenu-dropdown');
-    sm.addEventListener('mouseenter', () => openPanel(sub));
-    sm.addEventListener('mouseleave', () => closePanel(sub));
+    const trigger = sm.querySelector('.menu-submenu-trigger');
+    const openSubmenu = (focusFirst = false) => {
+      openPanel(sub);
+      trigger?.setAttribute('aria-expanded', 'true');
+      if (focusFirst) requestAnimationFrame(() => sub.querySelector('[data-menu-action]')?.focus());
+    };
+    const closeSubmenu = () => {
+      closePanel(sub);
+      trigger?.setAttribute('aria-expanded', 'false');
+    };
+    sm.addEventListener('mouseenter', () => openSubmenu());
+    sm.addEventListener('mouseleave', closeSubmenu);
+    trigger?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (trigger.getAttribute('aria-expanded') === 'true') closeSubmenu();
+      else openSubmenu();
+    });
+    trigger?.addEventListener('keydown', (event) => {
+      if (!['Enter', ' ', 'ArrowRight', 'ArrowDown'].includes(event.key)) return;
+      event.preventDefault();
+      openSubmenu(true);
+    });
+    sub.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' && event.key !== 'ArrowLeft') return;
+      event.preventDefault();
+      closeSubmenu();
+      trigger?.focus();
+    });
   });
 
   menuBar.querySelectorAll('[data-menu-action]').forEach(item => {
@@ -676,7 +733,7 @@ async function _handleMenuAction(action) {
     case 'backup-import': doBackupImport(); break;
     case 'online-backup-create': doOnlineBackupCreate(); break;
     case 'online-backup-restore': openOnlineBackupRestore(); break;
-    case 'restart': if (confirm('Anwendung neu starten?')) window.api.restartApp(); break;
+    case 'restart': if (await showAppConfirm({ title: 'Anwendung neu starten?', message: 'Nicht gespeicherte laufende Aktionen werden beendet.', confirmText: 'Neustart', danger: true })) window.api.restartApp(); break;
     case 'quit': window.api.quitApp(); break;
     case 'open-settings': document.querySelector('.tab[data-view="settings"]')?.click(); break;
     case 'open-log-folder': window.api.openLogFolder(); break;
@@ -1234,6 +1291,11 @@ function setupDragDrop() {
     addDroppedFiles(e.dataTransfer.files).catch(console.error);
   });
   dropZone.addEventListener('click', () => pickFiles());
+  dropZone.addEventListener('keydown', (event) => {
+    if (!['Enter', ' '].includes(event.key)) return;
+    event.preventDefault();
+    pickFiles();
+  });
 
   // Also handle drops on queue container
   uploadView.addEventListener('dragover', (e) => { e.preventDefault(); });
@@ -1425,6 +1487,21 @@ function updateQueueActionButtons() {
   if (moveUpBtn) moveUpBtn.disabled = !hasMovableSelection;
   if (moveDownBtn) moveDownBtn.disabled = !hasMovableSelection;
   if (moveBottomBtn) moveBottomBtn.disabled = !hasMovableSelection;
+  syncDataActionState();
+}
+
+function syncDataActionState() {
+  const completedLinks = queueJobs.some(job => job.status === 'done' && (job.result?.download_url || job.result?.embed_url));
+  const hasRecent = sessionFilesData.length > 0;
+  const hasHistory = historyRowsData.length > 0;
+  const copyAll = document.getElementById('copyAllLinksBtn');
+  const clearRecent = document.getElementById('clearRecentFilesBtn');
+  const exportRecent = document.getElementById('exportRecentFilesBtn');
+  const exportHistoryButton = document.getElementById('exportHistoryBtn');
+  if (copyAll) copyAll.disabled = !completedLinks;
+  if (clearRecent) clearRecent.disabled = !hasRecent;
+  if (exportRecent) exportRecent.disabled = !hasRecent;
+  if (exportHistoryButton) exportHistoryButton.disabled = !hasHistory;
 }
 
 function clearDedupKeysForPaths(pathSet) {
@@ -1647,11 +1724,11 @@ function buildRowHtml(job) {
   const pct = Math.min(100, Math.round((job.progress || 0) * 100));
   const link = job.result ? (job.result.download_url || job.result.embed_url || '') : '';
 
-  return `<tr class="${rowClass}" data-job-id="${job.id}" data-link="${escapeAttr(link)}" style="height:${VIRTUAL_ROW_HEIGHT}px">
+  return `<tr class="${rowClass}" data-job-id="${job.id}" data-link="${escapeAttr(link)}" tabindex="0" aria-selected="${selectedJobIds.has(job.id)}" style="height:${VIRTUAL_ROW_HEIGHT}px">
     <td class="col-filename" title="${escapeAttr(job.fileName)}">${escapeHtml(job.fileName)}</td>
     <td class="col-size">${uploadedSize}</td>
     <td class="col-host">${escapeHtml(job.hoster)}</td>
-    <td class="col-status"><span class="status-badge ${statusClass}">${escapeHtml(statusText)}</span></td>
+    <td class="col-status" title="${escapeAttr(statusText)}"><span class="status-badge ${statusClass}"><span class="status-badge-label">${escapeHtml(statusText)}</span></span></td>
     <td class="col-elapsed">${elapsed}</td>
     <td class="col-remaining">${remaining}</td>
     <td class="col-speed">${speed}</td>
@@ -1684,6 +1761,7 @@ function _updateRowInPlace(tr, job) {
   const newClass = `queue-row ${statusClass}${selectedJobIds.has(job.id) ? ' selected' : ''}`;
   if (tr.className !== newClass) tr.className = newClass;
   if (tr.dataset.link !== link) tr.dataset.link = link;
+  tr.setAttribute('aria-selected', String(selectedJobIds.has(job.id)));
 
   const cells = tr.children;
   if (cells.length < 8) return false; // structure mismatch, needs full rebuild
@@ -1694,8 +1772,10 @@ function _updateRowInPlace(tr, job) {
   if (badge) {
     const badgeClass = `status-badge ${statusClass}`;
     if (badge.className !== badgeClass) badge.className = badgeClass;
-    if (badge.textContent !== statusText) badge.textContent = statusText;
+    const label = badge.querySelector('.status-badge-label') || badge;
+    if (label.textContent !== statusText) label.textContent = statusText;
   }
+  if (cells[3].title !== statusText) cells[3].title = statusText;
   if (cells[4].textContent !== elapsed) cells[4].textContent = elapsed;
   if (cells[5].textContent !== remaining) cells[5].textContent = remaining;
   if (cells[6].textContent !== speed) cells[6].textContent = speed;
@@ -1769,6 +1849,10 @@ function renderQueueTable() {
   _sortedJobsCache = sortQueueJobs(visibleJobs);
   if (selectionChanged) updateQueueActionButtons();
   const totalRows = _sortedJobsCache.length;
+  const queueContainer = document.getElementById('queueContainer');
+  const filteredEmpty = totalRows === 0 && queueJobs.length > 0 && uploadSidebarFilter !== 'all';
+  queueContainer?.classList.toggle('filter-empty', filteredEmpty);
+  if (queueContainer) queueContainer.dataset.emptyLabel = filteredEmpty ? localizeUiText('Keine Uploads entsprechen diesem Filter.') : '';
 
   if (totalRows < 200) {
     // Try in-place update if row count matches (fast path)
@@ -1807,12 +1891,34 @@ function renderQueueTable() {
       const row = e.target.closest('.queue-row');
       if (row) handleRowContextMenu(e, row);
     });
+    tbody.addEventListener('keydown', (e) => {
+      const row = e.target.closest('.queue-row');
+      if (!row) return;
+      if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') {
+        e.preventDefault();
+        const rect = row.getBoundingClientRect();
+        handleRowContextMenu({ preventDefault() {}, clientX: rect.left + 24, clientY: rect.top + 20 }, row);
+        return;
+      }
+      if (['Enter', ' '].includes(e.key)) {
+        e.preventDefault();
+        handleRowClick(e, row);
+      }
+    });
   }
 
   // Update retry button visibility
   const hasFailedJobs = queueJobs.some(j => j.status === 'error');
   document.getElementById('retryFailedBtn').style.display = hasFailedJobs ? 'inline-block' : 'none';
+  syncQueueSortHeaders();
   updateQueueActionButtons();
+}
+
+function syncQueueSortHeaders() {
+  document.querySelectorAll('#queueTable th.sortable').forEach(header => {
+    const active = header.dataset.sort === queueSortState.key;
+    header.setAttribute('aria-sort', active ? (queueSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+  });
 }
 
 function _renderVirtualRows(tbody) {
@@ -1945,28 +2051,31 @@ function getAccountLabel(job) {
   if (!Array.isArray(accounts)) return '';
   const idx = accounts.findIndex(a => a && a.id === job.accountId);
   if (idx < 0) return '';
-  return idx === 0 ? 'Primär' : `Fallback #${idx}`;
+  return idx === 0 ? localizeUiText('Primär') : `Fallback #${idx}`;
 }
 
 function getStatusText(job) {
   const shortErr = job.error ? String(job.error).replace(/\s+/g, ' ').slice(0, 100) : '';
   const acc = getAccountLabel(job);
   const accSuffix = acc ? ` · ${acc}` : '';
+  let text;
   switch (job.status) {
-    case 'preview': return 'Bereit';
-    case 'queued': return 'Wartet';
-    case 'getting-server': return `Server...${accSuffix}`;
-    case 'uploading': return `Upload${accSuffix}`;
+    case 'preview': text = 'Bereit'; break;
+    case 'queued': text = 'Wartet'; break;
+    case 'getting-server': text = `Server…${accSuffix}`; break;
+    case 'uploading': text = `Upload${accSuffix}`; break;
     case 'retrying': {
       const base = `Retry ${job.attempt}/${job.maxAttempts}${accSuffix}`;
-      return shortErr ? `${base}: ${shortErr}` : base;
+      text = shortErr ? `${base}: ${shortErr}` : base;
+      break;
     }
-    case 'done': return 'Fertig';
-    case 'aborted': return 'Abgebrochen';
-    case 'error': return shortErr ? `Fehlgeschlagen: ${shortErr}` : 'Fehlgeschlagen';
-    case 'skipped': return shortErr ? `Übersprungen: ${shortErr}` : 'Übersprungen';
-    default: return job.status;
+    case 'done': text = 'Fertig'; break;
+    case 'aborted': text = shortErr || 'Abgebrochen'; break;
+    case 'error': text = shortErr ? (/^Fehlgeschlagen(?::|$)/.test(shortErr) ? shortErr : `Fehlgeschlagen: ${shortErr}`) : 'Fehlgeschlagen'; break;
+    case 'skipped': text = shortErr ? `Übersprungen: ${shortErr}` : 'Übersprungen'; break;
+    default: text = job.status;
   }
+  return localizeUiText(text);
 }
 
 // --- Queue interactions ---
@@ -2013,6 +2122,7 @@ let alwaysOnTopState = false;
 // to queueJobs (the length-based signature is good enough — a job's hoster
 // never changes after it's created).
 let _hosterCountsCache = { sig: '', result: new Map() };
+let contextMenuReturnFocus = null;
 function _getHosterCounts() {
   const sig = `${queueJobs.length}`;
   if (_hosterCountsCache.sig === sig) return _hosterCountsCache.result;
@@ -2066,6 +2176,8 @@ function showContextMenu(x, y) {
       const item = document.createElement('div');
       item.className = 'ctx-item ctx-item-danger';
       item.dataset.action = `delete-hoster:${hoster}`;
+      item.setAttribute('role', 'menuitem');
+      item.tabIndex = -1;
       item.textContent = `${getHosterLabel(hoster)} (${count})`;
       deleteHosterContainer.appendChild(item);
     });
@@ -2077,6 +2189,8 @@ function showContextMenu(x, y) {
   const menuX = Math.min(x, window.innerWidth - menu.offsetWidth - 5);
   menu.style.left = menuX + 'px';
   menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 5) + 'px';
+  contextMenuReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  getVisibleContextMenuItems(menu)[0]?.focus();
 
   // Flip submenus if they would overflow the viewport right edge
   menu.querySelectorAll('.ctx-submenu-items').forEach(sub => {
@@ -2089,13 +2203,37 @@ function showContextMenu(x, y) {
   });
 }
 
+function getVisibleContextMenuItems(menu) {
+  return [...menu.querySelectorAll('.ctx-item[data-action]')].filter(item => window.getComputedStyle(item).display !== 'none');
+}
+
+function showRecentContextMenu(row, x, y) {
+  const id = parseInt(row.dataset.order, 10);
+  if (!selectedRecentIds.has(id)) {
+    selectedRecentIds.clear();
+    selectedRecentIds.add(id);
+    applyRecentSelectionClasses();
+  }
+  const menu = document.getElementById('recentContextMenu');
+  menu.style.display = 'block';
+  menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 5) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 5) + 'px';
+  contextMenuReturnFocus = row;
+  getVisibleContextMenuItems(menu)[0]?.focus();
+}
+
 function hideContextMenu() {
   document.getElementById('contextMenu').style.display = 'none';
   document.getElementById('recentContextMenu').style.display = 'none';
+  const returnFocus = contextMenuReturnFocus;
+  contextMenuReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
 }
 
-function deleteSelectedRecentFiles() {
+async function deleteSelectedRecentFiles() {
   if (selectedRecentIds.size === 0) return;
+  const count = selectedRecentIds.size;
+  if (!await showAppConfirm({ title: 'Ausgewählte Einträge entfernen?', message: count === 1 ? 'Ein ausgewählter Eintrag wird aus diesem Panel entfernt.' : `${count} ausgewählte Einträge werden aus diesem Panel entfernt.`, confirmText: 'Entfernen', danger: true })) return;
   let removedDone = 0, removedErr = 0;
   sessionFilesData = sessionFilesData.filter(r => {
     if (!selectedRecentIds.has(r.order)) return true;
@@ -2110,9 +2248,9 @@ function deleteSelectedRecentFiles() {
   renderRecentUploadsPanel();
 }
 
-function clearAllRecentFiles() {
+async function clearAllRecentFiles() {
   if (sessionFilesData.length === 0) return;
-  if (!confirm(`Wirklich alle ${sessionFilesData.length} Links aus diesem Panel entfernen?`)) return;
+  if (!await showAppConfirm({ title: 'Alle Links entfernen?', message: `Wirklich alle ${sessionFilesData.length} Links aus diesem Panel entfernen?`, confirmText: 'Alle entfernen', danger: true })) return;
   sessionFilesData = [];
   _sessionFileKeys.clear();
   _sessionDoneCount = 0;
@@ -2124,7 +2262,7 @@ function clearAllRecentFiles() {
 
 async function exportAllRecentFiles() {
   if (sessionFilesData.length === 0) {
-    alert('Keine Einträge zum Exportieren.');
+    await showAppAlert('Keine Einträge zum Exportieren.');
     return;
   }
   const rows = sortRecentFiles(sessionFilesData);
@@ -2145,7 +2283,7 @@ async function exportAllRecentFiles() {
     ]);
     if (result && result.ok) showCopyToast(`${rows.length} Einträge exportiert`);
   } catch (err) {
-    alert('Export fehlgeschlagen: ' + (err.message || err));
+    await showAppAlert('Export fehlgeschlagen: ' + (err.message || err), 'Export fehlgeschlagen');
   }
 }
 
@@ -2164,7 +2302,7 @@ async function doBackupExport() {
     const result = await window.api.exportBackup();
     if (result && result.ok) showCopyToast('Backup exportiert');
   } catch (err) {
-    alert('Export fehlgeschlagen: ' + (err.message || err));
+    await showAppAlert('Export fehlgeschlagen: ' + (err.message || err), 'Export fehlgeschlagen');
   }
 }
 
@@ -2392,14 +2530,14 @@ async function doBackupImport(legacyPassword) {
     }
     if (result.ok) {
       if (Array.isArray(result.warnings) && result.warnings.length) {
-        alert(`Backup importiert. Bitte prüfen: ${result.warnings.join(', ')}.`);
+        await showAppAlert(`Backup importiert. Bitte prüfen: ${result.warnings.join(', ')}.`, 'Backup importiert');
       }
       if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
     } else if (result.error) {
-      alert('Import fehlgeschlagen: ' + result.error);
+      await showAppAlert('Import fehlgeschlagen: ' + result.error, 'Import fehlgeschlagen');
     }
   } catch (err) {
-    alert('Import fehlgeschlagen: ' + (err.message || err));
+    await showAppAlert('Import fehlgeschlagen: ' + (err.message || err), 'Import fehlgeschlagen');
   }
 }
 
@@ -2449,29 +2587,7 @@ document.addEventListener('keydown', (e) => {
       if (selectedRecentIds.size > 0) {
         deleteSelectedRecentFiles();
       } else if (selectedJobIds.size > 0) {
-        const deletedIds = [...selectedJobIds];
-        // Cancel active uploads for deleted jobs
-        const activeIds = deletedIds.filter(id => {
-          const j = _jobIndexById.get(id);
-          return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
-        });
-        if (activeIds.length > 0) window.api.cancelSelectedJobs(activeIds);
-        const _deletedKeys = [];
-        queueJobs = queueJobs.filter(j => {
-          if (selectedJobIds.has(j.id)) {
-            if (j.file && j.hoster && j.status !== 'done') _deletedKeys.push(`${j.file}|${j.hoster}`);
-            removeJobFromIndex(j);
-            return false;
-          }
-          return true;
-        });
-        selectedJobIds.clear();
-        syncSelectedFilesFromQueue();
-        suppressPreviewKeysStillSelected(_deletedKeys);
-        renderQueueTable();
-        if (queueJobs.length === 0) { selectedFiles = []; updateUploadView(); }
-        updateStatusBar();
-        persistQueueStateSoon(true);
+        handleContextAction('delete-selected');
       }
     }
   }
@@ -2498,7 +2614,8 @@ async function handleContextAction(action) {
   } else if (action === 'show-log') {
     showJobLogModal();
   } else if (action === 'delete-selected') {
-    // Cancel active uploads for deleted jobs
+    const count = selectedJobIds.size;
+    if (!count || !await showAppConfirm({ title: 'Uploads entfernen?', message: count === 1 ? 'Ein ausgewählter Upload wird aus der Liste entfernt.' : `${count} ausgewählte Uploads werden aus der Liste entfernt.`, confirmText: 'Entfernen', danger: true })) return;
     const activeIds = [...selectedJobIds].filter(id => {
       const j = _jobIndexById.get(id);
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
@@ -2523,7 +2640,7 @@ async function handleContextAction(action) {
   } else if (action === 'copy-all-links') {
     copyAllLinks();
   } else if (action === 'delete-all') {
-    // Cancel all active uploads
+    if (!queueJobs.length || !await showAppConfirm({ title: 'Alle Uploads entfernen?', message: `${queueJobs.length} ${queueJobs.length === 1 ? 'Upload wird' : 'Uploads werden'} aus der Liste entfernt.`, confirmText: 'Alle entfernen', danger: true })) return;
     const activeIds = queueJobs
       .filter(j => j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server')
       .map(j => j.id);
@@ -2543,7 +2660,8 @@ async function handleContextAction(action) {
     config.globalSettings = { ...(config.globalSettings || {}), alwaysOnTop: alwaysOnTopState };
   } else if (action.startsWith('delete-hoster:')) {
     const hoster = action.replace('delete-hoster:', '');
-    // Cancel active uploads for this hoster
+    const hosterCount = queueJobs.filter(job => job.hoster === hoster).length;
+    if (!hosterCount || !await showAppConfirm({ title: 'Hoster entfernen?', message: `${hosterCount} ${hosterCount === 1 ? 'Upload wird' : 'Uploads werden'} für ${getHosterLabel(hoster)} entfernt.`, confirmText: 'Hoster entfernen', danger: true })) return;
     const activeIds = queueJobs
       .filter(j => j.hoster === hoster && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server' || j.status === 'preview'))
       .map(j => j.id);
@@ -2584,7 +2702,7 @@ async function startUpload(opts) {
   const hosters = getSelectedHosters();
   if (queueJobs.length === 0 && selectedFiles.length > 0) {
     if (hosters.length === 0) {
-      alert('Bitte mindestens einen Hoster auswählen.');
+      await showAppAlert('Bitte mindestens einen Hoster auswählen.');
       uploading = false;
       updateQueueActionButtons();
       return;
@@ -2626,7 +2744,7 @@ async function startUpload(opts) {
     persistQueueStateSoon();
 
     if (result && result.error) {
-      alert(result.error);
+      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
       uploading = false;
       updateQueueActionButtons();
       updateStatusBar();
@@ -2635,7 +2753,7 @@ async function startUpload(opts) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    alert(`Upload-Start fehlgeschlagen: ${err.message}`);
+    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -2741,7 +2859,7 @@ async function startSelectedUpload(explicitJobs) {
     persistQueueStateSoon();
 
     if (result && result.error) {
-      alert(result.error);
+      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
       uploading = false;
       updateQueueActionButtons();
       updateStatusBar();
@@ -2750,7 +2868,7 @@ async function startSelectedUpload(explicitJobs) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    alert(`Upload-Start fehlgeschlagen: ${err.message}`);
+    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -3076,7 +3194,7 @@ function _retryFailedFromBuckets(buckets, transientOnly) {
   }
   if (jobsToRetry.length === 0) { showCopyToast('Keine passenden Jobs für Retry gefunden.'); return; }
   renderQueueTable();
-  showCopyToast(`${jobsToRetry.length} Job(s) zum erneuten Upload zurückgesetzt`);
+  showCopyToast(jobsToRetry.length === 1 ? '1 Job zum erneuten Upload zurückgesetzt' : `${jobsToRetry.length} Jobs zum erneuten Upload zurückgesetzt`);
   if (typeof startUpload === 'function') startUpload();
 }
 
@@ -3263,6 +3381,8 @@ async function finishUploadsInProgress() {
 }
 
 async function abortAllUploads() {
+  if (!uploading) return;
+  if (!await showAppConfirm({ title: 'Alle Uploads abbrechen?', message: 'Alle laufenden Uploads werden abgebrochen und in die Warteschlange zurückgesetzt.', confirmText: 'Alle abbrechen', danger: true })) return;
   await cancelUpload();
 }
 
@@ -3553,16 +3673,30 @@ function _getAccountSidebarCategory(name, account) {
 
 function _applyAccountSidebarFilter() {
   const entries = new Map(getAllAccountsFlat().map(entry => [entry.account.id, entry]));
+  const list = document.getElementById('accountsList');
+  let visibleAccounts = 0;
   document.querySelectorAll('#accountsList .account-hoster-group').forEach(group => {
     let matches = 0;
     group.querySelectorAll('.account-card').forEach(card => {
       const entry = entries.get(card.dataset.accountId);
       const visible = !!entry && (accountSidebarFilter === 'all' || _getAccountSidebarCategory(entry.name, entry.account) === accountSidebarFilter);
       card.hidden = !visible;
-      if (visible) matches++;
+      if (visible) { matches++; visibleAccounts++; }
     });
     group.hidden = matches === 0;
   });
+  let empty = list?.querySelector('.account-filter-empty');
+  if (visibleAccounts === 0 && entries.size > 0) {
+    if (!empty) {
+      empty = document.createElement('div');
+      empty.className = 'empty-state account-filter-empty';
+      list.appendChild(empty);
+    }
+    empty.textContent = localizeUiText('Keine Accounts entsprechen diesem Filter.');
+    empty.hidden = false;
+  } else if (empty) {
+    empty.hidden = true;
+  }
 }
 
 function setAccountSidebarFilter(value) {
@@ -3759,30 +3893,75 @@ function renderHealthCheckResults(_results) {
 }
 
 let _appAlertResolve = null;
+let _appAlertReturnFocus = null;
+let _appAlertInertState = [];
 
-function closeAppAlert() {
+function _setAppAlertBackgroundInert(active) {
+  const modal = document.getElementById('appAlertModal');
+  if (!modal) return;
+  if (active) {
+    if (_appAlertInertState.length > 0) return;
+    _appAlertInertState = Array.from(document.body.children)
+      .filter(element => element !== modal && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    _appAlertInertState.forEach(({ element }) => { element.inert = true; });
+    return;
+  }
+  _appAlertInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  _appAlertInertState = [];
+}
+
+function closeAppAlert(result = false) {
   const modal = document.getElementById('appAlertModal');
   if (!modal) return;
   modal.style.display = 'none';
   modal.setAttribute('aria-hidden', 'true');
+  _setAppAlertBackgroundInert(false);
   const resolve = _appAlertResolve;
   _appAlertResolve = null;
-  if (resolve) resolve();
+  const returnFocus = _appAlertReturnFocus;
+  _appAlertReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+  if (resolve) resolve(result);
 }
 
-function showAppAlert(message, title = 'Hinweis') {
+function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelText = 'Abbrechen', alternateText = '', showCancel = false, danger = false } = {}) {
   const modal = document.getElementById('appAlertModal');
   const titleEl = document.getElementById('appAlertTitle');
   const messageEl = document.getElementById('appAlertMessage');
   const confirm = document.getElementById('appAlertConfirmBtn');
-  if (!modal || !titleEl || !messageEl || !confirm) return Promise.resolve();
-  if (_appAlertResolve) closeAppAlert();
-  titleEl.textContent = title;
-  messageEl.textContent = String(message || '');
+  const cancel = document.getElementById('appAlertCancelBtn');
+  const alternate = document.getElementById('appAlertAlternateBtn');
+  if (!modal || !titleEl || !messageEl || !confirm || !cancel || !alternate) return Promise.resolve(false);
+  if (_appAlertResolve) closeAppAlert(false);
+  _appAlertReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  titleEl.textContent = localizeUiText(title);
+  messageEl.textContent = localizeUiText(String(message || ''));
+  confirm.textContent = localizeUiText(confirmText);
+  confirm.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+  cancel.textContent = localizeUiText(cancelText);
+  cancel.hidden = !showCancel;
+  alternate.textContent = localizeUiText(alternateText);
+  alternate.hidden = !alternateText;
   modal.style.display = 'flex';
   modal.setAttribute('aria-hidden', 'false');
-  confirm.focus();
+  _setAppAlertBackgroundInert(true);
+  (showCancel ? cancel : confirm).focus();
   return new Promise(resolve => { _appAlertResolve = resolve; });
+}
+
+function showAppAlert(message, title = 'Hinweis') {
+  return showAppDialog({ message, title });
+}
+
+function showAppConfirm({ message, title = 'Bestätigen', confirmText = 'Bestätigen', cancelText = 'Abbrechen', danger = false } = {}) {
+  return showAppDialog({ message, title, confirmText, cancelText, showCancel: true, danger });
+}
+
+function showAppChoice({ message, title, confirmText, alternateText, cancelText = 'Abbrechen' } = {}) {
+  return showAppDialog({ message, title, confirmText, alternateText, cancelText, showCancel: true });
 }
 
 async function executeHealthCheck(hosters, _mode) {
@@ -3881,14 +4060,14 @@ function renderSettings() {
   const remoteSettings = globalSettings.remote || {};
 
   const pageDefinitions = [
-    { id: 'allgemein', label: 'Allgemein', search: 'fenster vordergrund drop target oberfläche updates aktualisierung version' },
-    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange fertig abschluss entfernen parallel geschwindigkeit speed limit fortsetzen wiederherstellen hoster' },
-    { id: 'automatik', label: 'Automatik', search: 'automatisch retry wiederholen ordner überwachen dateierweiterungen unterordner duplikate' },
-    { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'webhook discord meldung ping erwähnung batch fertig' },
-    { id: 'logs', label: 'Logs & Support', search: 'log protokoll debug verbose diagnose support paket datei ordner' },
-    { id: 'remote', label: 'Fernsteuerung', search: 'remote fernsteuerung server input port api token verbindung' },
-    { id: 'diagnose', label: 'Diagnose-Zugriff', search: 'diagnose zugriff lesen allowlist netzwerk lokal verbindung code support' },
-    { id: 'backup', label: 'Backup & Übertragen', search: 'backup sichern export import online schlüssel einstellungen accounts übertragen' }
+    { id: 'allgemein', label: 'Allgemein', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
+    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
+    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
+    { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
+    { id: 'logs', label: 'Logs & Support', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
+    { id: 'remote', label: 'Fernsteuerung', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
+    { id: 'diagnose', label: 'Diagnose-Zugriff', search: 'diagnose diagnostics access zugriff lesen read allowlist netzwerk network lokal local verbindung connection code support' },
+    { id: 'backup', label: 'Backup & Übertragen', search: 'backup transfer sichern export import online schlüssel key einstellungen settings accounts übertragen' }
   ];
   const pageHeader = (title, description) => `
     <header class="settings-page-header">
@@ -4169,23 +4348,23 @@ function renderSettings() {
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
           <label>Aktiviert</label>
-          <input type="checkbox" id="diagEnabledInput">
+          <input type="checkbox" class="settings-autosave" id="diagEnabledInput">
         </div>
       </div>
       <div class="settings-row">
         <label>Port</label>
-        <input type="number" class="hs-input" id="diagPortInput" min="1024" max="65535" value="9110" style="width:100px">
+        <input type="number" class="hs-input settings-autosave" id="diagPortInput" min="1024" max="65535" value="9110" style="width:100px">
       </div>
       <div class="settings-row">
         <label>Sichtbarkeit</label>
-        <select class="hs-input" id="diagBindModeInput" style="width:auto">
+        <select class="hs-input settings-autosave" id="diagBindModeInput" style="width:auto">
           <option value="local">Nur lokal (127.0.0.1) — Tunnel/VPN</option>
           <option value="network">Im Netzwerk (0.0.0.0) — Allowlist nötig</option>
         </select>
       </div>
       <div class="settings-row">
         <label>Adresse für den Code</label>
-        <input type="text" class="hs-input" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1">
+        <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1">
       </div>
       <div class="settings-row" id="diagSuggestRow" style="display:none">
         <label></label>
@@ -4193,7 +4372,7 @@ function renderSettings() {
       </div>
       <div class="settings-row" id="diagAllowlistRow" style="display:none;align-items:flex-start">
         <label>Allowlist (IP/CIDR, eine pro Zeile)</label>
-        <textarea class="hs-input" id="diagAllowlistInput" rows="3" style="flex:1;font-family:monospace" placeholder="100.64.0.0/10&#10;203.0.113.5"></textarea>
+        <textarea class="hs-input settings-autosave" id="diagAllowlistInput" rows="3" style="flex:1;font-family:monospace" placeholder="100.64.0.0/10&#10;203.0.113.5"></textarea>
       </div>
       <div class="settings-row"><span class="hint" id="diagBindHint"></span></div>
       <div class="settings-row">
@@ -4388,6 +4567,8 @@ function renderSettings() {
   });
 
   document.getElementById('remoteRegenerateTokenBtn').addEventListener('click', async () => {
+    const confirmed = await showAppConfirm({ title: 'API-Token neu erzeugen?', message: 'Der bisherige Token wird sofort ungültig. Verbundene Clients müssen den neuen Token verwenden.', confirmText: 'Neu erzeugen', danger: true });
+    if (!confirmed) return;
     const newToken = await window.api.remoteGenerateToken();
     document.getElementById('remoteTokenInput').value = newToken;
     scheduleSettingsSave();
@@ -4397,7 +4578,7 @@ function renderSettings() {
     const el = document.getElementById('remoteConnectionStatus');
     if (!el) return;
     if (status.running) {
-      el.textContent = `Aktiv auf Port ${status.port} — ${status.clientCount} Client(s) verbunden`;
+      el.textContent = `Aktiv auf Port ${status.port} — ${status.clientCount} ${status.clientCount === 1 ? 'Client' : 'Clients'} verbunden`;
       el.style.color = '#10b981';
     } else {
       el.textContent = 'Nicht aktiv';
@@ -4439,7 +4620,7 @@ function renderSettings() {
           const b = document.createElement('button');
           b.className = 'btn btn-xs btn-secondary';
           b.textContent = h;
-          b.addEventListener('click', () => { publicHostEl.value = h; save(); });
+          b.addEventListener('click', () => { publicHostEl.value = h; markSettingsDirty(); });
           suggestChips.appendChild(b);
         }
       } else {
@@ -4470,7 +4651,7 @@ function renderSettings() {
         if (st.running) {
           const last = st.lastAccess ? new Date(st.lastAccess).toLocaleString(getUiLocale()) : '—';
           const scope = st.bindMode === 'network' ? `Netzwerk (Allowlist: ${st.allowlistCount})` : 'nur lokal';
-          el.textContent = `Aktiv auf ${st.bindAddress}:${st.port} (${scope}) — ${st.clientCount} Client(s) — Letzter Zugriff: ${last}`;
+          el.textContent = `Aktiv auf ${st.bindAddress}:${st.port} (${scope}) — ${st.clientCount} ${st.clientCount === 1 ? 'Client' : 'Clients'} — Letzter Zugriff: ${last}`;
           el.style.color = '#10b981';
         } else {
           el.textContent = 'Nicht aktiv';
@@ -4478,32 +4659,23 @@ function renderSettings() {
         }
       }).catch(() => {});
     };
-    const save = async () => {
+    const validate = () => {
       const allowlist = parseAllowlist();
       if (enabledEl.checked && modeEl.value === 'network' && allowlist.length === 0) {
         if (bindHintEl) { bindHintEl.innerHTML = '<span style="color:#f59e0b">Netzwerkmodus braucht mindestens eine IP/CIDR in der Allowlist — sonst bleibt es fail-closed auf Loopback.</span>'; }
-        return;
+        return false;
       }
-      const diagnosticsSettings = {
-        enabled: enabledEl.checked,
-        port: parseInt(portEl.value, 10) || 9110,
-        bindMode: modeEl.value,
-        publicHost: publicHostEl.value.trim(),
-        allowlist
-      };
-      await saveDiagnosticsSettingsTracked(diagnosticsSettings);
-      applySettings(await window.api.diagnosticsGetSettings());
-      refreshStatus();
+      return true;
     };
 
     window.api.diagnosticsGetSettings().then(applySettings).catch(() => {});
     refreshStatus();
 
-    enabledEl.addEventListener('change', save);
-    portEl.addEventListener('change', save);
-    modeEl.addEventListener('change', () => { renderModeUi(lastSuggested); save(); });
-    publicHostEl.addEventListener('change', save);
-    allowlistEl.addEventListener('change', save);
+    enabledEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    portEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    modeEl.addEventListener('change', () => { renderModeUi(lastSuggested); if (validate()) markSettingsDirty(); });
+    publicHostEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    allowlistEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
     document.getElementById('diagCopyCodeBtn').addEventListener('click', async () => {
       if (!codeEl.value) return;
       await window.api.copyToClipboard(codeEl.value);
@@ -4512,6 +4684,8 @@ function renderSettings() {
       setTimeout(() => { b.textContent = 'Kopieren'; }, 1500);
     });
     document.getElementById('diagRegenerateBtn').addEventListener('click', async () => {
+      const confirmed = await showAppConfirm({ title: 'Verbindungs-Code neu erzeugen?', message: 'Der bisherige Diagnose-Code wird sofort ungültig.', confirmText: 'Neu erzeugen', danger: true });
+      if (!confirmed) return;
       const r = await runConfigWrite(() => window.api.diagnosticsRegenerate());
       if (r && r.code) { codeEl.value = r.code; issuedEl.textContent = fmtIssued(r.codeIssuedAt); }
       refreshStatus();
@@ -4735,10 +4909,21 @@ async function performSaveSettings(options = {}) {
     newHosterSettings[name] = hs;
   }
 
-  await Promise.all([
+  const saves = [
     saveHosterSettingsTracked(newHosterSettings),
     saveGlobalSettingsTracked(globalSettings)
-  ]);
+  ];
+  const diagnosticsEnabled = document.getElementById('diagEnabledInput');
+  if (diagnosticsEnabled) {
+    saves.push(saveDiagnosticsSettingsTracked({
+      enabled: diagnosticsEnabled.checked,
+      port: Math.min(65535, Math.max(1024, parseInt(document.getElementById('diagPortInput')?.value, 10) || 9110)),
+      bindMode: document.getElementById('diagBindModeInput')?.value === 'network' ? 'network' : 'local',
+      publicHost: document.getElementById('diagPublicHostInput')?.value.trim() || '',
+      allowlist: (document.getElementById('diagAllowlistInput')?.value || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean)
+    }));
+  }
+  await Promise.all(saves);
   config.hosterSettings = newHosterSettings;
   config.globalSettings = globalSettings;
   hosterSettings = newHosterSettings;
@@ -4782,7 +4967,7 @@ async function performSaveSettings(options = {}) {
       const statusEl = document.getElementById('remoteConnectionStatus');
       if (statusEl) {
         if (status.running) {
-          statusEl.textContent = `Aktiv auf Port ${status.port} — ${status.clientCount} Client(s) verbunden`;
+          statusEl.textContent = formatRemoteClientStatus(status.port, status.clientCount);
           statusEl.style.color = '#10b981';
         } else {
           statusEl.textContent = 'Nicht aktiv';
@@ -4840,7 +5025,7 @@ function _buildAccountCardHtml(name, account, idx) {
 
   return `
     <div class="account-card${isDisabled ? ' account-disabled' : ''}${isSessionPaused ? ' account-session-paused-card' : ''}" data-account-id="${account.id}" data-account-hoster="${name}" draggable="true">
-      <div class="account-card-drag-handle" title="Ziehen zum Sortieren">&#9776;</div>
+      <div class="account-card-drag-handle" role="button" tabindex="0" aria-label="Priorität ändern. Alt und Pfeil nach oben oder unten verwenden" title="Ziehen oder Alt und Pfeiltasten zum Sortieren">&#9776;</div>
       <div class="account-card-info">
         <div class="account-card-title">${escapeHtml(getAccountDisplayName(name, account))} <span class="account-priority-badge">${priorityLabel}</span> ${sessionPausedBadge}</div>
         <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}</div>
@@ -5060,8 +5245,9 @@ async function flushPendingSettingsSaves() {
 function _buildHosterSettingsHtml(name) {
   const hs = (config.hosterSettings && config.hosterSettings[name]) || {};
   const maxSpeedMbs = hs.maxSpeedKbs > 0 ? String(+(hs.maxSpeedKbs / 1024).toFixed(2)) : '0';
+  const fieldPrefix = `hoster-${name.replace(/[^a-z0-9]/gi, '-')}`;
   return `<div class="account-hoster-settings">
-    <div class="account-hoster-settings-header" data-hoster-settings-toggle="${name}" aria-expanded="false">
+    <div class="account-hoster-settings-header" data-hoster-settings-toggle="${name}" role="button" tabindex="0" aria-expanded="false">
       <span class="panel-arrow">&#9654;</span>
       <span>Upload-Einstellungen</span>
     </div>
@@ -5069,45 +5255,45 @@ function _buildHosterSettingsHtml(name) {
       <div class="account-collapse-content">
         <div class="account-hoster-settings-body-inner settings-grid-mini">
         <div class="settings-row">
-          <label>Retries</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="retries" value="${hs.retries ?? 3}" min="0" max="500">
+          <label for="${fieldPrefix}-retries">Wiederholungen</label>
+          <input id="${fieldPrefix}-retries" type="number" class="hs-input" data-hoster="${name}" data-hs="retries" value="${hs.retries ?? 3}" min="0" max="500">
         </div>
         <div class="settings-row">
-          <label>Max Speed (MB/s)</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="maxSpeedMbs" value="${maxSpeedMbs}" min="0" step="0.1">
+          <label for="${fieldPrefix}-max-speed">Maximale Geschwindigkeit (MB/s)</label>
+          <input id="${fieldPrefix}-max-speed" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSpeedMbs" value="${maxSpeedMbs}" min="0" step="0.1">
           <span class="hint">0 = unbegrenzt</span>
         </div>
         <div class="settings-row">
-          <label>Parallele Uploads</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="parallelCount" value="${hs.parallelCount ?? 2}" min="1" max="100">
+          <label for="${fieldPrefix}-parallel">Parallele Uploads</label>
+          <input id="${fieldPrefix}-parallel" type="number" class="hs-input" data-hoster="${name}" data-hs="parallelCount" value="${hs.parallelCount ?? 2}" min="1" max="100">
         </div>
         <div class="settings-row">
-          <label>Restart unter (kB/s)</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="restartBelowKbs" value="${hs.restartBelowKbs ?? 0}" min="0">
+          <label for="${fieldPrefix}-restart">Neustart unter (kB/s)</label>
+          <input id="${fieldPrefix}-restart" type="number" class="hs-input" data-hoster="${name}" data-hs="restartBelowKbs" value="${hs.restartBelowKbs ?? 0}" min="0">
           <span class="hint">0 = aus</span>
         </div>
         <div class="settings-row">
-          <label>Intervall (s)</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="timeIntervalSec" value="${hs.timeIntervalSec ?? 0}" min="0">
+          <label for="${fieldPrefix}-interval">Intervall (s)</label>
+          <input id="${fieldPrefix}-interval" type="number" class="hs-input" data-hoster="${name}" data-hs="timeIntervalSec" value="${hs.timeIntervalSec ?? 0}" min="0">
         </div>
         <div class="settings-row">
-          <label>Max Size (MB)</label>
-          <input type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeMb" value="${hs.maxSizeMb ?? 0}" min="0">
+          <label for="${fieldPrefix}-max-size">Maximale Größe (MB)</label>
+          <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeMb" value="${hs.maxSizeMb ?? 0}" min="0">
           <span class="hint">0 = unbegrenzt</span>
         </div>
         <div class="settings-row">
-          <label>Links in Log schreiben</label>
-          <input type="checkbox" class="hs-input" data-hoster="${name}" data-hs="logToFile" ${hs.logToFile !== false ? 'checked' : ''}>
+          <label for="${fieldPrefix}-log">Links in Log schreiben</label>
+          <input id="${fieldPrefix}-log" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="logToFile" ${hs.logToFile !== false ? 'checked' : ''}>
           <span class="hint">Erfolgreiche Links in fileuploader.log.</span>
         </div>
         <div class="settings-row">
-          <label>Accounts rotieren</label>
-          <input type="checkbox" class="hs-input" data-hoster="${name}" data-hs="rotateAccounts" ${hs.rotateAccounts === true ? 'checked' : ''}>
+          <label for="${fieldPrefix}-rotate">Accounts rotieren</label>
+          <input id="${fieldPrefix}-rotate" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="rotateAccounts" ${hs.rotateAccounts === true ? 'checked' : ''}>
           <span class="hint">Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.</span>
         </div>
         <div class="settings-row">
-          <label>Größen-Limit merken</label>
-          <input type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
+          <label for="${fieldPrefix}-size-memo">Größen-Limit merken</label>
+          <input id="${fieldPrefix}-size-memo" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
           <span class="hint">Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.</span>
         </div>
         </div>
@@ -5128,7 +5314,7 @@ function _buildAccountHosterGroupHtml(name, accounts) {
     ? `<span class="account-hoster-group-meta" title="Erfolgsrate aus den letzten ${lifeStat.total} Uploads dieses Hosters">${Math.round(lifeStat.rate * 100)}% ok (${lifeStat.total})</span>`
     : '';
   return `<div class="account-hoster-group" data-hoster-group="${name}">
-    <div class="account-hoster-group-header" data-hoster-toggle="${name}" aria-expanded="${isOpen}">
+    <div class="account-hoster-group-header" data-hoster-toggle="${name}" role="button" tabindex="0" aria-expanded="${isOpen}">
       <span class="panel-arrow">&#9654;</span>
       <span class="account-status-dot status-${dot}"></span>
       <span class="account-hoster-group-title">${escapeHtml(getHosterLabel(name))}</span>
@@ -5189,6 +5375,22 @@ function _updateToggleAllAccountsBtn() {
   btn.textContent = _allAccountGroupsOpen() ? 'Alle einklappen' : 'Alle ausklappen';
 }
 
+function moveAccountPriority(hosterName, accountId, direction) {
+  const accounts = config.hosters[hosterName];
+  if (!Array.isArray(accounts)) return false;
+  const fromIndex = accounts.findIndex(account => account.id === accountId);
+  const toIndex = Math.max(0, Math.min(accounts.length - 1, fromIndex + direction));
+  if (fromIndex < 0 || fromIndex === toIndex) return false;
+  const [account] = accounts.splice(fromIndex, 1);
+  accounts.splice(toIndex, 0, account);
+  renderAccounts();
+  requestAnimationFrame(() => {
+    document.querySelector(`.account-card[data-account-id="${window.CSS.escape(accountId)}"] .account-card-drag-handle`)?.focus();
+  });
+  saveConfigTracked({ hosters: config.hosters }).catch(() => {});
+  return true;
+}
+
 // Single set of delegated listeners on the accounts container. Bound once on
 // the first render and reused for every subsequent in-place update / card
 // swap. Previously we rebound 4 × N button listeners + 5 × N drag listeners
@@ -5196,6 +5398,22 @@ function _updateToggleAllAccountsBtn() {
 // every enable/disable click.
 function bindAccountListeners(container) {
   _accountListenersBound = true;
+  container.addEventListener('keydown', (e) => {
+    const priorityHandle = e.target.closest('.account-card-drag-handle');
+    if (priorityHandle && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const card = priorityHandle.closest('.account-card');
+      if (!card) return;
+      e.preventDefault();
+      moveAccountPriority(card.dataset.accountHoster, card.dataset.accountId, e.key === 'ArrowUp' ? -1 : 1);
+      return;
+    }
+    if (!['Enter', ' '].includes(e.key)) return;
+    const header = e.target.closest('[data-hoster-toggle]');
+    const settingsHeader = e.target.closest('[data-hoster-settings-toggle]');
+    if (!header && !settingsHeader) return;
+    e.preventDefault();
+    e.target.click();
+  });
   container.addEventListener('click', (e) => {
     const header = e.target.closest('[data-hoster-toggle]');
     if (header && !e.target.closest('button')) {
@@ -5837,6 +6055,7 @@ function selectHistoryRetentionOption(value) {
 function syncHistoryClearAction() {
   const button = document.getElementById('clearHistoryBtn');
   if (button) button.disabled = historyRowsData.length === 0;
+  syncDataActionState();
 }
 
 function closeHistoryClearModal() {
@@ -5853,7 +6072,7 @@ function openHistoryClearModal() {
   if (!modal || !button || button.disabled) return;
   modal.style.display = 'flex';
   modal.setAttribute('aria-hidden', 'false');
-  document.getElementById('confirmHistoryClearBtn')?.focus();
+  document.getElementById('cancelHistoryClearBtn')?.focus();
 }
 
 async function confirmHistoryClear() {
@@ -5875,7 +6094,20 @@ async function confirmHistoryClear() {
 }
 
 async function loadHistory() {
-  const history = await window.api.getHistory();
+  const container = document.getElementById('historyContainer');
+  if (container) container.innerHTML = `<p class="empty-state history-loading-state">${localizeUiText('Wird geladen…')}</p>`;
+  let history;
+  try {
+    history = await window.api.getHistory();
+  } catch (error) {
+    historyRowsData = [];
+    historySidebarCounts = { total: 0, success: 0, error: 0 };
+    updateHistorySidebarSummary();
+    syncHistoryClearAction();
+    if (container) container.innerHTML = `<div class="empty-state history-error-state" role="alert"><strong>${escapeHtml(localizeUiText('Verlauf konnte nicht geladen werden.'))}</strong><span>${escapeHtml(error?.message || String(error))}</span><button class="btn btn-secondary" type="button" data-retry-history>${escapeHtml(localizeUiText('Erneut versuchen'))}</button></div>`;
+    container?.querySelector('[data-retry-history]')?.addEventListener('click', loadHistory);
+    return;
+  }
   window._historyForStats = history || [];
   _historyEverLoaded = true;
   _historyDirty = false;
@@ -5885,8 +6117,6 @@ async function loadHistory() {
     retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
     syncHistoryRetentionPicker();
   }
-  const container = document.getElementById('historyContainer');
-
   if (!history || history.length === 0) {
     historyRowsData = [];
     historySidebarCounts = { total: 0, success: 0, error: 0 };
@@ -5902,7 +6132,7 @@ async function loadHistory() {
   let order = 0;
 
   for (const batch of history) {
-    const dt = formatDateTime(batch.timestamp || new Date());
+    const dt = formatDateTime(batch.timestamp);
     for (const file of (batch.files || [])) {
       for (const result of (file.results || [])) {
         historySidebarCounts.total++;
@@ -5913,7 +6143,7 @@ async function loadHistory() {
           ? String(result.error || result.message || (result.status === 'aborted' ? 'Abgebrochen' : 'Fehlgeschlagen'))
           : (result.download_url || result.embed_url || '');
         historyRowsData.push({
-          date: dt.text, dateTs: dt.ts,
+          date: dt.text, dateTs: dt.ts, rawTimestamp: batch.timestamp,
           filename: file.name || '', host: result.hoster || '',
           link: detail,
           isError, order: order++
@@ -5930,17 +6160,18 @@ async function loadHistory() {
 async function exportHistory() {
   const history = await window.api.getHistory();
   if (!history || history.length === 0) {
-    alert('Kein Verlauf zum Exportieren vorhanden.');
+    await showAppAlert('Kein Verlauf zum Exportieren vorhanden.');
     return;
   }
 
-  const asCsv = confirm('Verlauf als CSV exportieren?\n\nOK = CSV\nAbbrechen = JSON');
-  const format = asCsv ? 'csv' : 'json';
+  const choice = await showAppChoice({ title: 'Verlauf exportieren', message: 'Wähle das Dateiformat für den Export.', confirmText: 'CSV exportieren', alternateText: 'JSON exportieren' });
+  if (!choice) return;
+  const format = choice === true ? 'csv' : 'json';
   const result = await window.api.exportHistory(format);
 
   if (!result || result.canceled) return;
   if (!result.ok) {
-    alert(result.error || 'Export fehlgeschlagen.');
+    await showAppAlert(result.error || 'Export fehlgeschlagen.', 'Export fehlgeschlagen');
     return;
   }
 
@@ -5978,6 +6209,7 @@ function updateRecentSortHeaders() {
     const active = recentSortState.key === key;
     const arrow = active ? (recentSortState.direction === 'asc' ? '▲' : '▼') : '↕';
     th.classList.toggle('active', active);
+    th.setAttribute('aria-sort', active ? (recentSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none');
     const indicator = th.querySelector('.sort-indicator');
     if (indicator) indicator.textContent = arrow;
   });
@@ -5987,11 +6219,11 @@ let _recentListenersBound = false;
 
 function _buildRecentRowHtml(row) {
   const cls = `recent-file-row${row.isError ? ' error' : ''}${selectedRecentIds.has(row.order) ? ' selected' : ''}`;
-  return `<tr class="${cls}" data-order="${row.order}" data-link="${escapeAttr(row.link)}">`
+  return `<tr class="${cls}" data-order="${row.order}" data-link="${escapeAttr(row.link)}" tabindex="0" aria-selected="${selectedRecentIds.has(row.order)}">`
     + `<td>${escapeHtml(row.date)}</td>`
     + `<td title="${escapeAttr(row.filename)}">${escapeHtml(row.filename)}</td>`
     + `<td>${escapeHtml(row.host)}</td>`
-    + `<td title="${escapeAttr(row.link)}">${escapeHtml(row.link)}</td>`
+    + `<td><div class="history-link-cell"><span class="history-link-text" title="${escapeAttr(row.link)}">${escapeHtml(row.link)}</span><button class="history-copy-link recent-copy-link" type="button" data-copy-recent-link aria-label="Link kopieren" title="Link kopieren">⧉</button></div></td>`
     + `</tr>`;
 }
 
@@ -6064,6 +6296,13 @@ function renderRecentUploadsPanel(appendOnly = false) {
     tbody.addEventListener('click', (e) => {
       const tr = e.target.closest('.recent-file-row');
       if (!tr) return;
+      const copyButton = e.target.closest('[data-copy-recent-link]');
+      if (copyButton) {
+        const link = tr.dataset.link;
+        if (link) { window.api.copyToClipboard(link); showCopyToast('Link kopiert'); }
+        e.stopPropagation();
+        return;
+      }
       // Clear queue selection when clicking in recent panel — class-toggle only.
       if (selectedJobIds.size > 0) { selectedJobIds.clear(); applyQueueSelectionClasses(); updateQueueActionButtons(); }
       const id = parseInt(tr.dataset.order, 10);
@@ -6091,6 +6330,21 @@ function renderRecentUploadsPanel(appendOnly = false) {
       applyRecentSelectionClasses();
     });
 
+    tbody.addEventListener('keydown', (e) => {
+      const tr = e.target.closest('.recent-file-row');
+      if (!tr || e.target.closest('button')) return;
+      if ((e.shiftKey && e.key === 'F10') || e.key === 'ContextMenu') {
+        e.preventDefault();
+        const rect = tr.getBoundingClientRect();
+        showRecentContextMenu(tr, rect.left + 24, rect.top + 20);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        tr.click();
+      }
+    });
+
     tbody.addEventListener('dblclick', (e) => {
       const tr = e.target.closest('.recent-file-row');
       if (!tr || tr.classList.contains('error')) return;
@@ -6100,6 +6354,19 @@ function renderRecentUploadsPanel(appendOnly = false) {
   }
 
   updateRecentSortHeaders();
+  syncDataActionState();
+}
+
+function activateRecentSortHeader(th) {
+  const key = th.dataset.recentSort;
+  if (recentSortState.key === key) {
+    recentSortState.direction = recentSortState.direction === 'desc' ? 'asc' : 'desc';
+  } else {
+    recentSortState.key = key;
+    recentSortState.direction = key === 'date' ? 'desc' : 'asc';
+  }
+  _recentLastRenderedSig = '';
+  renderRecentUploadsPanel();
 }
 
 const HISTORY_RENDER_CAP = 2000;
@@ -6161,7 +6428,9 @@ function _getVisibleHistoryRows() {
 function renderHistoryTable(container) {
   const visibleRows = _getVisibleHistoryRows();
   if (!container || !visibleRows.length) {
-    if (container) container.innerHTML = '<p class="empty-state">Noch keine Uploads.</p>';
+    if (container) container.innerHTML = historyRowsData.length > 0
+      ? `<p class="empty-state">${escapeHtml(localizeUiText('Keine Verlaufseinträge entsprechen diesem Filter.'))}</p>`
+      : `<p class="empty-state">${escapeHtml(localizeUiText('Noch keine Uploads.'))}</p>`;
     const emptyNotice = document.getElementById('historyCapNotice');
     if (emptyNotice) emptyNotice.style.display = 'none';
     _historyWorking = [];
@@ -6185,7 +6454,8 @@ function renderHistoryTable(container) {
   const headerCell = (key, label) => {
     const active = historySortState.key === key;
     const dir = active ? (historySortState.direction === 'asc' ? '▲' : '▼') : '↕';
-    return `<th class="sortable${active ? ' active' : ''}" data-history-sort="${key}">${label}<span class="sort-indicator">${dir}</span></th>`;
+    const ariaSort = active ? (historySortState.direction === 'asc' ? 'ascending' : 'descending') : 'none';
+    return `<th class="sortable${active ? ' active' : ''}" data-history-sort="${key}" tabindex="0" aria-sort="${ariaSort}">${label}<span class="sort-indicator">${dir}</span></th>`;
   };
 
   container.innerHTML = `<table class="results-table history-table"><thead><tr>
@@ -6378,15 +6648,19 @@ function setupListeners() {
   document.getElementById('recentFilesHead').addEventListener('click', (e) => {
     const th = e.target.closest('th[data-recent-sort]');
     if (!th) return;
-    const key = th.dataset.recentSort;
-    if (recentSortState.key === key) {
-      recentSortState.direction = recentSortState.direction === 'desc' ? 'asc' : 'desc';
-    } else {
-      recentSortState.key = key;
-      recentSortState.direction = key === 'date' ? 'desc' : 'asc';
-    }
-    _recentLastRenderedSig = '';
-    renderRecentUploadsPanel();
+    activateRecentSortHeader(th);
+  });
+  document.getElementById('recentFilesHead').addEventListener('keydown', (e) => {
+    const th = e.target.closest('th[data-recent-sort]');
+    if (!th || !['Enter', ' '].includes(e.key)) return;
+    e.preventDefault();
+    activateRecentSortHeader(th);
+  });
+  document.getElementById('historyContainer').addEventListener('keydown', (e) => {
+    const th = e.target.closest('th[data-history-sort]');
+    if (!th || !['Enter', ' '].includes(e.key)) return;
+    e.preventDefault();
+    th.click();
   });
 
   // Recent files context menu
@@ -6395,16 +6669,7 @@ function setupListeners() {
     if (!tr) return;
     e.preventDefault();
     e.stopPropagation();
-    const id = parseInt(tr.dataset.order, 10);
-    if (!selectedRecentIds.has(id)) {
-      selectedRecentIds.clear();
-      selectedRecentIds.add(id);
-      renderRecentUploadsPanel();
-    }
-    const menu = document.getElementById('recentContextMenu');
-    menu.style.display = 'block';
-    menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - 80) + 'px';
+    showRecentContextMenu(tr, e.clientX, e.clientY);
   });
 
   document.getElementById('recentContextMenu').addEventListener('click', (e) => {
@@ -6414,6 +6679,27 @@ function setupListeners() {
     const action = item.dataset.action;
     if (action === 'recent-copy-links') copySelectedRecentLinks();
     else if (action === 'recent-delete') deleteSelectedRecentFiles();
+  });
+  document.querySelectorAll('.context-menu').forEach(menu => {
+    menu.addEventListener('keydown', (e) => {
+      const items = getVisibleContextMenuItems(menu);
+      if (!items.length) return;
+      const current = Math.max(0, items.indexOf(document.activeElement));
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const offset = e.key === 'ArrowDown' ? 1 : -1;
+        items[(current + offset + items.length) % items.length].focus();
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        items[e.key === 'Home' ? 0 : items.length - 1].focus();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        document.activeElement?.click();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        hideContextMenu();
+      }
+    });
   });
   document.getElementById('reuploadSelectedBtn').addEventListener('click', retrySelectedJobs);
   document.getElementById('abortSelectedBtn').addEventListener('click', abortSelectedJobs);
@@ -6449,17 +6735,30 @@ function setupListeners() {
     });
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
-  document.getElementById('appAlertConfirmBtn').addEventListener('click', closeAppAlert);
-  document.getElementById('appAlertCloseBtn').addEventListener('click', closeAppAlert);
+  document.getElementById('appAlertConfirmBtn').addEventListener('click', () => closeAppAlert(true));
+  document.getElementById('appAlertAlternateBtn').addEventListener('click', () => closeAppAlert('alternate'));
+  document.getElementById('appAlertCancelBtn').addEventListener('click', () => closeAppAlert(false));
+  document.getElementById('appAlertCloseBtn').addEventListener('click', () => closeAppAlert(false));
   document.getElementById('appAlertModal').addEventListener('click', event => {
-    if (event.target.id === 'appAlertModal') closeAppAlert();
+    if (event.target.id === 'appAlertModal') closeAppAlert(false);
   });
   document.addEventListener('keydown', event => {
     const modal = document.getElementById('appAlertModal');
     if (modal?.style.display !== 'flex') return;
-    if (event.key === 'Escape' || event.key === 'Enter') {
+    const focusable = [...modal.querySelectorAll('button:not([disabled]):not([hidden])')];
+    if (event.key === 'Tab' && focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
       event.preventDefault();
-      closeAppAlert();
+      event.stopImmediatePropagation();
+      closeAppAlert(false);
     }
   }, true);
 
@@ -6539,7 +6838,9 @@ function setupListeners() {
       if (value !== 'all') {
         const preview = await window.api.pruneHistory(value, { dryRun: true });
         if (preview && preview.removedRows > 0) {
-          const ok = confirm(`${preview.removedRows.toLocaleString(getUiLocale())} Verlaufseinträge werden dauerhaft entfernt.\n\nFortfahren?`);
+          const count = preview.removedRows.toLocaleString(getUiLocale());
+          const noun = preview.removedRows === 1 ? 'Verlaufseintrag wird' : 'Verlaufseinträge werden';
+          const ok = await showAppConfirm({ title: 'Aufbewahrung ändern?', message: `${count} ${noun} dauerhaft entfernt.`, confirmText: 'Entfernen', danger: true });
           if (!ok) {
             historyRetentionSelect.value = prev;
             syncHistoryRetentionPicker();
@@ -6579,14 +6880,19 @@ function setupListeners() {
 
   // Queue table sorting
   document.querySelectorAll('#queueTable th.sortable').forEach(th => {
-    th.addEventListener('click', (e) => {
-      // Don't sort if click was on the resizer handle
+    const activateSort = (e) => {
       if (e.target.classList.contains('col-resizer')) return;
       const key = th.dataset.sort;
       if (queueSortState.key === key) queueSortState.direction = queueSortState.direction === 'asc' ? 'desc' : 'asc';
       else { queueSortState.key = key; queueSortState.direction = 'asc'; }
-      _lastVisibleRange = { start: -1, end: -1 }; // force full rebuild after re-sort
+      _lastVisibleRange = { start: -1, end: -1 };
       renderQueueTable();
+    };
+    th.addEventListener('click', activateSort);
+    th.addEventListener('keydown', (e) => {
+      if (!['Enter', ' '].includes(e.key)) return;
+      e.preventDefault();
+      activateSort(e);
     });
   });
 
@@ -6597,7 +6903,9 @@ function setupListeners() {
   document.getElementById('cancelShutdownBtn').addEventListener('click', async () => {
     await window.api.cancelShutdown();
     if (shutdownCountdownInterval) { clearInterval(shutdownCountdownInterval); shutdownCountdownInterval = null; }
-    document.getElementById('shutdownOverlay').style.display = 'none';
+    const overlay = document.getElementById('shutdownOverlay');
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
   });
 
   // Click on empty area in queue → deselect all
@@ -6941,13 +7249,14 @@ function handleShutdownCountdown(data) {
   const labels = { sleep: 'Ruhezustand', shutdown: 'Herunterfahren', restart: 'Neustart' };
   let remaining = data.seconds || 60;
   secEl.textContent = remaining;
-  msgEl.textContent = `${labels[data.mode] || data.mode} in ${remaining}s...`;
+  msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
+  overlay.setAttribute('aria-hidden', 'false');
 
   if (shutdownCountdownInterval) clearInterval(shutdownCountdownInterval);
   shutdownCountdownInterval = setInterval(() => {
     remaining--;
     secEl.textContent = remaining;
-    msgEl.textContent = `${labels[data.mode] || data.mode} in ${remaining}s...`;
+    msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
     if (remaining <= 0) { clearInterval(shutdownCountdownInterval); }
   }, 1000);
 }
@@ -7070,11 +7379,11 @@ function pad(n) { return String(Math.floor(n)).padStart(2, '0'); }
 
 function formatDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
-  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
+  if (Number.isNaN(date.getTime())) return { ts: 0, text: localizeUiText('Unbekannt') };
   return {
-    ts: safeDate.getTime(),
-    text: safeDate.toLocaleDateString(getUiLocale(), { day: '2-digit', month: '2-digit', year: 'numeric' })
-      + ' ' + safeDate.toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    ts: date.getTime(),
+    text: date.toLocaleDateString(getUiLocale(), { day: '2-digit', month: '2-digit', year: 'numeric' })
+      + ' ' + date.toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   };
 }
 
@@ -7214,7 +7523,7 @@ function escapeAttr(str) {
 
 function showCopyToast(msg, durationMs) {
   const toast = document.getElementById('copyToast');
-  toast.textContent = msg;
+  toast.textContent = localizeUiText(msg);
   toast.classList.add('show');
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => toast.classList.remove('show'), durationMs || 1500);

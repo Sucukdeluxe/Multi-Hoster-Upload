@@ -1402,10 +1402,10 @@ function createWindow() {
       try {
         const choice = dialog.showMessageBoxSync(mainWindow, {
           type: 'error',
-          title: 'Renderer abgestürzt',
-          message: `Der Renderer-Prozess ist abgestürzt (${details.reason}).`,
-          detail: 'Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.',
-          buttons: ['Neu laden', 'Beenden'],
+          title: shellText('Renderer abgestürzt', 'Renderer crashed'),
+          message: shellText(`Der Renderer-Prozess ist abgestürzt (${details.reason}).`, `The renderer process crashed (${details.reason}).`),
+          detail: shellText('Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.', 'Export and send a diagnostics package. Click "Reload" to restore the interface; uploads running in the main process remain active.'),
+          buttons: [shellText('Neu laden', 'Reload'), shellText('Beenden', 'Quit')],
           defaultId: 0,
           cancelId: 1
         });
@@ -1460,14 +1460,7 @@ function createTray() {
       } catch {}
     }
     tray = new Tray(icon || nativeImage.createEmpty());
-    tray.setToolTip('Multi-Hoster-Upload');
-
-    const contextMenu = Menu.buildFromTemplate([
-      { label: 'Öffnen', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
-      { type: 'separator' },
-      { label: 'Beenden', click: () => { app.quit(); } }
-    ]);
-    tray.setContextMenu(contextMenu);
+    refreshTrayLanguage();
 
     tray.on('click', () => {
       if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
@@ -1702,7 +1695,7 @@ ipcMain.handle('save-text-file', async (_event, defaultName, content, filters) =
     ? filters
     : [{ name: 'Textdatei', extensions: ['txt', 'csv', 'log'] }];
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Speichern unter',
+    title: shellText('Speichern unter', 'Save as'),
     defaultPath: safeName,
     filters: safeFilters
   });
@@ -1718,11 +1711,11 @@ ipcMain.handle('export-history', async (_event, format) => {
   const datePrefix = new Date().toISOString().slice(0, 10);
 
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Upload-Verlauf exportieren',
+    title: shellText('Upload-Verlauf exportieren', 'Export upload history'),
     defaultPath: `upload-history-${datePrefix}.${normalizedFormat}`,
     filters: normalizedFormat === 'json'
-      ? [{ name: 'JSON-Datei', extensions: ['json'] }]
-      : [{ name: 'CSV-Datei', extensions: ['csv'] }]
+      ? [{ name: shellText('JSON-Datei', 'JSON file'), extensions: ['json'] }]
+      : [{ name: shellText('CSV-Datei', 'CSV file'), extensions: ['csv'] }]
   });
 
   if (canceled || !filePath) return { ok: false, canceled: true };
@@ -1810,6 +1803,25 @@ function getUploadBrowseDirectory() {
   return app.getPath('downloads');
 }
 
+function getConfiguredLanguage() {
+  try { return configStore.load().globalSettings?.language === 'de' ? 'de' : 'en'; }
+  catch { return 'en'; }
+}
+
+function shellText(german, english) {
+  return getConfiguredLanguage() === 'de' ? german : english;
+}
+
+function refreshTrayLanguage() {
+  if (!tray || tray.isDestroyed()) return;
+  tray.setToolTip('Multi Hoster Uploader');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: shellText('Öffnen', 'Open'), click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { type: 'separator' },
+    { label: shellText('Beenden', 'Quit'), click: () => { app.quit(); } }
+  ]));
+}
+
 async function rememberUploadBrowseDirectory(selectedPath, selectedDirectory = false) {
   if (!selectedPath) return;
   const directory = selectedDirectory ? selectedPath : path.dirname(selectedPath);
@@ -1821,8 +1833,8 @@ ipcMain.handle('select-files', async () => {
     defaultPath: getUploadBrowseDirectory(),
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: 'Alle Dateien', extensions: ['*'] },
-      { name: 'Videos', extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'] }
+      { name: shellText('Alle Dateien', 'All files'), extensions: ['*'] },
+      { name: shellText('Videos', 'Videos'), extensions: ['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm'] }
     ]
   });
   if (result.canceled || !result.filePaths.length) return null;
@@ -2368,7 +2380,7 @@ ipcMain.handle('create-support-bundle', async () => {
     const defaultName = `multi-hoster-support-${stamp}.txt`;
     const desktop = (() => { try { return app.getPath('desktop'); } catch { return app.getPath('userData'); } })();
     const res = await dialog.showSaveDialog(mainWindow || undefined, {
-      title: 'Diagnose-Paket speichern',
+      title: shellText('Diagnose-Paket speichern', 'Save diagnostics package'),
       defaultPath: path.join(desktop, defaultName),
       filters: [{ name: 'Text', extensions: ['txt'] }]
     });
@@ -2516,11 +2528,11 @@ ipcMain.handle('export-backup', async () => {
   const _bd = new Date();
   const _bdate = `${String(_bd.getDate()).padStart(2, '0')}-${String(_bd.getMonth() + 1).padStart(2, '0')}-${_bd.getFullYear()}`;
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Backup exportieren',
+    title: shellText('Backup exportieren', 'Export backup'),
     defaultPath: `${_bdate}-multihoster-backup.mhu`,
     filters: [
-      { name: 'Multi-Hoster Backup (verschlüsselt)', extensions: ['mhu'] },
-      { name: 'Multi-Hoster Backup (Klartext JSON)', extensions: ['json'] }
+      { name: shellText('Multi-Hoster Backup (verschlüsselt)', 'Multi Hoster backup (encrypted)'), extensions: ['mhu'] },
+      { name: shellText('Multi-Hoster Backup (Klartext JSON)', 'Multi Hoster backup (plain JSON)'), extensions: ['json'] }
     ]
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
@@ -2542,9 +2554,9 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
     buffer = readBackupFile(sourcePath);
   } else {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'Backup importieren',
+      title: shellText('Backup importieren', 'Import backup'),
       filters: [
-        { name: 'Multi-Hoster Backup', extensions: ['mhu', 'json'] },
+        { name: 'Multi Hoster backup', extensions: ['mhu', 'json'] },
         { name: 'Verschlüsselt (.mhu)', extensions: ['mhu'] },
         { name: 'Klartext (.json)', extensions: ['json'] }
       ],
@@ -2642,10 +2654,10 @@ ipcMain.handle('read-own-upload-log', () => {
 
 ipcMain.handle('import-upload-log', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Upload-Log importieren',
+    title: shellText('Upload-Log importieren', 'Import upload log'),
     filters: [
-      { name: 'Log-Dateien', extensions: ['log', 'txt'] },
-      { name: 'Alle Dateien', extensions: ['*'] }
+      { name: shellText('Log-Dateien', 'Log files'), extensions: ['log', 'txt'] },
+      { name: shellText('Alle Dateien', 'All files'), extensions: ['*'] }
     ],
     properties: ['openFile']
   });
@@ -2807,6 +2819,7 @@ ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
   if (uploadManager) {
     try { uploadManager.updateSettings(null, globalSettings); } catch (error) { debugLog(`global settings runtime update failed: ${error.message}`); }
   }
+  refreshTrayLanguage();
   return true;
 });
 

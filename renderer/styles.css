@@ -32,9 +32,16 @@ body {
   height: 100vh;
   overflow: hidden;
   color: var(--text);
-  user-select: none;
   display: flex;
   flex-direction: column;
+}
+
+:where(button, select, option, label, .app-header, .menu-bar, .view-sidebar, .settings-sidebar, .queue-table th, .recent-files-table th, .history-table th, .resize-handle, .context-menu, .modal-header, .modal-footer, .account-card-drag-handle, .account-hoster-group-header, .account-hoster-settings-header) {
+  user-select: none;
+}
+
+:where(.status-badge, .health-badge, .account-status, .panel-status, .account-modal-status, .online-backup-status, .health-check-results, .account-hoster-group-meta.error, .recent-file-row.error, .history-row.error, .log-file-path-row .key-input, .log-paths-list, .log-paths-list *, #jobLogBody, .update-release-notes, .update-release-notes *, .history-link-text, .copy-toast) {
+  user-select: text;
 }
 
 /* Menu Bar (Datei / Einstellungen / Hilfe) */
@@ -3181,23 +3188,26 @@ input[type="checkbox"] {
 }
 
 .log-file-path-row {
-  display: grid !important;
-  grid-template-columns: 190px minmax(180px, 1fr) auto auto;
+  display: flex !important;
   align-items: center !important;
-  column-gap: 8px !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
 }
 
 .log-file-path-row > label {
-  min-width: 0 !important;
+  min-width: 140px !important;
+  flex: 1 1 190px;
 }
 
 .log-file-path-row > .key-input {
-  width: 100%;
-  min-width: 0 !important;
+  width: auto;
+  min-width: 180px !important;
+  max-width: 100%;
+  flex: 999 1 260px;
 }
 
 .log-file-path-row .btn {
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 
@@ -3344,6 +3354,28 @@ input[type="checkbox"] {
   background: var(--bg-secondary);
 }
 
+.account-hoster-group {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.account-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
+.account-otp-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.account-otp-input {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
 .account-hoster-group-header {
   min-height: 40px;
   padding: 8px 12px;
@@ -3460,11 +3492,35 @@ input[type="checkbox"] {
 }
 
 .copy-toast {
-  bottom: 44px;
+  top: 60px;
+  right: 12px;
+  bottom: auto;
+  left: auto;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 24px));
+  overflow-wrap: anywhere;
+  white-space: normal;
+  transform: translateY(-8px);
   border-radius: 6px;
   background: rgba(35, 35, 35, .96);
   color: var(--success);
   box-shadow: 0 12px 30px rgba(0, 0, 0, .38);
+}
+
+.copy-toast.show {
+  transform: translateY(0);
+}
+
+.status-badge {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.status-badge-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 ::-webkit-scrollbar {
@@ -3532,6 +3588,90 @@ input[type="checkbox"] {
 
   .upload-sidebar-lower {
     display: none;
+  }
+
+  #upload-view.active {
+    grid-template-columns: clamp(196px, 24vw, 224px) minmax(0, 1fr);
+  }
+
+  #upload-view .view-sidebar {
+    padding: 14px 10px 10px;
+    overflow-y: auto;
+  }
+
+  #upload-view .view-sidebar-section,
+  #upload-view .upload-sidebar-lower {
+    display: grid;
+  }
+
+  #upload-view .view-sidebar-copy,
+  #upload-view .view-sidebar-badge {
+    display: block;
+  }
+
+  #upload-view .upload-sidebar-lower {
+    min-width: 0;
+    gap: 10px;
+    margin-top: 10px;
+    flex: 0 0 auto;
+  }
+
+  #upload-view .upload-sidebar-lower .view-sidebar-section {
+    padding-top: 10px;
+  }
+
+  #upload-view .upload-telemetry {
+    gap: 4px;
+    padding-top: 8px;
+  }
+
+  #upload-view .view-sidebar-navigation {
+    gap: 4px;
+  }
+
+  #upload-view .view-sidebar-item {
+    min-height: 34px;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    place-items: initial;
+    align-items: center;
+    padding: 6px 8px;
+  }
+
+  #upload-view .view-sidebar-icon {
+    width: 18px;
+    height: 18px;
+  }
+
+  #upload-view .upload-telemetry-row,
+  #upload-view .upload-availability,
+  #upload-view .hoster-summary {
+    min-width: 0;
+  }
+
+  #upload-view .upload-telemetry-row {
+    gap: 8px;
+  }
+
+  #upload-view .upload-telemetry-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #upload-view .hoster-summary {
+    overflow-wrap: anywhere;
+  }
+
+  .account-card {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .account-card-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
   }
 
   .upload-speed-sparkline {
@@ -3646,36 +3786,55 @@ input[type="checkbox"] {
   }
 
   .settings-layout {
-    height: 100%;
-    grid-template-columns: 176px minmax(0, 1fr);
+    height: auto;
+    grid-template-columns: minmax(0, 1fr);
     overflow: hidden;
   }
 
   .settings-container {
-    overflow: hidden;
+    overflow-y: auto;
+  }
+
+  .settings-hosters {
+    flex: 0 0 auto;
+    min-width: 0;
   }
 
   .settings-sidebar {
-    overflow-y: auto;
-    border-right: 1px solid var(--border);
-    border-bottom: 0;
+    min-width: 0;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
 
   .settings-navigation {
-    display: flex;
-    grid-template-columns: none;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .settings-content {
-    overflow-y: auto;
+    min-width: 0;
+    overflow: visible;
   }
 
   .settings-search-wrap > label {
-    display: none;
+    display: block;
   }
 
   .settings-content {
     padding: 18px 16px 28px;
+  }
+
+  .settings-search-wrap,
+  .settings-search-control,
+  #settingsSearchInput,
+  .settings-nav-button {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .settings-sidebar-status {
+    margin-top: 0;
   }
 
   .settings-subpage .settings-row > label {
@@ -3688,6 +3847,12 @@ input[type="checkbox"] {
 
   .settings-grid-mini {
     grid-template-columns: 1fr;
+  }
+
+  .log-file-path-row > label,
+  .log-file-path-row > .key-input {
+    min-width: 0 !important;
+    flex-basis: 100%;
   }
 
   .upload-toolbar,
@@ -3711,7 +3876,38 @@ input[type="checkbox"] {
   }
 
   .accounts-auto-check {
-    display: none;
+    display: flex;
+  }
+
+  .accounts-header {
+    flex-wrap: wrap;
+  }
+
+  .accounts-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .account-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .account-status,
+  .account-card-actions {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .account-card-actions {
+    justify-content: flex-start;
+  }
+
+  .account-otp-action {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-otp-action .btn {
+    width: 100%;
   }
 
   .history-retention-select {
