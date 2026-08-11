@@ -410,6 +410,9 @@ setTimeout(async () => {
     const speedSparklineState = await wc.executeJavaScript('(() => { const widget = document.getElementById("uploadSpeedSparkline"); const canvas = document.getElementById("uploadSpeedCanvas"); const rect = canvas?.getBoundingClientRect(); return [Boolean(widget), widget?.classList.contains("is-hidden"), rect?.width > 0, rect?.height > 0, document.getElementById("uploadSpeedValue")?.textContent].join("|"); })()');
     check('Upload header exposes the visible speed sparkline', speedSparklineState === 'true|false|true|true|0 B/s');
 
+    const speedSparklineGeometry = await wc.executeJavaScript('(() => { const widget = document.getElementById("uploadSpeedSparkline")?.getBoundingClientRect(); const canvas = document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect(); const value = document.getElementById("uploadSpeedValue")?.getBoundingClientRect(); return { widgetWidth: widget?.width || 0, canvasWidth: canvas?.width || 0, gap: value && canvas ? value.left - canvas.right : 0, contained: Boolean(widget && canvas && value && canvas.left >= widget.left && value.right <= widget.right) }; })()');
+    check('Upload header extends the speed line toward the value instead of leaving a fixed empty column', speedSparklineGeometry.canvasWidth >= 108 && speedSparklineGeometry.gap >= 3 && speedSparklineGeometry.gap <= 5 && speedSparklineGeometry.contained);
+
     const toolbarLabels = await wc.executeJavaScript('[...document.querySelectorAll("#queueCommandBar .toolbar-btn")].map(el => el.getAttribute("aria-label")).join("|")');
     check('Upload toolbar actions have German accessible names', toolbarLabels === 'Alle Uploads starten|Ausgewählte Uploads starten|Ausgewählte Datei erneut hochladen|Ausgewählten Upload abbrechen|Aktive Uploads beenden und stoppen|Alle Uploads abbrechen|Ganz nach oben|Nach oben|Nach unten|Ganz nach unten');
 
