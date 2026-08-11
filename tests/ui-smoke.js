@@ -164,7 +164,7 @@ setTimeout(async () => {
     await captureVisual('00-language-picker.png');
     await wc.executeJavaScript('document.getElementById("upload-tab").click()');
     const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
-    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI-HOSTER UPLOAD', 'Markdown', 'Multi-Hoster Upload', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'mp4,mkv,avi']);
+    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI-HOSTER UPLOAD', 'Markdown', 'Multi-Hoster Upload', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'mp4,mkv,avi']);
     const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !value.includes('Multi-Hoster-Uploader'));
     if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
     check('Every mounted human-facing value is translated or explicitly language-neutral', unexpectedUnchangedValues.length === 0);
@@ -176,9 +176,13 @@ setTimeout(async () => {
     check('English default leaves no German interface copy behind', englishResidue.length === 0);
     const englishSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
     check('English sidebar hierarchy uses distinct translated kickers', englishSidebarHeadings.join('::') === 'Workspace|Uploads::Manage accounts|Accounts::Archive|History');
+    const englishTelemetryLabels = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-label")].map(el => el.textContent.trim()).join("|")');
+    check('English upload telemetry is fully localized', englishTelemetryLabels === 'Total|Connections|Remaining|Running|Completed|Failed|Speed|ETA');
     const englishLayoutFits = await wc.executeJavaScript('(() => { const states = [...document.querySelectorAll(".tab")].map(tab => { tab.click(); const view = document.querySelector(".view.active"); return view && view.scrollWidth <= view.clientWidth + 1; }); document.querySelector(".tab[data-view=upload]")?.click(); return states.every(Boolean) && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1; })()');
     check('English labels fit every main view without horizontal overflow', englishLayoutFits === true);
     await wc.executeJavaScript('document.querySelector(".tab[data-view=accounts]")?.click()');
+    const hiddenAccountSparkline = await wc.executeJavaScript('document.getElementById("uploadSpeedSparkline")?.classList.contains("is-hidden")');
+    check('Upload speed sparkline stays reserved but hidden outside Uploads', hiddenAccountSparkline === true);
     const englishEmptyAccountHosterLabel = await wc.executeJavaScript('(() => { const container = document.getElementById("accountsSidebarHosters"); return [container?.getAttribute("data-empty-label"), getComputedStyle(container, "::after").content].join("|"); })()');
     check('Empty account hoster sidebar renders its localized English label', englishEmptyAccountHosterLabel === 'No hosts yet|"No hosts yet"');
     await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click()');
@@ -220,8 +224,8 @@ setTimeout(async () => {
     const bodyBackground = await wc.executeJavaScript('getComputedStyle(document.body).backgroundColor');
     check('App shell uses the dark reference canvas', bodyBackground === 'rgb(15, 15, 15)');
 
-    const shellDensity = await wc.executeJavaScript('(() => ({ header: document.querySelector(".app-header")?.getBoundingClientRect().height, status: document.getElementById("statusbar")?.getBoundingClientRect().height, sidebar: document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect().width }))()');
-    check('App shell keeps a compact desktop density', shellDensity.header <= 50 && shellDensity.status <= 30 && shellDensity.sidebar <= 230);
+    const shellDensity = await wc.executeJavaScript('(() => ({ header: document.querySelector(".app-header")?.getBoundingClientRect().height, sidebar: document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect().width }))()');
+    check('App shell keeps a compact desktop density', shellDensity.header <= 50 && shellDensity.sidebar <= 230);
 
     const tabLabels = await wc.executeJavaScript('[...document.querySelectorAll(".tab")].map(el => el.textContent.trim()).join("|")');
     check('Current tab labels present', tabLabels === 'Upload|Accounts|Einstellungen|Verlauf');
@@ -272,10 +276,8 @@ setTimeout(async () => {
     const startDisabled = await wc.executeJavaScript('document.getElementById("startUploadBtn")?.disabled');
     check('Start button disabled initially', startDisabled === true);
 
-    const sbState = await wc.executeJavaScript('document.getElementById("sbState")?.textContent');
-    check('Statusbar: Bereit', sbState === 'Bereit');
-    const readyDotColor = await wc.executeJavaScript('getComputedStyle(document.getElementById("sbState"), "::before").backgroundColor');
-    check('Ready status uses a green indicator', readyDotColor === 'rgb(67, 209, 123)');
+    const legacyStatusbar = await wc.executeJavaScript('document.getElementById("statusbar")');
+    check('Legacy bottom statusbar is removed', legacyStatusbar === null);
 
     const version = await wc.executeJavaScript('document.getElementById("versionLabel")?.textContent');
     check('Version label present', version && version.startsWith('v'));
@@ -295,8 +297,14 @@ setTimeout(async () => {
     const localizedRecentTabs = await wc.executeJavaScript('[...document.querySelectorAll(".recent-tab")].map(el => el.textContent.trim()).join("|")');
     check('Recent panel labels are consistently German', localizedRecentTabs === 'Dateien|Statistik');
 
-    const localizedStatusbar = await wc.executeJavaScript('["sbConnections", "sbQueueCount", "sbRemainingCount", "sbInProgressCount", "sbDoneCount", "sbErrorCount"].map(id => document.getElementById(id)?.textContent).join("|")');
-    check('Statusbar labels are consistently German', localizedStatusbar === 'Verbindungen 0|Gesamt 0|Verbleibend 0|Läuft 0|Fertig 0|Fehler 0');
+    const localizedTelemetry = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-label")].map(el => el.textContent.trim()).join("|")');
+    check('Upload telemetry exposes all eight German labels', localizedTelemetry === 'Gesamt|Verbindungen|Verbleibend|Läuft|Fertig|Fehler|Geschwindigkeit|ETA');
+
+    const initialTelemetryValues = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-value")].map(el => el.getAttribute("aria-label") || el.textContent.trim()).join("|")');
+    check('Upload telemetry starts with stable empty values', initialTelemetryValues === '0|0|0|0|0|0|0 B/s|--:--');
+
+    const speedSparklineState = await wc.executeJavaScript('(() => { const widget = document.getElementById("uploadSpeedSparkline"); const canvas = document.getElementById("uploadSpeedCanvas"); const rect = canvas?.getBoundingClientRect(); return [Boolean(widget), widget?.classList.contains("is-hidden"), rect?.width > 0, rect?.height > 0, document.getElementById("uploadSpeedValue")?.textContent].join("|"); })()');
+    check('Upload header exposes the visible speed sparkline', speedSparklineState === 'true|false|true|true|0 B/s');
 
     const toolbarLabels = await wc.executeJavaScript('[...document.querySelectorAll("#queueCommandBar .toolbar-btn")].map(el => el.getAttribute("aria-label")).join("|")');
     check('Upload toolbar actions have German accessible names', toolbarLabels === 'Alle Uploads starten|Ausgewählte Uploads starten|Ausgewählte Datei erneut hochladen|Ausgewählten Upload abbrechen|Aktive Uploads beenden und stoppen|Alle Uploads abbrechen|Ganz nach oben|Nach oben|Nach unten|Ganz nach unten');
@@ -304,8 +312,35 @@ setTimeout(async () => {
     const uploadWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
     check('Upload view separates sidebar and main workspace', uploadWorkspaceLayout === true);
 
-    const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#upload-view .view-sidebar-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && document.getElementById("uploadSidebarAccountsCount")); })()');
-    check('Upload sidebar keeps availability information in its lower area', uploadSidebarInformation === true);
+    const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const availability = document.getElementById("uploadAvailability")?.getBoundingClientRect(); const telemetry = document.getElementById("uploadTelemetry")?.getBoundingClientRect(); return Boolean(sidebar && availability && telemetry && availability.bottom <= telemetry.top && telemetry.bottom <= sidebar.bottom + 1 && document.getElementById("uploadSidebarAccountsCount")); })()');
+    check('Upload sidebar stacks availability above bottom telemetry', uploadSidebarInformation === true);
+
+    const telemetryUpdate = await wc.executeJavaScript(\`(() => {
+      queueJobs = [
+        { id: 'telemetry-running', status: 'uploading', bytesTotal: 4096, bytesUploaded: 1024 },
+        { id: 'telemetry-waiting', status: 'queued', bytesTotal: 2048, bytesUploaded: 0 },
+        { id: 'telemetry-done', status: 'done', bytesTotal: 1024, bytesUploaded: 1024 },
+        { id: 'telemetry-error', status: 'error', bytesTotal: 1024, bytesUploaded: 0 }
+      ];
+      _sessionDoneCount = 7;
+      _sessionErrorCount = 2;
+      lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 2, activeJobs: 1, state: 'uploading' };
+      updateStatusBar();
+      const total = document.getElementById('uploadTelemetryTotal');
+      const rolling = total?.querySelectorAll(':scope > span').length;
+      return {
+        values: ['Total', 'Connections', 'Remaining', 'Running', 'Completed', 'Failed', 'Speed', 'Eta'].map(key => {
+          const element = document.getElementById('uploadTelemetry' + key);
+          return element?.getAttribute('aria-label') || element?.textContent.trim();
+        }).join('|'),
+        rolling,
+        direction: total?.dataset.direction
+      };
+    })()\`);
+    check('Upload telemetry reflects queue and session activity', telemetryUpdate.values === '4|1|2|1|7|2|2 kB/s|00:03');
+    check('Changing integer telemetry rolls vertically', telemetryUpdate.rolling === 2 && telemetryUpdate.direction === 'up');
+    await new Promise(resolve => setTimeout(resolve, 360));
+    await wc.executeJavaScript('queueJobs = []; _sessionDoneCount = 0; _sessionErrorCount = 0; lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 0, activeJobs: 0, state: "idle" }; updateStatusBar();');
 
     const uploadSidebarBorders = await wc.executeJavaScript('(() => { const items = [...document.querySelectorAll("#upload-view .view-sidebar-item")]; const inactive = items.filter(item => !item.classList.contains("active")); const inactiveBorders = inactive.every(item => { const style = getComputedStyle(item); return style.borderTopWidth === "1px" && style.borderTopStyle === "solid" && !style.borderTopColor.endsWith(", 0)"); }); const active = items.find(item => item.classList.contains("active")); const indicator = document.querySelector("#upload-view .view-sidebar-indicator"); const activeTransparent = active && getComputedStyle(active).backgroundColor === "rgba(0, 0, 0, 0)"; const indicatorVisible = indicator && getComputedStyle(indicator).borderTopWidth === "1px" && !getComputedStyle(indicator).borderTopColor.endsWith(", 0)"); return [items.length, inactiveBorders, activeTransparent, indicatorVisible].join("|"); })()');
     check('Upload sidebar filters keep individual borders and move the active surface to the indicator', uploadSidebarBorders === '5|true|true|true');
@@ -326,8 +361,8 @@ setTimeout(async () => {
     check('Upload sidebar indicator remains visibly in motion while gliding up', uploadIndicatorMovingUp === true);
     await new Promise(resolve => setTimeout(resolve, 170));
 
-    const uploadFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
-    check('Upload view and statusbar fit inside the viewport', uploadFrameFit === true);
+    const uploadFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("upload-view")?.getBoundingClientRect(); return Boolean(view && view.bottom <= window.innerHeight + 1); })()');
+    check('Upload view fits inside the viewport', uploadFrameFit === true);
 
     await captureVisual('01-upload.png');
 
@@ -478,8 +513,8 @@ setTimeout(async () => {
     const accountSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#accounts-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#accounts-view .view-sidebar-hoster-section")?.getBoundingClientRect(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55); })()');
     check('Account sidebar keeps hoster information in its lower area', accountSidebarInformation === true);
 
-    const accountsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
-    check('Accounts view and statusbar fit inside the viewport', accountsFrameFit === true);
+    const accountsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view")?.getBoundingClientRect(); return Boolean(view && view.bottom <= window.innerHeight + 1); })()');
+    check('Accounts view fits inside the viewport', accountsFrameFit === true);
 
     const accountHeaderControlHeights = await wc.executeJavaScript('(() => [document.getElementById("accountsRunHealthCheckBtn"), document.querySelector(".accounts-auto-check"), document.getElementById("addAccountBtn")].map(element => element?.getBoundingClientRect().height || 0))()');
     check('Accounts header actions share one rendered height', accountHeaderControlHeights.every(height => height > 0 && Math.abs(height - accountHeaderControlHeights[0]) <= 0.5));
@@ -865,8 +900,8 @@ setTimeout(async () => {
     const settingsReadingWidth = await wc.executeJavaScript('(() => { const activePage = document.querySelector(".settings-subpage.active"); if (!activePage) return 0; return activePage.getBoundingClientRect().width; })()');
     check('Active settings page keeps a readable content width', settingsReadingWidth > 0 && settingsReadingWidth <= 760);
 
-    const settingsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("settings-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
-    check('Settings view and statusbar fit inside the viewport', settingsFrameFit === true);
+    const settingsFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("settings-view")?.getBoundingClientRect(); return Boolean(view && view.bottom <= window.innerHeight + 1); })()');
+    check('Settings view fits inside the viewport', settingsFrameFit === true);
 
     if (process.env.MHU_SETTINGS_SCREENSHOT) {
       const screenshotPage = process.env.MHU_SETTINGS_SCREENSHOT_PAGE;
@@ -1352,8 +1387,8 @@ setTimeout(async () => {
     historyFixture = [{ timestamp: '2026-08-10T10:00:00.000Z', files: [{ name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] }, { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] }, { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }] }];
     await wc.executeJavaScript('loadHistory().then(() => { window.confirm = window.__historyOriginalConfirm; delete window.__historyOriginalConfirm; })');
 
-    const historyFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view")?.getBoundingClientRect(); const status = document.getElementById("statusbar")?.getBoundingClientRect(); return Boolean(view && status && status.height > 0 && view.bottom <= status.top + 1 && status.bottom <= window.innerHeight + 1); })()');
-    check('History view and statusbar fit inside the viewport', historyFrameFit === true);
+    const historyFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view")?.getBoundingClientRect(); return Boolean(view && view.bottom <= window.innerHeight + 1); })()');
+    check('History view fits inside the viewport', historyFrameFit === true);
 
     await captureVisual('04-history.png');
 
@@ -1491,7 +1526,7 @@ setTimeout(async () => {
       const close = document.getElementById('updateCloseBtn');
       const install = document.getElementById('installUpdateBtn');
       const initialFocus = document.activeElement?.id;
-      const backgroundInert = document.querySelector('.app-header')?.inert === true && document.querySelector('.view.active')?.inert === true && document.getElementById('statusbar')?.inert === true;
+      const backgroundInert = document.querySelector('.app-header')?.inert === true && document.querySelector('.view.active')?.inert === true;
       install.focus();
       install.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
       const forwardFocus = document.activeElement?.id;
@@ -1516,8 +1551,8 @@ setTimeout(async () => {
     const updateHeaderHint = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.textContent?.trim(), button?.getAttribute("aria-label"), button?.dataset.tooltip].join("|"); })()');
     check('Available update gives the header action a matching hint', updateHeaderHint === 'Update verfügbar|Update v9.9.9 verfügbar. Klicken zum Installieren.|Update v9.9.9 verfügbar. Klicken zum Installieren.');
 
-    const updateDialogDismissed = await wc.executeJavaScript('document.getElementById("dismissUpdateBtn")?.click(); (() => { const overlay = document.getElementById("updateBanner"); return [overlay?.style.display, overlay?.getAttribute("aria-hidden"), document.activeElement?.id, document.querySelector(".app-header")?.inert, document.querySelector(".view.active")?.inert, document.getElementById("statusbar")?.inert].join("|"); })()');
-    check('Update dialog closes and restores focus and background', updateDialogDismissed === 'none|true|headerUpdateBtn|false|false|false');
+    const updateDialogDismissed = await wc.executeJavaScript('document.getElementById("dismissUpdateBtn")?.click(); (() => { const overlay = document.getElementById("updateBanner"); return [overlay?.style.display, overlay?.getAttribute("aria-hidden"), document.activeElement?.id, document.querySelector(".app-header")?.inert, document.querySelector(".view.active")?.inert].join("|"); })()');
+    check('Update dialog closes and restores focus and background', updateDialogDismissed === 'none|true|headerUpdateBtn|false|false');
 
     const busyUpdateState = await wc.executeJavaScript(\`(() => {
       showUpdateBanner({ remoteVersion: '9.9.9' });

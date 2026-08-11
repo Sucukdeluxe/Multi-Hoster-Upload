@@ -54,6 +54,10 @@
     </div>
     <div class="header-spacer" aria-hidden="true"></div>
     <div class="header-cluster header-utilities">
+      <div class="upload-speed-sparkline" id="uploadSpeedSparkline" title="Aktuelle Upload-Geschwindigkeit" aria-label="Aktuelle Upload-Geschwindigkeit">
+        <canvas id="uploadSpeedCanvas" width="232" height="44" aria-hidden="true"></canvas>
+        <strong id="uploadSpeedValue">0 B/s</strong>
+      </div>
       <button class="header-update-button" id="headerUpdateBtn" title="Nach Aktualisierungen suchen" aria-label="Nach Aktualisierungen suchen" data-tooltip="Nach Aktualisierungen suchen" hidden>
         <svg class="header-action-icon" aria-hidden="true"><use href="#icon-download"></use></svg>
         <span class="header-update-label">Update</span>
@@ -195,15 +199,26 @@
           <span class="view-sidebar-badge" id="uploadSidebarErrorCount">0</span>
         </button>
       </nav>
-      <div class="view-sidebar-section">
-        <span class="view-sidebar-section-label">Verfügbarkeit</span>
-        <div class="view-sidebar-summary">
-          <span>Bereite Accounts</span>
-          <strong id="uploadSidebarAccountsCount">0</strong>
+      <div class="upload-sidebar-lower">
+        <div class="view-sidebar-section upload-availability" id="uploadAvailability">
+          <span class="view-sidebar-section-label">Verfügbarkeit</span>
+          <div class="view-sidebar-summary">
+            <span>Bereite Accounts</span>
+            <strong id="uploadSidebarAccountsCount">0</strong>
+          </div>
+          <div class="view-sidebar-summary view-sidebar-summary-block hoster-summary" id="hosterSummary">Keine Upload-Ziele ausgewählt</div>
         </div>
-        <div class="view-sidebar-summary view-sidebar-summary-block hoster-summary" id="hosterSummary">Keine Upload-Ziele ausgewählt</div>
+        <div class="upload-telemetry" id="uploadTelemetry" aria-label="Upload-Statistik">
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Gesamt</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryTotal" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbindungen</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryConnections" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibend</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRemaining" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Läuft</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRunning" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fertig</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryCompleted" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fehler</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryFailed" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Geschwindigkeit</span><strong class="upload-telemetry-value" id="uploadTelemetrySpeed" aria-label="0 B/s">0 B/s</strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">ETA</span><strong class="upload-telemetry-value" id="uploadTelemetryEta" aria-label="--:--">--:--</strong></div>
+        </div>
       </div>
-      <div class="view-sidebar-footnote">Dateien ablegen, Ziele wählen und Uploads zentral steuern.</div>
     </aside>
     <main class="view-main upload-main">
       <div class="upload-toolbar">
@@ -604,28 +619,6 @@
     <div class="ctx-item" data-action="recent-delete">Entfernen</div>
   </div>
 
-  <div class="statusbar" id="statusbar">
-    <span class="sb-state" id="sbState">Bereit</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-speed" id="sbSpeed">0 kB/s</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-total" id="sbTotal">0 B</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-eta" id="sbEta">ETA --:--</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-connections" id="sbConnections">Verbindungen 0</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-queue-count" id="sbQueueCount">Gesamt 0</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-remaining-count" id="sbRemainingCount">Verbleibend 0</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-progress-count" id="sbInProgressCount">Läuft 0</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-done-count" id="sbDoneCount">Fertig 0</span>
-    <span class="sb-separator">|</span>
-    <span class="sb-error-count" id="sbErrorCount">Fehler 0</span>
-  </div>
-
   <div class="copy-toast" id="copyToast"></div>
 
   <div class="shutdown-overlay" id="shutdownOverlay" style="display:none">
@@ -667,6 +660,7 @@
   <script src="../lib/coalesced-set.js"></script>
   <script src="../lib/throttle-timer.js"></script>
   <script src="../lib/serialized-runner.js"></script>
+  <script src="../lib/speed-history.js"></script>
   <script src="account-submit.js"></script>
   <script src="account-status.js"></script>
   <script src="i18n.js"></script>

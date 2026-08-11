@@ -274,6 +274,8 @@ let settingsBaseline = '';
 let settingsDirty = false;
 let settingsSaving = false;
 let lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: 0, elapsed: 0, activeJobs: 0 };
+const uploadSpeedState = { display: 0, history: [] };
+let uploadSpeedTimer = null;
 const AUTO_CHECK_PREF_KEY = 'autoHealthCheckBeforeUpload';
 const QUEUE_COL_WIDTHS_KEY = 'queueColumnWidthsPx';
 const STARTABLE_QUEUE_STATUSES = new Set(['preview', 'queued', 'error', 'aborted', 'skipped']);
@@ -369,6 +371,7 @@ async function init() {
   renderAccounts();
   setupListeners();
   setupDragDrop();
+  initUploadSpeedSparkline();
   restoreQueueColumnWidths();
   loadHistory();
   _refreshSessionFailedSnapshot();
@@ -541,6 +544,7 @@ function _isHistoryTabActive() {
     if (nextView) nextView.classList.add('active');
     activeTab = tab;
     syncTabIndicator(tab);
+    syncUploadSpeedSparklineVisibility(tab.dataset.view);
     const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation > .settings-nav-button.active');
     _syncSidebarIndicator(activeSidebarButton, true);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
@@ -3596,6 +3600,133 @@ function updateHistorySidebarSummary() {
   if (retention && select) retention.textContent = labels[select.value] || labels.all;
 }
 
+function _setUploadTelemetryText(id, value) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  const text = String(value);
+  element.textContent = text;
+  element.setAttribute('aria-label', text);
+}
+
+function _setRollingUploadMetric(id, value) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  const numericValue = Number(value) || 0;
+  const nextText = numericValue.toLocaleString(getUiLocale());
+  const previousValue = Number(element.dataset.numericValue) || 0;
+  if (previousValue === numericValue) {
+    element.setAttribute('aria-label', nextText);
+    return;
+  }
+
+  const direction = numericValue > previousValue ? 'up' : 'down';
+  const previousText = element.getAttribute('aria-label') || previousValue.toLocaleString(getUiLocale());
+  const outgoing = document.createElement('span');
+  const incoming = document.createElement('span');
+  outgoing.textContent = previousText;
+  incoming.textContent = nextText;
+  outgoing.className = 'upload-rolling-outgoing';
+  incoming.className = 'upload-rolling-incoming';
+  element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
+  element.dataset.numericValue = String(numericValue);
+  element.dataset.direction = direction;
+  element.setAttribute('aria-label', nextText);
+  element.replaceChildren(outgoing, incoming);
+
+  const distance = direction === 'up' ? -1 : 1;
+  const options = { duration: 320, easing: 'cubic-bezier(.2, .8, .2, 1)', fill: 'forwards' };
+  const outgoingAnimation = outgoing.animate([
+    { transform: 'translateY(0)', opacity: 1 },
+    { transform: `translateY(${distance * 100}%)`, opacity: 0 }
+  ], options);
+  const incomingAnimation = incoming.animate([
+    { transform: `translateY(${-distance * 100}%)`, opacity: 0 },
+    { transform: 'translateY(0)', opacity: 1 }
+  ], options);
+  Promise.allSettled([outgoingAnimation.finished, incomingAnimation.finished]).then(() => {
+    if (!incoming.isConnected || incoming.parentElement !== element) return;
+    const settled = document.createElement('span');
+    settled.textContent = nextText;
+    element.replaceChildren(settled);
+    element.dataset.direction = 'none';
+  });
+}
+
+function formatUploadSpeed(kbs) {
+  return !kbs || kbs <= 0 ? '0 B/s' : formatSpeed(kbs);
+}
+
+function syncUploadSpeedSparklineVisibility(view) {
+  const widget = document.getElementById('uploadSpeedSparkline');
+  if (!widget) return;
+  const activeView = view || document.querySelector('.tab.active')?.dataset.view;
+  widget.classList.toggle('is-hidden', activeView !== 'upload');
+}
+
+function drawUploadSpeedSparkline() {
+  const canvas = document.getElementById('uploadSpeedCanvas');
+  if (!canvas) return;
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (width <= 0 || height <= 0) return;
+  const scale = Math.max(1, window.devicePixelRatio || 1);
+  const pixelWidth = Math.round(width * scale);
+  const pixelHeight = Math.round(height * scale);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  const context = canvas.getContext('2d');
+  context.setTransform(scale, 0, 0, scale, 0, 0);
+  context.clearRect(0, 0, width, height);
+  const values = uploadSpeedState.history;
+  if (values.length < 2) return;
+  const maximum = Math.max(1, ...values);
+  const step = width / Math.max(1, values.length - 1);
+  const y = value => height - 2 - (value / maximum) * (height - 4);
+  context.beginPath();
+  values.forEach((value, index) => {
+    const x = index * step;
+    if (index === 0) context.moveTo(x, y(value));
+    else context.lineTo(x, y(value));
+  });
+  context.lineTo(width, height);
+  context.lineTo(0, height);
+  context.closePath();
+  const fill = context.createLinearGradient(0, 0, 0, height);
+  fill.addColorStop(0, 'rgba(117, 211, 155, .22)');
+  fill.addColorStop(1, 'rgba(117, 211, 155, 0)');
+  context.fillStyle = fill;
+  context.fill();
+  context.beginPath();
+  values.forEach((value, index) => {
+    const x = index * step;
+    if (index === 0) context.moveTo(x, y(value));
+    else context.lineTo(x, y(value));
+  });
+  context.strokeStyle = window.getComputedStyle(document.documentElement).getPropertyValue('--success').trim() || '#75d39b';
+  context.lineWidth = 1.5;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.stroke();
+}
+
+function updateUploadSpeedSparkline() {
+  const speedKbs = Math.max(0, Number(lastUploadStats.globalSpeedKbs) || 0);
+  window.SpeedHistory.updateSpeedHistory(uploadSpeedState, speedKbs * 1024);
+  _setUploadTelemetryText('uploadSpeedValue', formatUploadSpeed(speedKbs));
+  drawUploadSpeedSparkline();
+}
+
+function initUploadSpeedSparkline() {
+  if (uploadSpeedTimer !== null) return;
+  syncUploadSpeedSparklineVisibility();
+  updateUploadSpeedSparkline();
+  uploadSpeedTimer = window.setInterval(updateUploadSpeedSparkline, 250);
+  window.addEventListener('resize', drawUploadSpeedSparkline);
+  window.addEventListener('beforeunload', () => window.clearInterval(uploadSpeedTimer), { once: true });
+}
+
 function updateStatusBar() {
   const stats = _computeQueueStats();
 
@@ -3603,26 +3734,14 @@ function updateStatusBar() {
     ? Math.round(stats.bytesRemaining / (lastUploadStats.globalSpeedKbs * 1024))
     : 0;
 
-  const stateText = lastUploadStats.state === 'uploading'
-    ? 'Upload läuft...'
-    : lastUploadStats.state === 'stopping'
-      ? 'Stoppt nach aktiven Uploads...'
-      : uploading
-        ? 'Upload vorbereitet...'
-        : 'Bereit';
-
-  document.getElementById('sbState').textContent = stateText;
-  document.getElementById('sbSpeed').textContent = formatSpeed(lastUploadStats.globalSpeedKbs || 0);
-  const uploadedSize = _sessionUploadedBytes + stats.inProgressBytes;
-  const totalSize = Math.max(stats.totalSize, _sessionTotalBytes);
-  document.getElementById('sbTotal').textContent = `${formatSize(uploadedSize)} / ${formatSize(totalSize)}`;
-  document.getElementById('sbEta').textContent = `ETA ${etaSeconds > 0 ? formatTime(etaSeconds) : '--:--'}`;
-  document.getElementById('sbConnections').textContent = `Verbindungen ${lastUploadStats.activeJobs || 0}`;
-  document.getElementById('sbQueueCount').textContent = `Gesamt ${stats.total}`;
-  document.getElementById('sbRemainingCount').textContent = `Verbleibend ${stats.remaining}`;
-  document.getElementById('sbInProgressCount').textContent = `Läuft ${stats.inProgress}`;
-  document.getElementById('sbDoneCount').textContent = `Fertig ${_sessionDoneCount}`;
-  document.getElementById('sbErrorCount').textContent = `Fehler ${_sessionErrorCount}`;
+  _setRollingUploadMetric('uploadTelemetryTotal', stats.total);
+  _setRollingUploadMetric('uploadTelemetryConnections', lastUploadStats.activeJobs || 0);
+  _setRollingUploadMetric('uploadTelemetryRemaining', stats.remaining);
+  _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
+  _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
+  _setRollingUploadMetric('uploadTelemetryFailed', _sessionErrorCount);
+  _setUploadTelemetryText('uploadTelemetrySpeed', formatUploadSpeed(lastUploadStats.globalSpeedKbs || 0));
+  _setUploadTelemetryText('uploadTelemetryEta', etaSeconds > 0 ? formatTime(etaSeconds) : '--:--');
   updateUploadSidebarSummary(stats);
 }
 
