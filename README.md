@@ -8,7 +8,7 @@ Multi-Hoster-Upload is a Windows desktop application for sending file batches to
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.4. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.5. Use the release page for the executables and the full English changelog.
 
 ## Features
 
@@ -19,6 +19,8 @@ The latest public release is version 2.1.4. Use the release page for the executa
 - Upload to several supported hosts from the same queue.
 - Filter the workspace by all, active, queued, completed, or failed jobs.
 - Track status, progress, transferred size, speed, and the selected host account.
+- Read total, remaining, running, completed, and failed upload activity from the persistent sidebar telemetry.
+- Follow current upload speed in the sidebar and the synchronized header graph.
 - Reorder selected jobs, start selected jobs, retry finished jobs, or stop active work.
 - Copy completed links individually or together.
 
