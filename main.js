@@ -7,6 +7,7 @@ nativeTheme.themeSource = 'dark';
 const path = require('path');
 const fs = require('fs');
 const ConfigStore = require('./lib/config-store');
+const secretStore = require('./lib/secret-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
 const SourceDeleteJournal = require('./lib/source-delete-journal');
@@ -23,6 +24,7 @@ const { createOnlineBackup, downloadOnlineBackup, uploadOnlineBackup } = require
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
 const { createSettingsImportGate } = require('./lib/settings-import-gate');
 const FolderMonitor = require('./lib/folder-monitor');
+const { walkFolderAsync } = require('./lib/file-discovery');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
@@ -1697,6 +1699,8 @@ ipcMain.handle('get-config', () => {
   return configStore.load();
 });
 
+ipcMain.handle('secret-store:status', () => ({ status: secretStore.getAvailabilityStatus() }));
+
 ipcMain.handle('save-config', async (_event, config) => {
   assertConfigWriteAllowed();
   await configStore.save(config);
@@ -1942,7 +1946,7 @@ ipcMain.handle('select-folder', async () => {
   await rememberUploadBrowseDirectory(result.filePaths[0], true);
 
   const files = [];
-  for (const folder of result.filePaths) await walkFolderAsync(folder, files);
+  for (const folder of result.filePaths) files.push(...await walkFolderAsync(folder));
   return files.length > 0 ? files.map(f => f.path) : null;
 });
 
@@ -1955,36 +1959,12 @@ ipcMain.handle('select-folder-with-sizes', async () => {
   await rememberUploadBrowseDirectory(result.filePaths[0], true);
 
   const files = [];
-  for (const folder of result.filePaths) await walkFolderAsync(folder, files);
+  for (const folder of result.filePaths) files.push(...await walkFolderAsync(folder));
   return files.length > 0 ? files : null;
 });
 
-async function walkFolderAsync(rootDir, outFiles) {
-  const fsp = fs.promises;
-  const stack = [rootDir];
-  let scanned = 0;
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    let entries;
-    try { entries = await fsp.readdir(dir, { withFileTypes: true }); }
-    catch { continue; }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) stack.push(full);
-      else if (entry.isFile()) {
-        let size = 0;
-        try { size = (await fsp.stat(full)).size; } catch {}
-        outFiles.push({ path: full, name: entry.name, size });
-      }
-    }
-    if ((++scanned % 8) === 0) await new Promise(setImmediate);
-  }
-}
-
 ipcMain.handle('resolve-folder-files', async (_event, folderPath) => {
-  const files = [];
-  await walkFolderAsync(folderPath, files);
-  return files;
+  return walkFolderAsync(folderPath);
 });
 
 ipcMain.handle('get-file-sizes', async (_event, paths) => {
@@ -2024,7 +2004,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // Identify jobs that were skipped (no account/credentials)
   const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
   const skippedJobs = jobs.filter(j => j.id && !taskJobIds.has(j.id)).map(j => ({
-    jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster'
+    jobId: j.id,
+    file: j.file,
+    fileName: j.fileName || path.basename(j.file || ''),
+    size: Number(j.bytesTotal) || 0,
+    hoster: j.hoster,
+    reason: 'Kein gültiger Account für diesen Hoster'
   }));
   if (skippedJobs.length > 0) {
     debugLog(`  skipped ${skippedJobs.length} jobs: ${skippedJobs.map(s => s.hoster).join(', ')}`);
@@ -2032,7 +2017,22 @@ ipcMain.handle('start-upload', async (_event, payload) => {
 
   debugLog(`  tasks built: ${tasks.length}`);
 
-  if (tasks.length === 0) return { error: 'Keine gültigen Zugangsdaten für die gewählten Hoster.', skippedJobs };
+  if (tasks.length === 0) {
+    const skippedSummary = stats.mergeSkippedIntoSummary({
+      id: `skipped-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      total: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      files: []
+    }, skippedJobs);
+    try { await configStore.appendHistory(skippedSummary); } catch (error) {
+      debugLog(`appendHistory for skipped jobs failed: ${error.message}`);
+    }
+    setImmediate(() => safeSend('upload-batch-done', skippedSummary));
+    return { started: true, taskCount: 0, skippedJobs };
+  }
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2210,6 +2210,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // create a fresh manager which the trailing `uploadManager = null` then
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
+    summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
     logMemorySnapshot('batch-done');
@@ -2625,7 +2626,11 @@ function readBackupFile(filePath) {
 }
 
 // --- Backup export / import ---
-ipcMain.handle('export-backup', async () => {
+ipcMain.handle('export-backup', async (_event, options = {}) => {
+  const password = typeof options?.password === 'string' ? options.password : undefined;
+  if (password !== undefined && (password.length < 8 || password.length > 1024)) {
+    throw new Error('Das Backup-Passwort muss zwischen 8 und 1024 Zeichen lang sein');
+  }
   const _bd = new Date();
   const _bdate = `${String(_bd.getDate()).padStart(2, '0')}-${String(_bd.getMonth() + 1).padStart(2, '0')}-${_bd.getFullYear()}`;
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
@@ -2640,9 +2645,10 @@ ipcMain.handle('export-backup', async () => {
   await waitForConfigStoreWrites();
   const config = createPortableSettingsSnapshot(configStore.load());
   if (filePath.toLowerCase().endsWith('.json')) {
+    if (typeof password === 'string') throw new Error('Passwortgeschützte Backups müssen als .mhu gespeichert werden');
     fs.writeFileSync(filePath, JSON.stringify(config, null, 2), 'utf-8');
   } else {
-    const encrypted = backupCrypto.encrypt(config);
+    const encrypted = backupCrypto.encrypt(config, password);
     fs.writeFileSync(filePath, encrypted);
   }
   return { ok: true, path: filePath };
@@ -2977,8 +2983,24 @@ function startFolderMonitor(settings) {
     folderMonitor.on('error', (err) => {
       debugLog(`folder-monitor error: ${err.message}`);
     });
-    folderMonitor.start(settings);
+    folderMonitor.on('initial-scan-complete', async () => {
+      try {
+        const latest = configStore.load();
+        const current = latest.globalSettings?.folderMonitor;
+        if (!current?.includeExisting || path.resolve(current.folderPath || '') !== path.resolve(settings.folderPath || '')) return;
+        await configStore.save({
+          globalSettings: {
+            ...latest.globalSettings,
+            folderMonitor: { ...current, includeExisting: false }
+          }
+        });
+      } catch (error) {
+        debugLog(`folder-monitor initial scan state failed: ${error.message}`);
+      }
+    });
+    const result = folderMonitor.start(settings);
     debugLog(`folder-monitor started: ${settings.folderPath}`);
+    return result;
   } catch (err) {
     debugLog(`folder-monitor start failed: ${err.message}`);
     throw err;
@@ -2986,8 +3008,8 @@ function startFolderMonitor(settings) {
 }
 
 ipcMain.handle('folder-monitor:start', (_event, settings) => {
-  startFolderMonitor(settings);
-  return { ok: true };
+  const result = startFolderMonitor(settings);
+  return { ok: true, includesExisting: result?.includesExisting === true };
 });
 
 ipcMain.handle('folder-monitor:stop', () => {
@@ -3180,11 +3202,11 @@ ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
     enabled: !!(incoming && incoming.enabled),
     port: (incoming && Number(incoming.port)) || cur.port || 9110,
     bindMode: (incoming && incoming.bindMode === 'network') ? 'network' : 'local',
-    publicHost: (incoming && incoming.publicHost != null) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
+    publicHost: (incoming && incoming.publicHost !== null && incoming.publicHost !== undefined) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
     allowlist: (incoming && Array.isArray(incoming.allowlist))
       ? incoming.allowlist.map((x) => String(x).trim()).filter(Boolean)
       : _diagAllowlist(cur),
-    label: (incoming && incoming.label != null) ? String(incoming.label) : cur.label
+    label: (incoming && incoming.label !== null && incoming.label !== undefined) ? String(incoming.label) : cur.label
   };
   next.bindAddress = _diagBindHost(next);
   const gs = { ...cfg.globalSettings, diagnostics: next };

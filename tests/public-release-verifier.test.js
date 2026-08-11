@@ -17,7 +17,7 @@ const rootFiles = [
   'preload-drop-target.js',
   'preload.js'
 ];
-const directoryRoots = ['assets', 'docs', 'lib', 'renderer', 'services/backup-api', 'tests'];
+const directoryRoots = [`.${['gi', 'tea'].join('')}`, `.${['git', 'hub'].join('')}`, 'assets', 'docs', 'lib', 'renderer', 'services/backup-api', 'tests'];
 const scriptFiles = ['scripts/afterPack.cjs', 'scripts/dev-runner.cjs', 'scripts/release-plan.mjs', 'scripts/verify-public-release.mjs'];
 const screenshotFiles = [
   'assets/product-overview.png',

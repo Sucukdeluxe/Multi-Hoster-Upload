@@ -4,7 +4,8 @@ const {
   summarizePerHoster,
   classifyErrorCategory,
   summarizeBatchErrors,
-  isRetryableCategory
+  isRetryableCategory,
+  mergeSkippedIntoSummary
 } = require('../lib/stats');
 
 function makeBatch(timestamp, results) {
@@ -64,6 +65,17 @@ test('summarizePerHoster handles empty / malformed input', () => {
   assert.deepStrictEqual(summarizePerHoster([{ id: 'x', files: null }]), {});
 });
 
+test('summarizePerHoster reports skipped uploads without lowering the host success rate', () => {
+  const history = [makeBatch(1, [
+    { hoster: 'voe.sx', status: 'done' },
+    { hoster: 'voe.sx', status: 'error', error: 'x' },
+    { hoster: 'voe.sx', status: 'skipped', error: 'Datei zu groß' }
+  ])];
+  const summary = summarizePerHoster(history)['voe.sx'];
+  assert.deepStrictEqual({ ok: summary.ok, fail: summary.fail, skipped: summary.skipped, total: summary.total }, { ok: 1, fail: 1, skipped: 1, total: 3 });
+  assert.strictEqual(summary.rate, 0.5);
+});
+
 test('classifyErrorCategory: file-rejected phrases', () => {
   assert.strictEqual(classifyErrorCategory('Byse lehnte Datei ab: Not video file format'), 'file-rejected');
   assert.strictEqual(classifyErrorCategory('Duplicate file already exists'), 'file-rejected');
@@ -120,6 +132,41 @@ test('summarizeBatchErrors buckets results by category', () => {
   assert.strictEqual(buckets['network'].length, 1);
   assert.strictEqual(buckets['network'][0].hoster, 'doodstream.com');
   assert.strictEqual(buckets['account-error'].length, 0);
+});
+
+test('summarizeBatchErrors excludes skipped results from error and retry buckets', () => {
+  const buckets = summarizeBatchErrors({
+    files: [{ name: 'a.mp4', results: [{ hoster: 'voe.sx', status: 'skipped', error: 'Kein gültiger Account' }] }]
+  });
+  assert.strictEqual(Object.values(buckets).flat().length, 0);
+});
+
+test('mergeSkippedIntoSummary adds skipped jobs to totals and history files', () => {
+  const summary = {
+    id: 'batch-1',
+    timestamp: '2026-08-11T12:00:00.000Z',
+    total: 1,
+    succeeded: 1,
+    failed: 0,
+    skipped: 0,
+    files: [{ name: 'ok.mp4', size: 5, results: [{ jobId: 'ok', hoster: 'voe.sx', status: 'done' }] }]
+  };
+  const merged = mergeSkippedIntoSummary(summary, [{
+    jobId: 'skip',
+    file: 'C:\\incoming\\skip.mp4',
+    fileName: 'skip.mp4',
+    hoster: 'byse.sx',
+    reason: 'Kein gültiger Account'
+  }]);
+  assert.strictEqual(merged.total, 2);
+  assert.strictEqual(merged.succeeded, 1);
+  assert.strictEqual(merged.failed, 0);
+  assert.strictEqual(merged.skipped, 1);
+  assert.deepStrictEqual(merged.files[1], {
+    name: 'skip.mp4',
+    size: 0,
+    results: [{ jobId: 'skip', hoster: 'byse.sx', status: 'skipped', error: 'Kein gültiger Account' }]
+  });
 });
 
 test('isRetryableCategory: only transient + network + unknown retry-worthy', () => {

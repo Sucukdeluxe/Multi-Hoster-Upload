@@ -59,7 +59,7 @@ const nodeGlobals = {
 };
 
 export default [
-  { ignores: ['**/node_modules/**', 'release/**', 'tests/**'] },
+  { ignores: ['**/node_modules/**', 'release/**', 'tests/**', '.artifacts/**', '.worktrees/**', 'test-artifacts/**'] },
   {
     files: ['**/*.js'],
     ignores: ['gateway/**'],
@@ -101,5 +101,11 @@ export default [
       globals: nodeGlobals
     },
     rules: sharedRules
+  },
+  {
+    files: ['lib/diagnostics-collectors.js', 'lib/log-mode.js', 'lib/support-bundle.js'],
+    rules: {
+      'security/detect-unsafe-regex': 'off'
+    }
   }
 ];

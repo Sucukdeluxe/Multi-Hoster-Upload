@@ -7,6 +7,7 @@ const packageJson = require('../package.json');
 test('packages every Electron preload referenced by the main process', () => {
   assert.ok(packageJson.build.files.includes('preload.js'));
   assert.ok(packageJson.build.files.includes('preload-drop-target.js'));
+  assert.equal(packageJson.build.win.signAndEditExecutable, false);
 });
 
 test('afterPack brands the executable metadata shown by Windows', async () => {

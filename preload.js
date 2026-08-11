@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('api', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),
+  getSecretStoreStatus: () => ipcRenderer.invoke('secret-store:status'),
   getHistory: () => ipcRenderer.invoke('get-history'),
   clearHistory: () => ipcRenderer.invoke('clear-history'),
   pruneHistory: (retention, opts) => ipcRenderer.invoke('prune-history', { retention, dryRun: !!(opts && opts.dryRun) }),
@@ -75,7 +76,7 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   // Backup
-  exportBackup: () => ipcRenderer.invoke('export-backup'),
+  exportBackup: (options) => ipcRenderer.invoke('export-backup', options),
   importBackup: (legacyPassword) => ipcRenderer.invoke('import-backup', legacyPassword),
   createOnlineBackup: () => ipcRenderer.invoke('online-backup:create'),
   restoreOnlineBackup: (key) => ipcRenderer.invoke('online-backup:restore', key),

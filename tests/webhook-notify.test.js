@@ -78,8 +78,8 @@ test('formatDurationShort formats h/m/s tiers', () => {
 
 test('summarizePerHosterFromBatch counts ok/fail per hoster', () => {
   const s = summarizePerHosterFromBatch(SAMPLE_SUMMARY);
-  assert.deepStrictEqual(s['voe.sx'], { ok: 2, fail: 0 });
-  assert.deepStrictEqual(s['byse.sx'], { ok: 1, fail: 1 });
+  assert.deepStrictEqual(s['voe.sx'], { ok: 2, fail: 0, skipped: 0 });
+  assert.deepStrictEqual(s['byse.sx'], { ok: 1, fail: 1, skipped: 0 });
 });
 
 test('summarizePerHosterFromBatch handles malformed input', () => {
@@ -102,6 +102,26 @@ test('buildWebhookRequest produces Discord content body for discord URLs', () =>
   assert.match(body.content, /voe\.sx: 2\/2/);
 });
 
+test('webhooks report skipped uploads separately from failures', () => {
+  const summary = {
+    total: 2,
+    succeeded: 1,
+    failed: 0,
+    skipped: 1,
+    files: [{ name: 'a.mkv', results: [
+      { hoster: 'voe.sx', status: 'done' },
+      { hoster: 'voe.sx', status: 'skipped', error: 'Datei zu groß' }
+    ] }]
+  };
+  const discord = JSON.parse(buildWebhookRequest('https://discord.com/api/webhooks/1/x', summary, { language: 'de' }).body);
+  assert.match(discord.content, /1 übersprungen/);
+  assert.doesNotMatch(discord.content, /1 Fehler/);
+  assert.deepStrictEqual(summarizePerHosterFromBatch(summary)['voe.sx'], { ok: 1, fail: 0, skipped: 1 });
+
+  const generic = JSON.parse(buildWebhookRequest('https://example.com/hook', summary, {}).body);
+  assert.equal(generic.skipped, 1);
+});
+
 test('buildWebhookRequest localizes Discord content from the selected language', () => {
   const req = buildWebhookRequest('https://discord.com/api/webhooks/1/x', SAMPLE_SUMMARY, { language: 'de' });
   const body = JSON.parse(req.body);
@@ -119,7 +139,7 @@ test('buildWebhookRequest produces raw JSON payload for generic URLs', () => {
   assert.strictEqual(body.failed, 2);
   assert.strictEqual(body.durationSec, 60);
   assert.strictEqual(body.version, '3.3.59');
-  assert.deepStrictEqual(body.perHoster['byse.sx'], { ok: 1, fail: 1 });
+  assert.deepStrictEqual(body.perHoster['byse.sx'], { ok: 1, fail: 1, skipped: 0 });
 });
 
 test('resolveDiscordMention: @here / @everyone use parse=everyone', () => {
