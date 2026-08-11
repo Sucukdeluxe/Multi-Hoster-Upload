@@ -3652,8 +3652,14 @@ function _setRollingUploadMetric(id, value) {
   });
 }
 
-function formatUploadSpeed(kbs) {
+function getUploadSpeedText(kbs = lastUploadStats.globalSpeedKbs) {
   return !kbs || kbs <= 0 ? '0 B/s' : formatSpeed(kbs);
+}
+
+function updateUploadSpeedDisplays() {
+  const text = getUploadSpeedText();
+  _setUploadTelemetryText('uploadTelemetrySpeed', text);
+  _setUploadTelemetryText('uploadSpeedValue', text);
 }
 
 function syncUploadSpeedSparklineVisibility(view) {
@@ -3714,7 +3720,7 @@ function drawUploadSpeedSparkline() {
 function updateUploadSpeedSparkline() {
   const speedKbs = Math.max(0, Number(lastUploadStats.globalSpeedKbs) || 0);
   window.SpeedHistory.updateSpeedHistory(uploadSpeedState, speedKbs * 1024);
-  _setUploadTelemetryText('uploadSpeedValue', formatUploadSpeed(speedKbs));
+  updateUploadSpeedDisplays();
   drawUploadSpeedSparkline();
 }
 
@@ -3740,7 +3746,7 @@ function updateStatusBar() {
   _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
   _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
   _setRollingUploadMetric('uploadTelemetryFailed', _sessionErrorCount);
-  _setUploadTelemetryText('uploadTelemetrySpeed', formatUploadSpeed(lastUploadStats.globalSpeedKbs || 0));
+  updateUploadSpeedDisplays();
   _setUploadTelemetryText('uploadTelemetryEta', etaSeconds > 0 ? formatTime(etaSeconds) : '--:--');
   updateUploadSidebarSummary(stats);
 }

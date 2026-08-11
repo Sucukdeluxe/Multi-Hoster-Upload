@@ -315,6 +315,9 @@ setTimeout(async () => {
     const uploadSidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#upload-view > .view-sidebar")?.getBoundingClientRect(); const availability = document.getElementById("uploadAvailability")?.getBoundingClientRect(); const telemetry = document.getElementById("uploadTelemetry")?.getBoundingClientRect(); return Boolean(sidebar && availability && telemetry && availability.bottom <= telemetry.top && telemetry.bottom <= sidebar.bottom + 1 && document.getElementById("uploadSidebarAccountsCount")); })()');
     check('Upload sidebar stacks availability above bottom telemetry', uploadSidebarInformation === true);
 
+    const lowerSidebarTypography = await wc.executeJavaScript('(() => { const availabilityLabel = document.querySelector("#uploadAvailability .view-sidebar-section-label"); const availabilityText = document.querySelector("#uploadAvailability .view-sidebar-summary"); const telemetryLabel = document.querySelector("#uploadTelemetry .upload-telemetry-label"); const telemetryValue = document.querySelector("#uploadTelemetry .upload-telemetry-value"); return [availabilityLabel, availabilityText, telemetryLabel, telemetryValue].map(element => parseFloat(getComputedStyle(element).fontSize)); })()');
+    check('Availability and telemetry use the larger readable type scale', lowerSidebarTypography[0] >= 11 && lowerSidebarTypography[1] >= 12 && lowerSidebarTypography[2] >= 12 && lowerSidebarTypography[3] >= 12);
+
     const telemetryUpdate = await wc.executeJavaScript(\`(() => {
       queueJobs = [
         { id: 'telemetry-running', status: 'uploading', bytesTotal: 4096, bytesUploaded: 1024 },
@@ -334,11 +337,15 @@ setTimeout(async () => {
           return element?.getAttribute('aria-label') || element?.textContent.trim();
         }).join('|'),
         rolling,
-        direction: total?.dataset.direction
+        direction: total?.dataset.direction,
+        speedPair: [document.getElementById('uploadTelemetrySpeed')?.textContent, document.getElementById('uploadSpeedValue')?.textContent].join('|')
       };
     })()\`);
     check('Upload telemetry reflects queue and session activity', telemetryUpdate.values === '4|1|2|1|7|2|2 kB/s|00:03');
     check('Changing integer telemetry rolls vertically', telemetryUpdate.rolling === 2 && telemetryUpdate.direction === 'up');
+    check('Header and sidebar speed update synchronously from the same live sample', telemetryUpdate.speedPair === '2 kB/s|2 kB/s');
+    const secondSynchronizedSpeed = await wc.executeJavaScript('lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 1536 }; updateStatusBar(); [document.getElementById("uploadTelemetrySpeed")?.textContent, document.getElementById("uploadSpeedValue")?.textContent].join("|")');
+    check('Header and sidebar speed stay synchronized across later samples', secondSynchronizedSpeed === '1.5 MB/s|1.5 MB/s');
     await new Promise(resolve => setTimeout(resolve, 360));
     await wc.executeJavaScript('queueJobs = []; _sessionDoneCount = 0; _sessionErrorCount = 0; lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 0, activeJobs: 0, state: "idle" }; updateStatusBar();');
 
