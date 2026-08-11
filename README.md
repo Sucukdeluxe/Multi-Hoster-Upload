@@ -8,7 +8,7 @@ Multi-Hoster-Upload is a Windows desktop application for sending file batches to
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.6. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.7. Use the release page for the executables and the full English changelog.
 
 ## Features
 
@@ -116,6 +116,12 @@ Queue state is saved while you work and again during a normal application close.
 
 Successful jobs can remain visible or be removed automatically. History is stored separately, so removing a completed row from the active queue does not remove its history entry.
 
+### Permanent source cleanup
+
+**Settings > Uploads** can permanently delete a source file after every destination selected for that file has completed successfully. This option is disabled by default and requires an explicit warning confirmation before it can be enabled.
+
+Cleanup remains blocked while any required destination is unfinished, failed, canceled, skipped, or missing valid confirmation. The application records the original file identity, preserves successful destinations across retries and restarts, waits for active file handles to close, and refuses deletion if the source was replaced or modified. Every cleanup decision and result is written to the upload log. Deletion bypasses the Recycle Bin and cannot be undone.
+
 ## Folder monitoring
 
 ![Automation and folder monitoring settings](docs/screenshots/automation-settings.png)
@@ -176,7 +182,7 @@ Treat the generated key like a password: anyone with it can restore the encrypte
 
 - Uploads and credential checks communicate with the host you selected.
 - Update checks retrieve release metadata, and the dialog loads the matching changelog from GitHub when available.
-- Webhook notifications are sent only when you configure a webhook URL. Discord endpoints receive a formatted summary; other endpoints receive JSON.
+- Webhook notifications are sent only when you configure a webhook URL. Discord endpoints receive a formatted summary in the selected interface language; other endpoints receive JSON.
 - Online backup traffic occurs only when you create or restore an online backup.
 
 ## Updates and changelog

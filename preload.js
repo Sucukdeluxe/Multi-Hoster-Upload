@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   cancelUpload: () => ipcRenderer.invoke('cancel-upload'),
   cancelSelectedJobs: (jobIds) => ipcRenderer.invoke('cancel-selected-jobs', jobIds),
   addJobsToBatch: (payload) => ipcRenderer.invoke('add-jobs-to-batch', payload),
+  completeUploadFinalization: (payload) => ipcRenderer.invoke('complete-upload-finalization', payload),
   finishAfterActive: () => ipcRenderer.invoke('finish-after-active'),
   runHealthCheck: (payload) => ipcRenderer.invoke('run-health-check', payload),
   validateCredentials: (payload) => ipcRenderer.invoke('validate-credentials', payload),

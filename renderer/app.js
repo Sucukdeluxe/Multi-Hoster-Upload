@@ -425,8 +425,19 @@ async function init() {
       for (let i = 0; i < batch.length; i++) handleProgress(batch[i]);
     });
   }
-  window.api.onUploadBatchDone((data) => {
-    handleBatchDone(data);
+  window.api.onUploadBatchDone(async (data) => {
+    const summary = data && data.summary ? data.summary : data;
+    handleBatchDone(summary);
+    if (data && data.finalizationId && window.api.completeUploadFinalization) {
+      if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
+      queuePersistThrottle.cancel();
+      await window.api.completeUploadFinalization({
+        finalizationId: data.finalizationId,
+        pendingQueue: queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
+          ? buildPersistedQueueState()
+          : null
+      });
+    }
   });
   window.api.onUploadStats((data) => {
     handleStats(data);
@@ -491,11 +502,16 @@ async function init() {
           // Inject new preview jobs into the running batch
           const newJobs = queueJobs.filter(j => j.status === 'preview' && newPaths.has(j.file));
           if (newJobs.length > 0) {
+            const cleanupPreparation = prepareSourceCleanup(newJobs);
             newJobs.forEach(j => { j.status = 'queued'; });
             renderQueueTable();
             window.api.addJobsToBatch({
-              jobs: newJobs.map(j => ({ id: j.id, file: j.file, fileName: j.fileName, hoster: j.hoster }))
-            }).then(result => { _markSkippedJobs(result); }).catch(() => {});
+              jobs: newJobs.map(serializeUploadJob),
+              sourceCleanupGroups: cleanupPreparation.groups
+            }).then(result => {
+              _markSkippedJobs(result);
+              if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+            }).catch(() => {});
             persistQueueStateSoon(true);
           }
         }
@@ -574,7 +590,6 @@ function _isHistoryTabActive() {
     if (nextView) nextView.classList.add('active');
     activeTab = tab;
     syncTabIndicator(tab);
-    syncUploadSpeedSparklineVisibility(tab.dataset.view);
     const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation > .settings-nav-button.active');
     _syncSidebarIndicator(activeSidebarButton, true);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
@@ -1095,11 +1110,16 @@ function applyHosterSelection() {
     buildQueuePreview(); // creates 'preview' jobs for new files
     const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
     if (newJobs.length > 0) {
+      const cleanupPreparation = prepareSourceCleanup(newJobs);
       newJobs.forEach(j => { j.status = 'queued'; });
       renderQueueTable();
       window.api.addJobsToBatch({
-        jobs: newJobs.map(j => ({ id: j.id, file: j.file, fileName: j.fileName, hoster: j.hoster }))
-      }).then(result => { _markSkippedJobs(result); }).catch(() => {});
+        jobs: newJobs.map(serializeUploadJob),
+        sourceCleanupGroups: cleanupPreparation.groups
+      }).then(result => {
+        _markSkippedJobs(result);
+        if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+      }).catch(() => {});
       persistQueueStateSoon(true);
     }
   }
@@ -1167,6 +1187,10 @@ function restoreQueueStateFromConfig() {
         remaining: 0,
         error: job.error || null,
         result: job.result || null,
+        sourceCleanupToken: job.sourceCleanupToken || null,
+        sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
+        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
+        sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         attempt: 0,
         maxAttempts: job.maxAttempts || 0,
         link: '',
@@ -1239,6 +1263,10 @@ function buildPersistedQueueState() {
         bytesTotal: job.bytesTotal || 0,
         error: isTerminal ? (job.error || null) : null,
         result: isTerminal ? (job.result || null) : null,
+        sourceCleanupToken: job.sourceCleanupToken || null,
+        sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
+        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
+        sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         maxAttempts: job.maxAttempts || 0
       };
     })
@@ -2691,6 +2719,24 @@ function getSelectedJobLinks() {
 }
 
 // --- Upload ---
+function prepareSourceCleanup(jobs) {
+  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [] };
+  return window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
+}
+
+function serializeUploadJob(job) {
+  return {
+    id: job.id,
+    file: job.file,
+    fileName: job.fileName,
+    hoster: job.hoster,
+    sourceCleanupToken: job.sourceCleanupToken || null,
+    sourceCleanupRequiredHosters: job.sourceCleanupRequiredHosters || [],
+    sourceCleanupCompletedHosters: job.sourceCleanupCompletedHosters || [],
+    sourceCleanupFingerprint: job.sourceCleanupFingerprint || null
+  };
+}
+
 async function startUpload(opts) {
   if (uploading) return;
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
@@ -2714,6 +2760,7 @@ async function startUpload(opts) {
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
 
   try {
+    const cleanupPreparation = prepareSourceCleanup(jobsToStart);
     jobsToStart.forEach(j => {
       j.status = 'queued';
       j.error = null;
@@ -2732,14 +2779,13 @@ async function startUpload(opts) {
     const uploadPayload = {
       hosters,
       isAutoRetry: !!(opts && opts._autoRetry),
-      jobs: jobsToStart.map((job) => ({
-        id: job.id,
-        file: job.file,
-        fileName: job.fileName,
-        hoster: job.hoster
-      }))
+      jobs: jobsToStart.map(serializeUploadJob),
+      sourceCleanupGroups: cleanupPreparation.groups
     };
     const result = await window.api.startUpload(uploadPayload);
+    if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
+      window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+    }
     _markSkippedJobs(result);
     persistQueueStateSoon();
 
@@ -2779,6 +2825,7 @@ async function startSelectedUpload(explicitJobs) {
       return;
     }
     {
+      const cleanupPreparation = prepareSourceCleanup(addable);
       addable.forEach(j => {
         j.status = 'queued'; j.error = null; j.result = null;
         j.bytesUploaded = 0; j.speedKbs = 0; j.progress = 0; j.uploadId = null;
@@ -2787,10 +2834,11 @@ async function startSelectedUpload(explicitJobs) {
       let result = null;
       try {
         result = await window.api.addJobsToBatch({
-          jobs: addable.map(j => ({ id: j.id, file: j.file, fileName: j.fileName, hoster: j.hoster }))
+          jobs: addable.map(serializeUploadJob),
+          sourceCleanupGroups: cleanupPreparation.groups
         });
       } catch (err) {
-        showCopyToast(`Jobs konnten nicht hinzugefuegt werden: ${err.message}`);
+        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${err.message}`);
         return;
       }
 
@@ -2803,6 +2851,9 @@ async function startSelectedUpload(explicitJobs) {
         return;
       }
       _markSkippedJobs(result);
+      if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
+        window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+      }
       persistQueueStateSoon();
       const added = Number(result && result.added) || 0;
       // Use ASCII-only toast text here to avoid encoding artifacts on some systems.
@@ -2815,7 +2866,7 @@ async function startSelectedUpload(explicitJobs) {
       if (alreadyInBatch > 0) toastParts.push(`${alreadyInBatch} bereits im Batch`);
       if (skipped > 0) toastParts.push(`${skipped} ohne gueltigen Account`);
       if (result && result.error) {
-        showCopyToast(`Jobs konnten nicht hinzugefuegt werden: ${result.error}`);
+        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${result.error}`);
       } else if (toastParts.length > 0) {
         showCopyToast(`Jobs: ${toastParts.join(', ')}`);
       } else {
@@ -2832,6 +2883,7 @@ async function startSelectedUpload(explicitJobs) {
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
 
   try {
+    const cleanupPreparation = prepareSourceCleanup(jobsToStart);
     jobsToStart.forEach(j => {
       j.status = 'queued';
       j.error = null;
@@ -2847,14 +2899,13 @@ async function startSelectedUpload(explicitJobs) {
 
     const uploadPayload = {
       hosters,
-      jobs: jobsToStart.map((job) => ({
-      id: job.id,
-      file: job.file,
-      fileName: job.fileName,
-      hoster: job.hoster
-    }))
+      jobs: jobsToStart.map(serializeUploadJob),
+      sourceCleanupGroups: cleanupPreparation.groups
   };
     const result = await window.api.startUpload(uploadPayload);
+    if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
+      window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+    }
     _markSkippedJobs(result);
     persistQueueStateSoon();
 
@@ -2972,6 +3023,7 @@ function _handleProgressImpl(data) {
 
   // Track completed uploads so they don't get re-queued after removal
   if (job.status === 'done') {
+    if (window.SourceCleanupPolicy) window.SourceCleanupPolicy.markCompleted(queueJobs, job, 'win32');
     _completedUploadKeys.add(`${job.file}|${job.hoster}`);
   }
 
@@ -3796,13 +3848,6 @@ function updateUploadSpeedDisplays() {
   _setUploadTelemetryText('uploadSpeedValue', text);
 }
 
-function syncUploadSpeedSparklineVisibility(view) {
-  const widget = document.getElementById('uploadSpeedSparkline');
-  if (!widget) return;
-  const activeView = view || document.querySelector('.tab.active')?.dataset.view;
-  widget.classList.toggle('is-hidden', activeView !== 'upload');
-}
-
 function drawUploadSpeedSparkline() {
   const canvas = document.getElementById('uploadSpeedCanvas');
   if (!canvas) return;
@@ -3860,7 +3905,6 @@ function updateUploadSpeedSparkline() {
 
 function initUploadSpeedSparkline() {
   if (uploadSpeedTimer !== null) return;
-  syncUploadSpeedSparklineVisibility();
   updateUploadSpeedSparkline();
   uploadSpeedTimer = window.setInterval(updateUploadSpeedSparkline, 250);
   window.addEventListener('resize', drawUploadSpeedSparkline);
@@ -4185,6 +4229,14 @@ function renderSettings() {
           <span class="settings-option-description">Noch nicht abgeschlossene Uploads werden beim nächsten Programmstart erneut angezeigt.</span>
         </div>
         <input type="checkbox" class="settings-autosave" id="resumeQueueOnLaunchInput" ${globalSettings.resumeQueueOnLaunch === false ? '' : 'checked'}>
+      </div>
+      <div class="settings-section-label">Quelldateien</div>
+      <div class="settings-option source-delete-option">
+        <div class="settings-option-copy">
+          <label for="deleteSourceAfterSuccessfulUploadInput">Quelldatei nach vollständigem Upload dauerhaft löschen</label>
+          <span class="settings-option-description">Löscht die Originaldatei endgültig, sobald alle dafür ausgewählten Hoster erfolgreich abgeschlossen sind. Der Papierkorb wird nicht verwendet.</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="deleteSourceAfterSuccessfulUploadInput" ${globalSettings.deleteSourceAfterSuccessfulUpload ? 'checked' : ''}>
       </div>
       <div class="settings-hoster-pointer"><strong>Einstellungen einzelner Hoster</strong> wie Wiederholungen, Geschwindigkeit, Parallelität, Dateigröße und Logging findest du im <strong>Accounts</strong>-Tab direkt beim jeweiligen Hoster.</div>
   `;
@@ -4715,10 +4767,19 @@ function renderSettings() {
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
-    input.addEventListener(eventName, () => {
+    input.addEventListener(eventName, async () => {
       if (input.id === 'languageInput') {
         setUiLanguage(input.value);
         syncLanguagePicker(input.value);
+      }
+      if (input.id === 'deleteSourceAfterSuccessfulUploadInput' && input.checked) {
+        const confirmed = await showAppConfirm({
+          title: 'Quelldateien dauerhaft löschen?',
+          message: 'Nach einem vollständigen Upload zu allen ausgewählten Hostern wird die Originaldatei ohne Papierkorb endgültig von diesem PC gelöscht.',
+          confirmText: 'Dauerhaftes Löschen aktivieren',
+          danger: true
+        });
+        if (!confirmed) input.checked = false;
       }
       markSettingsDirty();
     });
@@ -4847,6 +4908,7 @@ async function performSaveSettings(options = {}) {
     parallelUploadCount: elInt('parallelUploadCountInput', cur.parallelUploadCount ?? 0, 0, 0, 100),
     scaleParallelUploads: elChk('scaleParallelUploadsInput', !!cur.scaleParallelUploads),
     removeFromQueueOnDone: elChk('removeFromQueueOnDoneInput', !!cur.removeFromQueueOnDone),
+    deleteSourceAfterSuccessfulUpload: elChk('deleteSourceAfterSuccessfulUploadInput', !!cur.deleteSourceAfterSuccessfulUpload),
     showDropTarget: elChk('showDropTargetInput', !!cur.showDropTarget),
     globalMaxSpeedKbs: (() => {
       const el = document.getElementById('globalMaxSpeedMbsInput');

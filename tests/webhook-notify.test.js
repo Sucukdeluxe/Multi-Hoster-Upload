@@ -55,7 +55,7 @@ test('buildWebhookRequest: many hosters does not exceed Discord limit', () => {
 });
 
 test('buildWebhookRequest: aborted meta changes the headline', () => {
-  const req = buildWebhookRequest('https://discord.com/api/webhooks/1/x', { total: 5, succeeded: 0, failed: 5, files: [] }, { aborted: true });
+  const req = buildWebhookRequest('https://discord.com/api/webhooks/1/x', { total: 5, succeeded: 0, failed: 5, files: [] }, { aborted: true, language: 'de' });
   const body = JSON.parse(req.body);
   assert.match(body.content, /Batch abgebrochen/);
 });
@@ -94,12 +94,20 @@ test('buildWebhookRequest produces Discord content body for discord URLs', () =>
   assert.strictEqual(req.headers['Content-Type'], 'application/json');
   const body = JSON.parse(req.body);
   assert.ok(typeof body.content === 'string');
-  assert.match(body.content, /Batch fertig/);
+  assert.match(body.content, /Batch completed/);
   assert.match(body.content, /srv-1/);
-  assert.match(body.content, /8 ok/);
-  assert.match(body.content, /2 Fehler/);
+  assert.match(body.content, /8 succeeded/);
+  assert.match(body.content, /2 failed/);
   assert.match(body.content, /1h 1m/);
   assert.match(body.content, /voe\.sx: 2\/2/);
+});
+
+test('buildWebhookRequest localizes Discord content from the selected language', () => {
+  const req = buildWebhookRequest('https://discord.com/api/webhooks/1/x', SAMPLE_SUMMARY, { language: 'de' });
+  const body = JSON.parse(req.body);
+  assert.match(body.content, /Batch fertig/);
+  assert.match(body.content, /2 Fehler/);
+  assert.match(body.content, /10 gesamt/);
 });
 
 test('buildWebhookRequest produces raw JSON payload for generic URLs', () => {

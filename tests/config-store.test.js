@@ -83,6 +83,11 @@ describe('ConfigStore', () => {
     assert.deepEqual(config.history, []);
   });
 
+  it('keeps permanent source deletion disabled by default', () => {
+    const config = store.load();
+    assert.equal(config.globalSettings.deleteSourceAfterSuccessfulUpload, false);
+  });
+
   it('save then load round-trips', async () => {
     await store.save({ hosters: { 'doodstream.com': [{ id: 'test-1', enabled: true, authType: 'api', apiKey: 'test-key-123' }] } });
     const config = store.load();
@@ -662,6 +667,14 @@ describe('ConfigStore history split (electron-history.json)', () => {
 
     assert.equal(fs.readFileSync(s.historyPath, 'utf-8'), historyBefore);
     assert.equal(JSON.parse(fs.readFileSync(s.filePath, 'utf-8')).globalSettings.historyRetention, 'all');
+  });
+
+  it('appendHistory rejects when the migrated history file is corrupted', async () => {
+    writeConfigWithHistory(12);
+    s._migrateHistory();
+    fs.writeFileSync(s.historyPath, '{broken-history', 'utf-8');
+
+    await assert.rejects(s.appendHistory({ id: 'unsafe-delete-barrier', files: [] }), /Verlaufsdatei ist beschädigt/);
   });
 
   it('pruneHistory trims history.json and persists the retention setting', async () => {

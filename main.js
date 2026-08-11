@@ -8,6 +8,8 @@ const path = require('path');
 const fs = require('fs');
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
+const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
+const SourceDeleteJournal = require('./lib/source-delete-journal');
 const { HOSTER_CONFIGS } = require('./lib/hosters');
 const VidmolyUploader = require('./lib/vidmoly-upload');
 const VoeUploader = require('./lib/voe-upload');
@@ -113,6 +115,26 @@ let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
+let sourceDeleteJournal = null;
+const pendingUploadFinalizations = new Map();
+
+function requestUploadFinalization(summary) {
+  const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingUploadFinalizations.delete(finalizationId);
+      resolve(false);
+    }, 15000);
+    pendingUploadFinalizations.set(finalizationId, {
+      resolve(value) {
+        clearTimeout(timer);
+        pendingUploadFinalizations.delete(finalizationId);
+        resolve(value);
+      }
+    });
+    safeSend('upload-batch-done', { summary, finalizationId });
+  });
+}
 const activeUploadProducerTrackers = new Set();
 const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
 let diagnosticAgent = null;
@@ -549,6 +571,7 @@ async function sendBatchWebhook(summary, durationSec, extra) {
       appVersion: app.getVersion(),
       machineName: require('os').hostname() || 'unknown-host',
       mention: gs.webhookMention || '',
+      language: gs.language || 'en',
       aborted: !!(extra && extra.aborted),
       timestamp: new Date().toISOString()
     });
@@ -890,6 +913,27 @@ function appendUploadLog(hoster, link, fileName) {
   }
 }
 
+async function appendSourceCleanupAudit(event) {
+  debugLog(`source-cleanup: ${event.outcome} ${event.file} trigger=${event.trigger || '-'}`);
+  const line = `# SOURCE-CLEANUP ${JSON.stringify(event)}\r\n`;
+  const delays = [0, 100, 250];
+  for (const delay of delays) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    const target = _resolveUploadLogTarget();
+    if (!target) continue;
+    try {
+      fs.mkdirSync(path.dirname(target.path), { recursive: true });
+      maybeRotateLogFile(target.path, UPLOAD_LOG_MAX_BYTES, UPLOAD_LOG_MAX_BACKUPS, debugLog);
+      await fs.promises.appendFile(target.path, line, 'utf-8');
+      return true;
+    } catch (error) {
+      _invalidateUploadLogTargetCache();
+      debugLog(`source-cleanup audit append failed: ${error.message}`);
+    }
+  }
+  return false;
+}
+
 function flattenHistoryForExport(history) {
   const rows = [];
   const list = Array.isArray(history) ? history : [];
@@ -1066,7 +1110,11 @@ function buildUploadTasksFromJobs(config, jobs, pick) {
     if (!job || !job.file || !job.hoster) continue;
     const account = pick(job.hoster);
     if (!account) { debugLog(`  skip ${job.hoster}: no enabled account`); continue; }
-    tasks.push(buildTaskFromAccount(job.hoster, account, { file: job.file, jobId: job.id || job.jobId || null }));
+    tasks.push(buildTaskFromAccount(job.hoster, account, {
+      file: job.file,
+      jobId: job.id || job.jobId || null,
+      sourceCleanupToken: job.sourceCleanupToken || null
+    }));
   }
   return tasks;
 }
@@ -1325,7 +1373,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
       return { hoster, accountId, status: 'error', message: 'Account-ID fehlt im Check-Payload' };
     }
     if (!allowed.includes(hoster)) {
-      return { hoster, accountId, status: 'skipped', message: 'Kein Health-Check fuer diesen Hoster' };
+      return { hoster, accountId, status: 'skipped', message: 'Kein Health-Check für diesen Hoster' };
     }
     const accounts = config.hosters[hoster];
     const hosterConfig = Array.isArray(accounts) ? accounts.find(a => a.id === accountId) : null;
@@ -1475,7 +1523,7 @@ function updateTrayTooltip(text) {
   if (tray && !tray.isDestroyed()) tray.setToolTip(text);
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!_hasSingleInstanceLock) return;
   try {
     const _bootCfg = configStore.load();
@@ -1491,6 +1539,24 @@ app.whenReady().then(() => {
     pid: process.pid
   });
   _sweepOrphanConfigTmps();
+  sourceDeleteJournal = new SourceDeleteJournal(
+    path.join(app.getPath('userData'), 'source-delete-journal.jsonl')
+  );
+  try {
+    const outcomes = await sourceDeleteJournal.recover();
+    for (const outcome of outcomes) {
+      debugLog(`source-delete recovery: ${outcome.outcome} ${outcome.file}`);
+      await appendSourceCleanupAudit({
+        timestamp: new Date().toISOString(),
+        outcome: `recovery-${outcome.outcome}`,
+        file: outcome.file,
+        hosters: [],
+        trigger: 'startup-delete-journal'
+      });
+    }
+  } catch (error) {
+    debugLog(`source-delete recovery failed: ${error.message}`);
+  }
   createWindow();
   createTray();
 
@@ -1790,7 +1856,7 @@ async function _dispatchHealthCheck(hoster, hosterConfig, otp) {
   if (hoster === 'clouddrop.cc') {
     return withTimeout(checkClouddropHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'Clouddrop-Check');
   }
-  return { status: 'skipped', message: 'Kein Health-Check fuer diesen Hoster' };
+  return { status: 'skipped', message: 'Kein Health-Check für diesen Hoster' };
 }
 
 function getUploadBrowseDirectory() {
@@ -1933,14 +1999,16 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
   return out;
 });
 
-ipcMain.handle('start-upload', (_event, payload) => {
+ipcMain.handle('start-upload', async (_event, payload) => {
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
+  if (uploadManager) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
   const config = configStore.load();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
   const isAutoRetry = !!(payload && payload.isAutoRetry);
+  const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
 
   // At 500+ jobs JSON.stringify blew up the debug log with MB-sized lines
   // per start-upload and added noticeable delay — log counts only.
@@ -1995,6 +2063,24 @@ ipcMain.handle('start-upload', (_event, payload) => {
   uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
+  const sourceCleanup = createSourceFileCleanup({
+    fs,
+    path,
+    platform: process.platform,
+    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
+    audit: appendSourceCleanupAudit,
+    journal: sourceDeleteJournal
+  });
+  let sourceCleanupFingerprints;
+  try {
+    sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
+  } catch (error) {
+    uploadManager = null;
+    globalThis._mhuUploadManagerRef = null;
+    return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
+  }
+  for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
+  _thisManager.sourceFileCleanup = sourceCleanup;
   const _producerTracker = trackUploadProducer(_thisManager);
 
   const _progressByJob = new Map();
@@ -2064,6 +2150,10 @@ ipcMain.handle('start-upload', (_event, payload) => {
     } catch (e) { debugLog(`stats listener error: ${e && e.message}`); }
   });
 
+  uploadManager.on('job-settled', (event) => {
+    sourceCleanup.settle(event);
+  });
+
   uploadManager.on('account-failed', ({ hoster, accountId }) => {
     // Persist to session cache so a subsequent batch (after batch-done)
     // gets primed and won't burn retries on this account again.
@@ -2126,7 +2216,9 @@ ipcMain.handle('start-upload', (_event, payload) => {
     const _batchDurationSec = _thisManager && _thisManager.startTime
       ? Math.round((Date.now() - _thisManager.startTime) / 1000)
       : 0;
+    let historyPersisted = true;
     try { await configStore.appendHistory(summary); } catch (err) {
+      historyPersisted = false;
       debugLog(`appendHistory failed: ${err.message}`);
     }
     if (_progressFlushTimer) {
@@ -2137,7 +2229,9 @@ ipcMain.handle('start-upload', (_event, payload) => {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
-    safeSend('upload-batch-done', summary);
+    const queuePersisted = await requestUploadFinalization(summary);
+    if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
+    await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
     _producerTracker.finish();
 
     const fullyAborted = isAllAborted(summary);
@@ -2158,9 +2252,9 @@ ipcMain.handle('start-upload', (_event, payload) => {
   // Defer startBatch to next tick so the IPC response is sent first.
   // This ensures webContents.send() calls from upload events
   // are not interleaved with the handle() response.
-  process.nextTick(() => {
+  setImmediate(() => {
     if (uploadManager !== _thisManager) {
-      debugLog('nextTick: uploadManager was replaced before startBatch');
+      debugLog('setImmediate: uploadManager was replaced before startBatch');
       _producerTracker.finish();
       return;
     }
@@ -2170,7 +2264,7 @@ ipcMain.handle('start-upload', (_event, payload) => {
       _producerTracker.finish();
       return;
     }
-    debugLog(`nextTick: calling startBatch now (priming ${_sessionFailedAccounts.size} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
+    debugLog(`setImmediate: calling startBatch now (priming ${_sessionFailedAccounts.size} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
     _thisManager.startBatch(tasks, {
       primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
@@ -2194,7 +2288,7 @@ ipcMain.handle('start-upload', (_event, payload) => {
 
   logMemorySnapshot('batch-start');
   debugLog(`start-upload returning started=true (startBatch deferred to nextTick)`);
-  return { started: true, taskCount: tasks.length, skippedJobs };
+  return { started: true, taskCount: tasks.length, skippedJobs, sourceCleanupFingerprints };
 });
 
 // Logged at batch boundaries so we can spot memory growth between batches
@@ -2222,24 +2316,31 @@ ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
   return true;
 });
 
-ipcMain.handle('add-jobs-to-batch', (_event, payload) => {
+ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!uploadManager || !uploadManager.running) {
     return { error: 'Kein Upload aktiv' };
   }
   const config = configStore.load();
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+  const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
   const pick = makeAccountPicker(config);
   const tasks = buildUploadTasksFromJobs(config, jobs, pick);
   persistRotation(pick);
   const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
   const skippedJobs = jobs
     .filter(j => j && j.id && !taskJobIds.has(j.id))
-    .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gÃ¼ltiger Account fÃ¼r diesen Hoster' }));
+    .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
+  const sourceCleanupFingerprints = uploadManager.sourceFileCleanup
+    ? await uploadManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
+    : {};
+  if (uploadManager.sourceFileCleanup) {
+    for (const skipped of skippedJobs) uploadManager.sourceFileCleanup.markSkipped(skipped.jobId);
+  }
 
   if (tasks.length === 0) {
     debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
-    return { added: 0, skippedJobs, alreadyInBatchJobIds: [] };
+    return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
   }
 
   const addResult = uploadManager.addJobs(tasks);
@@ -2251,7 +2352,7 @@ ipcMain.handle('add-jobs-to-batch', (_event, payload) => {
   debugLog(
     `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
   );
-  return { added, skippedJobs, alreadyInBatchJobIds };
+  return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
 });
 
 ipcMain.handle('finish-after-active', () => {
@@ -2809,6 +2910,21 @@ ipcMain.handle('get-global-settings', () => {
 ipcMain.handle('save-pending-queue', async (_event, pendingQueue) => {
   await configStore.savePendingQueue(pendingQueue);
   return true;
+});
+
+ipcMain.handle('complete-upload-finalization', async (_event, payload) => {
+  const finalizationId = payload && payload.finalizationId;
+  const pending = finalizationId && pendingUploadFinalizations.get(finalizationId);
+  if (!pending) return false;
+  try {
+    await configStore.savePendingQueue(payload.pendingQueue ?? null);
+    pending.resolve(true);
+    return true;
+  } catch (error) {
+    debugLog(`upload finalization queue save failed: ${error.message}`);
+    pending.resolve(false);
+    return false;
+  }
 });
 
 ipcMain.handle('save-global-settings', async (_event, globalSettings) => {

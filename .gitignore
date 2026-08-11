@@ -2,6 +2,7 @@ node_modules/
 .dev-runner.lock
 release/
 .artifacts/
+.worktrees/
 __pycache__/
 *.pyc
 

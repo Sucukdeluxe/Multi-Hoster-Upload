@@ -67,6 +67,36 @@ describe('UploadManager', () => {
     assert.ok(events.length > 0, 'should emit at least one progress event');
   });
 
+  it('emits job-settled after releasing job resources', async () => {
+    const mgr = new UploadManager({});
+    let settled;
+    mgr.on('job-settled', (event) => {
+      settled = {
+        ...event,
+        activeJobs: mgr.activeJobs.size,
+        abortControllers: mgr.jobAbortControllers.size
+      };
+    });
+
+    await mgr.startBatch([{
+      file: '/test/settled.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      jobId: 'job-settled-1',
+      sourceCleanupToken: 'cleanup-1'
+    }]);
+
+    assert.deepEqual(settled, {
+      jobId: 'job-settled-1',
+      sourceCleanupToken: 'cleanup-1',
+      file: '/test/settled.mp4',
+      hoster: 'doodstream.com',
+      status: 'done',
+      activeJobs: 0,
+      abortControllers: 0
+    });
+  });
+
   it('replaces account pools and clears cached account state after an import', () => {
     const mgr = new UploadManager({}, {}, {
       'byse.sx': [{ id: 'old', apiKey: 'old-key' }]
