@@ -165,7 +165,8 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.getElementById("upload-tab").click()');
     const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
     const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-debug.log', 'mp4,mkv,avi']);
-    const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !value.includes('Multi-Hoster-Uploader'));
+    const neutralUiPathBasenames = new Set(['account-rotation.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-debug.log']);
+    const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !neutralUiPathBasenames.has(path.basename(value)) && !value.includes('Multi-Hoster-Uploader'));
     if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
     check('Every mounted human-facing value is translated or explicitly language-neutral', unexpectedUnchangedValues.length === 0);
     const englishValues = await wc.executeJavaScript('(() => { const values = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { const value = node.nodeValue.trim(); if (value) values.push(value); node = walker.nextNode(); } values.push(...[...document.querySelectorAll("[title],[aria-label],[placeholder]")].flatMap(element => [element.title, element.getAttribute("aria-label"), element.getAttribute("placeholder")])); return [...new Set(values.filter(Boolean))]; })()');
@@ -271,6 +272,77 @@ setTimeout(async () => {
 
     const queueHidden = await wc.executeJavaScript('document.getElementById("queueShell")?.style.display');
     check('Queue hidden (no files)', queueHidden === 'none');
+
+    const desktopDropFixture = path.join(app.getPath('temp'), 'mhu-native-drop-' + process.pid + '.mkv');
+    fs.writeFileSync(desktopDropFixture, Buffer.from('desktop drop fixture'));
+    const desktopDropPoint = await wc.executeJavaScript('(() => { const rect = document.querySelector(".upload-workspace")?.getBoundingClientRect(); return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(rect.height / 2, 180)) } : null; })()');
+    let desktopDropState = null;
+    try {
+      wc.debugger.attach('1.3');
+      const dragData = {
+        items: [{ mimeType: 'text/uri-list', data: 'file:///' + desktopDropFixture.replace(/\\\\/g, '/') }],
+        files: [desktopDropFixture],
+        dragOperationsMask: 1
+      };
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragEnter', ...desktopDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragOver', ...desktopDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'drop', ...desktopDropPoint, data: dragData });
+      await waitUntil(() => wc.executeJavaScript('document.getElementById("hosterModal")?.style.display === "flex"'));
+      desktopDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, paths: _pendingFiles.map(file => file.path) }))()');
+      await wc.executeJavaScript('cancelHosterModal()');
+    } finally {
+      if (wc.debugger.isAttached()) wc.debugger.detach();
+      try { fs.unlinkSync(desktopDropFixture); } catch {}
+    }
+    check('Desktop file drop reaches the upload selection with its native path', desktopDropState?.modal === 'flex' && desktopDropState.paths.length === 1 && desktopDropState.paths[0] === desktopDropFixture);
+
+    const populatedDropFixture = path.join(app.getPath('temp'), 'mhu-populated-drop-' + process.pid + '.mkv');
+    fs.writeFileSync(populatedDropFixture, Buffer.from('populated queue drop fixture'));
+    await wc.executeJavaScript('(() => { selectedFiles = [{ path: "C:/ui/existing.bin", name: "existing.bin", size: 16 }]; queueJobs = [{ id: "ui-existing-drop-row", file: "C:/ui/existing.bin", fileName: "existing.bin", hoster: "doodstream.com", status: "preview", bytesUploaded: 0, bytesTotal: 16, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); updateUploadView(); renderQueueTable(); })()');
+    const populatedDropPoint = await wc.executeJavaScript('(() => { const rect = document.getElementById("queueShell")?.getBoundingClientRect(); return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(140, rect.height / 3)) } : null; })()');
+    let populatedDropState = null;
+    try {
+      wc.debugger.attach('1.3');
+      const dragData = {
+        items: [{ mimeType: 'text/uri-list', data: 'file:///' + populatedDropFixture.replace(/\\\\/g, '/') }],
+        files: [populatedDropFixture],
+        dragOperationsMask: 1
+      };
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragEnter', ...populatedDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragOver', ...populatedDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'drop', ...populatedDropPoint, data: dragData });
+      await waitUntil(() => wc.executeJavaScript('document.getElementById("hosterModal")?.style.display === "flex"'));
+      populatedDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, paths: _pendingFiles.map(file => file.path) }))()');
+      await wc.executeJavaScript('cancelHosterModal(); selectedFiles = []; queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable();');
+    } finally {
+      if (wc.debugger.isAttached()) wc.debugger.detach();
+      try { fs.unlinkSync(populatedDropFixture); } catch {}
+    }
+    check('Desktop file drop still reaches upload selection while the queue is populated', populatedDropState?.modal === 'flex' && populatedDropState.paths.length === 1 && populatedDropState.paths[0] === populatedDropFixture);
+
+    const duplicateDropFixture = path.join(app.getPath('temp'), 'mhu-duplicate-drop-' + process.pid + '.mkv');
+    fs.writeFileSync(duplicateDropFixture, Buffer.from('duplicate queue drop fixture'));
+    await wc.executeJavaScript('(() => { selectedFiles = [{ path: ' + JSON.stringify(duplicateDropFixture) + ', name: "mhu-duplicate-drop.mkv", size: 28 }]; queueJobs = [{ id: "ui-duplicate-drop-row", file: ' + JSON.stringify(duplicateDropFixture) + ', fileName: "mhu-duplicate-drop.mkv", hoster: "doodstream.com", status: "done", bytesUploaded: 28, bytesTotal: 28, speedKbs: 0, elapsed: 1, remaining: 0, progress: 100 }]; rebuildJobIndex(); updateUploadView(); renderQueueTable(); const toast = document.getElementById("copyToast"); toast.textContent = ""; toast.classList.remove("show"); })()');
+    const duplicateDropPoint = await wc.executeJavaScript('(() => { const rect = document.getElementById("queueShell")?.getBoundingClientRect(); return rect ? { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + Math.min(140, rect.height / 3)) } : null; })()');
+    let duplicateDropState = null;
+    try {
+      wc.debugger.attach('1.3');
+      const dragData = {
+        items: [{ mimeType: 'text/uri-list', data: 'file:///' + duplicateDropFixture.replace(/\\\\/g, '/') }],
+        files: [duplicateDropFixture],
+        dragOperationsMask: 1
+      };
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragEnter', ...duplicateDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'dragOver', ...duplicateDropPoint, data: dragData });
+      await wc.debugger.sendCommand('Input.dispatchDragEvent', { type: 'drop', ...duplicateDropPoint, data: dragData });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      duplicateDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, pending: _pendingFiles.length, toast: document.getElementById("copyToast")?.textContent, shown: document.getElementById("copyToast")?.classList.contains("show") }))()');
+      await wc.executeJavaScript('selectedFiles = []; queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable();');
+    } finally {
+      if (wc.debugger.isAttached()) wc.debugger.detach();
+      try { fs.unlinkSync(duplicateDropFixture); } catch {}
+    }
+    check('Dropping a file already in the upload jobs explains the duplicate instead of doing nothing', duplicateDropState?.modal === 'none' && duplicateDropState.pending === 0 && duplicateDropState.shown === true && duplicateDropState.toast === 'Auswahl ist bereits in den Upload-Aufträgen.');
 
     const startDisabled = await wc.executeJavaScript('document.getElementById("startUploadBtn")?.disabled');
     check('Start button disabled initially', startDisabled === true);
@@ -636,6 +708,19 @@ setTimeout(async () => {
     const hasSmoothAccountCollapse = motion => motion.closedStart <= 1 && motion.opening > 1 && motion.opening < motion.opened - 1 && motion.closing > 1 && motion.closing < motion.opened - 1 && motion.closedEnd <= 1 && motion.openingState && motion.closingState && motion.duration >= 180;
     check('Hoster groups visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.hosterMotion));
     check('Hoster upload settings visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.settingsMotion));
+
+    const accountsFooterGeometry = await wc.executeJavaScript(\`(() => {
+      const main = document.querySelector('#accounts-view .accounts-main')?.getBoundingClientRect();
+      const list = document.getElementById('accountsList')?.getBoundingClientRect();
+      const footer = document.getElementById('accountsListFooter')?.getBoundingClientRect();
+      return {
+        visible: Boolean(footer && footer.height > 0),
+        anchored: Boolean(main && footer && Math.abs(main.bottom - footer.bottom) <= 1),
+        listEndsAtFooter: Boolean(list && footer && Math.abs(list.bottom - footer.top) <= 1)
+      };
+    })()\`);
+    check('Accounts collapse-all footer stays anchored to the bottom below short hoster content', accountsFooterGeometry.visible && accountsFooterGeometry.anchored && accountsFooterGeometry.listEndsAtFooter);
+    await captureVisual('02-accounts-footer-short.png');
 
     const tallAccountGroupGeometry = await wc.executeJavaScript(\`(() => {
       const hoster = HOSTERS[0];
@@ -1928,7 +2013,8 @@ try {
   // timeout or exit code - still print output
   if (err.stdout) console.log(err.stdout);
   if (err.stderr) {
-    const filtered = err.stderr.split('\n')
+    const stderr = Buffer.isBuffer(err.stderr) ? err.stderr.toString('utf-8') : String(err.stderr);
+    const filtered = stderr.split('\n')
       .filter(l => !l.includes('cache_util') && !l.includes('disk_cache') && !l.includes('gpu_disk_cache'))
       .join('\n');
     if (filtered.trim()) console.error(filtered);

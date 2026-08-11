@@ -3495,6 +3495,7 @@ input[type="checkbox"] {
 }
 
 .accounts-list {
+  flex: 1 1 auto;
   min-height: 0;
   padding: 12px 16px 16px;
   gap: 8px;
@@ -3503,6 +3504,7 @@ input[type="checkbox"] {
 }
 
 .accounts-list-footer {
+  flex: 0 0 auto;
   margin: 0;
   padding: 8px 16px;
   border-top: 1px solid var(--border);

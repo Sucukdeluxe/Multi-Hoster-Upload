@@ -1348,6 +1348,7 @@ async function addDroppedFiles(fileList) {
       ..._pendingFiles.map(f => f.path)
     ]);
     const newFiles = [];
+    let duplicateCount = 0;
 
     for (const file of files) {
       let filePath = '';
@@ -1361,7 +1362,11 @@ async function addDroppedFiles(fileList) {
           if (folderFiles && folderFiles.length > 0) {
             for (const fp of folderFiles) {
               const p = typeof fp === 'string' ? fp : (fp && fp.path);
-              if (!p || existingPaths.has(p)) continue;
+              if (!p) continue;
+              if (existingPaths.has(p)) {
+                duplicateCount++;
+                continue;
+              }
               const name = typeof fp === 'string' ? p.split('\\').pop().split('/').pop() : (fp.name || p.split('\\').pop().split('/').pop());
               const size = typeof fp === 'string' ? null : (fp.size || 0);
               newFiles.push({ path: p, name, size });
@@ -1377,12 +1382,16 @@ async function addDroppedFiles(fileList) {
       if (!existingPaths.has(filePath)) {
         newFiles.push({ path: filePath, name: fileName, size: file.size });
         existingPaths.add(filePath);
+      } else {
+        duplicateCount++;
       }
     }
 
     if (newFiles.length > 0) {
       _pendingFiles.push(...newFiles);
       openHosterModal();
+    } else if (duplicateCount > 0) {
+      showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
     }
   } finally {
     _addingDropped = false;

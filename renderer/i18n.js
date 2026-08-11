@@ -193,6 +193,7 @@
     ['Quelldatei nach vollständigem Upload dauerhaft löschen', 'Permanently delete source file after complete upload'],
     ['Löscht die Originaldatei endgültig, sobald alle dafür ausgewählten Hoster erfolgreich abgeschlossen sind. Der Papierkorb wird nicht verwendet.', 'Permanently deletes the original file after all selected hosts have completed successfully. The Recycle Bin is not used.'],
     ['Quelldateien dauerhaft löschen?', 'Permanently delete source files?'],
+    ['Auswahl ist bereits in den Upload-Aufträgen.', 'The selection is already in the upload jobs.'],
     ['Nach einem vollständigen Upload zu allen ausgewählten Hostern wird die Originaldatei ohne Papierkorb endgültig von diesem PC gelöscht.', 'After a complete upload to all selected hosts, the original file is permanently deleted from this PC without using the Recycle Bin.'],
     ['Dauerhaftes Löschen aktivieren', 'Enable permanent deletion'],
     ['Hoster-Einstellungen', 'Host settings'],

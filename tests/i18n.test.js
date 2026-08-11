@@ -70,6 +70,10 @@ test('English copy uses complete actions and correct singular plurals', () => {
   assert.equal(translateText('Aktiv auf Port 9100 — 2 Clients verbunden', 'en'), 'Active on port 9100 — 2 clients connected');
 });
 
+test('translates duplicate desktop drop feedback to English', () => {
+  assert.equal(translateText('Auswahl ist bereits in den Upload-Aufträgen.', 'en'), 'The selection is already in the upload jobs.');
+});
+
 test('rare account, backup, update, and confirmation states translate in both directions', () => {
   const cases = [
     ['Einstellungen konnten vor dem Update nicht gespeichert werden', 'Settings could not be saved before the update'],
