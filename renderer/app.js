@@ -4341,12 +4341,12 @@ function renderSettings() {
         </select>
         <span class="hint">Pro Session = neue Datei bei jedem App-Start; nach komplettem Schließen + erneutem Öffnen beginnt eine neue Session.</span>
       </div>
-      <div class="settings-row">
-        <label>Verbose Logging</label>
-        <label class="checkbox-row" style="margin:0">
-          <input type="checkbox" class="settings-autosave" id="logVerboseInput" ${globalSettings.logVerbose ? 'checked' : ''}>
-          <span>DEBUG-Einträge in debug.log schreiben (Performance ↓, Diagnostik ↑)</span>
-        </label>
+      <div class="settings-option verbose-logging-option">
+        <div class="settings-option-copy">
+          <label for="logVerboseInput">Verbose Logging</label>
+          <span class="settings-option-description">DEBUG-Einträge in debug.log schreiben (Performance ↓, Diagnostik ↑)</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="logVerboseInput" ${globalSettings.logVerbose ? 'checked' : ''}>
       </div>
       <div class="settings-section-label">Diagnose</div>
       <div class="settings-row" id="logPathsBlock">
