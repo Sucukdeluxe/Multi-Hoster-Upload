@@ -165,7 +165,7 @@ const expectedScripts = {
   'test:backup-api': 'npm --prefix services/backup-api test',
   verify: 'npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev',
   lint: 'eslint .',
-  dist: 'electron-builder --win',
+  dist: 'electron-builder --publish never --win',
   'release:win': 'electron-builder --publish never --win nsis portable'
 };
 const expectedBuildFiles = [
