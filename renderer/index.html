@@ -553,6 +553,11 @@
           <span class="view-sidebar-copy">Fehler</span>
           <span class="view-sidebar-badge" id="historySidebarErrorCount">0</span>
         </button>
+        <button class="view-sidebar-item" data-history-filter="skipped" aria-label="Übersprungene Uploads anzeigen">
+          <svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg>
+          <span class="view-sidebar-copy">Übersprungen</span>
+          <span class="view-sidebar-badge" id="historySidebarSkippedCount">0</span>
+        </button>
       </nav>
       <div class="view-sidebar-section">
         <span class="view-sidebar-section-label">Aufbewahrung</span>
@@ -621,6 +626,10 @@
   </div>
 
   <div class="copy-toast" id="copyToast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="startup-resume-banner" id="startupResumeBanner" role="status" aria-live="polite" hidden>
+    <span id="startupResumeMessage"></span>
+    <button class="btn btn-xs btn-secondary" id="cancelStartupResumeBtn">Abbrechen</button>
+  </div>
 
   <div class="shutdown-overlay" id="shutdownOverlay" style="display:none" aria-hidden="true">
     <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage">
@@ -665,6 +674,9 @@
   <script src="../lib/speed-history.js"></script>
   <script src="account-submit.js"></script>
   <script src="account-status.js"></script>
+  <script src="history-status.js"></script>
+  <script src="auto-resume.js"></script>
+  <script src="queue-stats.js"></script>
   <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>

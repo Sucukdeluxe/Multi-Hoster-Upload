@@ -97,6 +97,27 @@ describe('UploadManager', () => {
     });
   });
 
+  it('records an unconfirmed host response as an error instead of done', async () => {
+    mockUploadFile.mock.mockImplementation(async () => ({}));
+    const mgr = new UploadManager({ 'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } });
+    const statuses = [];
+    let settled;
+    mgr.on('progress', data => statuses.push(data.status));
+    mgr.on('job-settled', event => { settled = event; });
+
+    await mgr.startBatch([{
+      file: '/test/unconfirmed.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      jobId: 'job-unconfirmed',
+      sourceCleanupToken: 'cleanup-unconfirmed'
+    }]);
+
+    assert.equal(statuses.includes('done'), false);
+    assert.equal(statuses.at(-1), 'error');
+    assert.equal(settled.status, 'error');
+  });
+
   it('replaces account pools and clears cached account state after an import', () => {
     const mgr = new UploadManager({}, {}, {
       'byse.sx': [{ id: 'old', apiKey: 'old-key' }]
@@ -144,7 +165,7 @@ describe('UploadManager', () => {
       callCount++;
       if (callCount <= 2) throw new Error('network error');
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'https://test/ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({ 'doodstream.com': { retries: 3, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } });
@@ -182,7 +203,7 @@ describe('UploadManager', () => {
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
       // Simulate a slow upload
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => resolve({ download_url: 'x', embed_url: null, file_code: 'x' }), 10000);
+      const timer = setTimeout(() => resolve({ download_url: 'https://doodstream.com/d/ok123', embed_url: null, file_code: 'ok123' }), 10000);
         if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Aborted')); });
       });
     });
@@ -229,7 +250,7 @@ describe('UploadManager', () => {
       await new Promise(r => setTimeout(r, 50));
       concurrent--;
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'https://test/ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({ 'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } });
@@ -253,7 +274,7 @@ describe('UploadManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 40));
       concurrent--;
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: `https://${hoster}/ok`, embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({
@@ -286,7 +307,7 @@ describe('UploadManager', () => {
         }
       });
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'https://test/ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({});
@@ -319,7 +340,7 @@ describe('UploadManager', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'https://test/ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({
@@ -402,7 +423,9 @@ describe('UploadManager', () => {
 
     const mgr = new UploadManager({});
     const errors = [];
+    let summary;
     mgr.on('progress', (d) => { if (d.error) errors.push(d.error); });
+    mgr.on('batch-done', value => { summary = value; });
 
     await mgr.startBatch([
       { file: '/test/deleted.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
@@ -410,6 +433,9 @@ describe('UploadManager', () => {
 
     fs.promises.stat = origStat;
     assert.ok(errors.some(e => e.includes('nicht gefunden')), `expected "nicht gefunden" error, got: ${errors.join(', ')}`);
+    assert.equal(summary.files[0].results[0].status, 'skipped');
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.failed, 0);
   });
 
   it('zero-byte file produces descriptive error', async () => {
@@ -452,7 +478,7 @@ describe('UploadManager', () => {
       await new Promise(r => setTimeout(r, 40));
       concurrent--;
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager(
@@ -477,7 +503,7 @@ describe('UploadManager', () => {
       started++;
       await new Promise(r => setTimeout(r, 100));
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({});
@@ -512,7 +538,7 @@ describe('UploadManager', () => {
         if (signal) signal.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Aborted')); });
       });
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({});
@@ -545,7 +571,7 @@ describe('UploadManager', () => {
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
       await new Promise(r => setTimeout(r, 1500));
       if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-      return { download_url: 'https://test/ok', embed_url: null, file_code: 'ok' };
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
     });
 
     const mgr = new UploadManager({});
@@ -630,7 +656,7 @@ describe('UploadManager', () => {
           throw err;
         }
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'https://byse.sx/ok', embed_url: null, file_code: 'ok' };
+        return { download_url: 'https://byse.sx/d/ok123', embed_url: null, file_code: 'ok123' };
       });
 
       const mgr = new UploadManager(
@@ -721,7 +747,7 @@ describe('UploadManager', () => {
           throw err;
         }
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
       });
 
       const mgr = new UploadManager(
@@ -767,7 +793,7 @@ describe('UploadManager', () => {
         }
         acc2Calls++;
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
       });
 
       const mgr = new UploadManager(
@@ -797,11 +823,11 @@ describe('UploadManager', () => {
           acc1Calls++;
           if (acc1Calls <= 2) throw new Error('connect ECONNRESET 1.2.3.4:443');
           if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-          return { download_url: 'ok-on-acc1-retry', embed_url: null, file_code: 'ok' };
+          return { download_url: 'https://voe.sx/ok123', embed_url: null, file_code: 'ok123' };
         }
         acc2Calls++;
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
       });
 
       const mgr = new UploadManager(
@@ -849,7 +875,7 @@ describe('UploadManager', () => {
 
       mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
       });
 
       await mgr.startBatch([
@@ -1012,7 +1038,7 @@ describe('UploadManager', () => {
           throw err;
         }
         if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: 'ok', embed_url: null, file_code: 'ok' };
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
       });
 
       const mgr = new UploadManager(

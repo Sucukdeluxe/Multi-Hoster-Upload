@@ -13,6 +13,7 @@ const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const productVersion = require('../package.json').version;
 const uiRunId = `${process.pid}-${Date.now()}`;
 const visualScreenshotDir = process.env.MHU_UI_SCREENSHOT_DIR
   ? path.resolve(process.env.MHU_UI_SCREENSHOT_DIR)
@@ -25,6 +26,7 @@ if (visualScreenshotDir) fs.mkdirSync(visualScreenshotDir, { recursive: true });
 // Create a temp script that the real Electron app will execute via --eval
 const testScript = `
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+app.setVersion(${JSON.stringify(productVersion)});
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
@@ -351,7 +353,9 @@ setTimeout(async () => {
     check('Legacy bottom statusbar is removed', legacyStatusbar === null);
 
     const version = await wc.executeJavaScript('document.getElementById("versionLabel")?.textContent');
-    check('Version label present', version && version.startsWith('v'));
+    check('Version label matches package.json', version === ${JSON.stringify(`v${productVersion}`)});
+    const standardHeaderBrand = await wc.executeJavaScript('(() => { const brand = document.querySelector(".app-brand-name"); if (!brand) return null; const rect = brand.getBoundingClientRect(); return { visible: getComputedStyle(brand).display !== "none" && rect.width > 0, fits: brand.scrollWidth <= brand.clientWidth + 1, text: brand.textContent.trim() }; })()');
+    check('Standard window shows the full product name', standardHeaderBrand?.visible === true && standardHeaderBrand.fits === true && standardHeaderBrand.text === 'MULTI HOSTER UPLOADER');
     const versionMonogram = await wc.executeJavaScript('document.querySelector(".version-monogram")');
     check('Header version badge has no meaningless monogram', versionMonogram === null);
     const windowTitle = await wc.executeJavaScript('document.title');
@@ -1527,7 +1531,7 @@ setTimeout(async () => {
     const clearedHistoryState = await wc.executeJavaScript('(() => { const modal = document.getElementById("historyClearModal"); const button = document.getElementById("clearHistoryBtn"); button?.click(); return [modal?.style.display, modal?.getAttribute("aria-hidden"), button?.disabled, document.querySelector("#historyContainer .empty-state")?.textContent?.trim()].join("|"); })()');
     check('Clearing history closes the dialog and disables the action for the empty state', clearHistoryCallCount === 1 && clearedHistoryState === 'none|true|true|Noch keine Uploads.');
     await captureVisual('04-history-empty.png');
-    historyFixture = [{ timestamp: '2026-08-10T10:00:00.000Z', files: [{ name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] }, { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] }, { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }] }];
+    historyFixture = [{ timestamp: '2026-08-10T10:00:00.000Z', files: [{ name: 'ok.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/ok' }] }, { name: 'bad.bin', results: [{ status: 'error', hoster: 'byse.sx', error: 'Zugang abgelehnt' }] }, { name: 'stopped.bin', results: [{ status: 'aborted', hoster: 'doodstream.com' }] }, { name: 'large.bin', results: [{ status: 'skipped', hoster: 'vidmoly.me', error: 'Datei zu groß' }] }] }];
     await wc.executeJavaScript('loadHistory().then(() => { window.confirm = window.__historyOriginalConfirm; delete window.__historyOriginalConfirm; })');
 
     const historyFrameFit = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view")?.getBoundingClientRect(); return Boolean(view && view.bottom <= window.innerHeight + 1); })()');
@@ -1552,19 +1556,24 @@ setTimeout(async () => {
         data: historyRowsData.length,
         rows: [...document.querySelectorAll('#historyBody .history-row')].map(row => row.querySelector('.col-filename')?.textContent).sort(),
         errors: document.querySelectorAll('#historyBody .history-row.error').length,
-        counts: ['historySidebarAllCount', 'historySidebarSuccessCount', 'historySidebarErrorCount'].map(id => document.getElementById(id)?.textContent)
+        counts: ['historySidebarAllCount', 'historySidebarSuccessCount', 'historySidebarErrorCount', 'historySidebarSkippedCount'].map(id => document.getElementById(id)?.textContent)
       };
       const success = inspect('success');
       const error = inspect('error');
+      const skipped = inspect('skipped');
       const all = inspect('all');
-      return { initial, success, error, all, sourceLength: historyRowsData.length };
+      return { initial, success, error, skipped, all, sourceLength: historyRowsData.length };
     })()\`);
-    check('History keeps failed results in the renderer data model and All view', historyFilterState.initial.data === 3 && historyFilterState.initial.rows.join('|') === 'bad.bin|ok.bin|stopped.bin' && historyFilterState.initial.errors === 2 && historyFilterState.initial.counts.join('|') === '3|1|2');
-    check('History sidebar filters successful and failed rows without dropping source data', historyFilterState.success.rows.join('|') === 'ok.bin' && historyFilterState.success.errors === 0 && historyFilterState.error.rows.join('|') === 'bad.bin|stopped.bin' && historyFilterState.error.errors === 2 && historyFilterState.all.rows.length === 3 && historyFilterState.sourceLength === 3);
-    check('History sidebar exposes exactly one pressed filter', historyFilterState.success.pressed.join('|') === 'success' && historyFilterState.success.active.join('|') === 'success' && historyFilterState.error.pressed.join('|') === 'error' && historyFilterState.error.active.join('|') === 'error' && historyFilterState.all.pressed.join('|') === 'all' && historyFilterState.all.active.join('|') === 'all');
+    check('History keeps failed and skipped results in the renderer data model and All view', historyFilterState.initial.data === 4 && historyFilterState.initial.rows.join('|') === 'bad.bin|large.bin|ok.bin|stopped.bin' && historyFilterState.initial.errors === 2 && historyFilterState.initial.counts.join('|') === '4|1|2|1');
+    check('History sidebar filters successful, failed, and skipped rows without dropping source data', historyFilterState.success.rows.join('|') === 'ok.bin' && historyFilterState.success.errors === 0 && historyFilterState.error.rows.join('|') === 'bad.bin|stopped.bin' && historyFilterState.error.errors === 2 && historyFilterState.skipped.rows.join('|') === 'large.bin' && historyFilterState.all.rows.length === 4 && historyFilterState.sourceLength === 4);
+    check('History sidebar exposes exactly one pressed filter', historyFilterState.success.pressed.join('|') === 'success' && historyFilterState.success.active.join('|') === 'success' && historyFilterState.error.pressed.join('|') === 'error' && historyFilterState.error.active.join('|') === 'error' && historyFilterState.skipped.pressed.join('|') === 'skipped' && historyFilterState.skipped.active.join('|') === 'skipped' && historyFilterState.all.pressed.join('|') === 'all' && historyFilterState.all.active.join('|') === 'all');
 
-    const historyCopyControls = await wc.executeJavaScript('(() => { const rows = [...document.querySelectorAll("#historyBody .history-row")]; const buttons = rows.map(row => row.querySelector(".history-copy-link")); const inside = buttons.every(button => { const cell = button?.closest(".col-link"); const cellRect = cell?.getBoundingClientRect(); const buttonRect = button?.getBoundingClientRect(); return cellRect && buttonRect && buttonRect.right <= cellRect.right + 1 && buttonRect.left >= cellRect.left; }); return [buttons.length, buttons.every(button => button?.getAttribute("aria-label") === "Link kopieren"), inside].join("|"); })()');
-    check('History links expose an in-cell copy action', historyCopyControls === '3|true|true');
+    const skippedHistoryPresentation = await wc.executeJavaScript('(() => { document.querySelector("[data-history-filter=skipped]")?.click(); const row = document.querySelector("#historyBody .history-row.skipped"); return [row?.querySelector(".col-filename")?.textContent, row?.querySelector(".history-link-text")?.textContent, Boolean(row?.querySelector(".history-copy-link"))].join("|"); })()');
+    check('Skipped history rows show their reason without a link-copy action', skippedHistoryPresentation === 'large.bin|Datei zu groß|false');
+    await wc.executeJavaScript('document.querySelector("[data-history-filter=all]")?.click()');
+
+    const historyCopyControls = await wc.executeJavaScript('(() => { const rows = [...document.querySelectorAll("#historyBody .history-row")]; const buttons = rows.map(row => row.querySelector(".history-copy-link")).filter(Boolean); const inside = buttons.every(button => { const cell = button.closest(".col-link"); const cellRect = cell?.getBoundingClientRect(); const buttonRect = button.getBoundingClientRect(); return cellRect && buttonRect && buttonRect.right <= cellRect.right + 1 && buttonRect.left >= cellRect.left; }); return [buttons.length, buttons.every(button => button.getAttribute("aria-label") === "Link kopieren"), inside].join("|"); })()');
+    check('Successful history links expose an in-cell copy action', historyCopyControls === '1|true|true');
     const historyCopyAction = await wc.executeJavaScript('document.querySelector(".history-copy-link")?.click(); document.getElementById("copyToast")?.textContent?.trim()');
     check('History copy action confirms the copied link', historyCopyAction === 'Link kopiert');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');

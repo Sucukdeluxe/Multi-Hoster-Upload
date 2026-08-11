@@ -15,7 +15,7 @@ function createStore() {
   };
   // ConfigStore uses path.join(__dirname, '..') for non-packaged
   // We override by setting filePath directly
-  store = new ConfigStore(fakeApp);
+  store = new ConfigStore(fakeApp, { allowPlaintextCredentialStorage: true });
   store.filePath = path.join(tmpDir, 'electron-config.json');
   store.historyPath = path.join(tmpDir, 'electron-history.json');
   return store;
@@ -46,7 +46,7 @@ describe('ConfigStore', () => {
         if (name === 'exe') return path.join(isolatedDir, 'Multi-Hoster-Upload.exe');
         throw new Error(`Unexpected app path: ${name}`);
       }
-    });
+    }, { allowPlaintextCredentialStorage: true });
 
     try {
       assert.equal(explicitStore.filePath, path.join(isolatedDir, 'electron-config.json'));
@@ -579,7 +579,7 @@ describe('ConfigStore history split (electron-history.json)', () => {
   let s;
 
   function makeStore() {
-    const st = new ConfigStore({ isPackaged: false, getPath: () => dir });
+    const st = new ConfigStore({ isPackaged: false, getPath: () => dir }, { allowPlaintextCredentialStorage: true });
     st.filePath = path.join(dir, 'electron-config.json');
     st.historyPath = path.join(dir, 'electron-history.json');
     return st;

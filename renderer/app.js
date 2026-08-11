@@ -349,7 +349,7 @@ let _queueFilterCache = { filter: '', source: null, result: [] };
 let historyRowsData = [];
 let historySortState = { key: 'date', direction: 'desc' };
 let _historySortClicked = false;
-let historySidebarCounts = { total: 0, success: 0, error: 0 };
+let historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
 let accountSidebarFilter = 'all';
 let historySidebarFilter = 'all';
 let _knownUpdateInfo = null;
@@ -357,6 +357,8 @@ let _updateCheckBusy = false;
 let _updateInstallBusy = false;
 let _updateDialogReturnFocus = null;
 let _updateDialogInertState = [];
+let _startupAutoResumeController = null;
+let _startupAutoResumeCanceled = false;
 
 // Session-specific files for the "Files" panel (resets each session)
 let sessionFilesData = [];
@@ -386,7 +388,12 @@ window.addEventListener('unhandledrejection', (e) => {
 
 // --- Init ---
 async function init() {
-  config = await window.api.getConfig();
+  try {
+    config = await window.api.getConfig();
+  } catch (error) {
+    await showAppAlert(error.message || String(error), 'Zugangsdaten gesperrt');
+    throw error;
+  }
   setUiLanguage(config.globalSettings?.language);
   hosterSettings = config.hosterSettings || {};
   autoHealthCheckEnabled = loadAutoCheckPreference();
@@ -553,6 +560,7 @@ async function init() {
   } catch {}
 
   scheduleStartupAccountCheck();
+  scheduleRestoredQueueAutoStart();
 }
 
 // --- Tab switching ---
@@ -659,7 +667,7 @@ function initMenuBar() {
     void panel.offsetHeight;
     panel.classList.add('menu-closing');
     const finish = () => {
-      if (panelTokens.get(panel) !== token) return;
+      if (!Object.is(panelTokens.get(panel), token)) return;
       panel.style.display = 'none';
       panel.classList.remove('menu-closing');
     };
@@ -1597,6 +1605,54 @@ function buildQueuePreview() {
   persistQueueStateSoon();
 }
 
+function hideStartupResumeBanner() {
+  const banner = document.getElementById('startupResumeBanner');
+  if (banner) banner.hidden = true;
+}
+
+function cancelStartupQueueAutoStart() {
+  _startupAutoResumeCanceled = true;
+  _startupAutoResumeController?.cancel();
+  hideStartupResumeBanner();
+}
+
+async function startRestoredQueueAfterChecks(jobIds) {
+  const message = document.getElementById('startupResumeMessage');
+  async function waitForAccountCheck() {
+    if (!healthCheckRunning || _startupAutoResumeCanceled) return;
+    if (message) message.textContent = localizeUiText('Warte auf Account-Prüfung…');
+    await new Promise(resolve => setTimeout(resolve, 250));
+    return waitForAccountCheck();
+  }
+  await waitForAccountCheck();
+  hideStartupResumeBanner();
+  if (_startupAutoResumeCanceled || uploading || config?.globalSettings?.autoStartRestoredQueue !== true) return;
+  const jobs = window.AutoResume.getAutoResumeJobs(queueJobs, jobIds);
+  if (!jobs.length) return;
+  await startSelectedUpload(jobs);
+}
+
+function scheduleRestoredQueueAutoStart() {
+  if (config?.globalSettings?.autoStartRestoredQueue !== true || !window.AutoResume) return;
+  const jobs = window.AutoResume.getAutoResumeJobs(queueJobs);
+  if (!jobs.length) return;
+  _startupAutoResumeCanceled = false;
+  const banner = document.getElementById('startupResumeBanner');
+  const message = document.getElementById('startupResumeMessage');
+  const cancelButton = document.getElementById('cancelStartupResumeBtn');
+  _startupAutoResumeController = window.AutoResume.createAutoResumeController({
+    delaySeconds: 8,
+    onTick: (seconds, count) => {
+      if (banner) banner.hidden = false;
+      if (message) message.textContent = localizeUiText(`Wiederhergestellte Warteschlange startet in ${seconds} s (${count} Jobs).`);
+    },
+    onStart: jobIds => { startRestoredQueueAfterChecks(jobIds); },
+    onCancel: hideStartupResumeBanner
+  });
+  if (cancelButton) cancelButton.onclick = cancelStartupQueueAutoStart;
+  _startupAutoResumeController.schedule(jobs.map(job => job.id));
+}
+
 // --- Job Index Management ---
 function rebuildJobIndex() {
   _jobIndexById.clear();
@@ -2332,12 +2388,46 @@ function copySelectedRecentLinks() {
 // --- Backup export / import ---
 async function doBackupExport() {
   try {
+    const protectInput = document.getElementById('protectLocalBackupInput');
+    let password;
+    if (protectInput?.checked) {
+      const passwordInput = document.getElementById('localBackupPasswordInput');
+      const confirmInput = document.getElementById('localBackupPasswordConfirmInput');
+      password = passwordInput?.value || '';
+      if (password.length < 8) {
+        await showAppAlert('Das Backup-Passwort muss mindestens 8 Zeichen lang sein.', 'Passwort prüfen');
+        passwordInput?.focus();
+        return;
+      }
+      if (!secretsMatch(password, confirmInput?.value || '')) {
+        await showAppAlert('Die beiden Backup-Passwörter stimmen nicht überein.', 'Passwort prüfen');
+        confirmInput?.focus();
+        return;
+      }
+    }
     await flushPendingSettingsSaves();
-    const result = await window.api.exportBackup();
-    if (result && result.ok) showCopyToast('Backup exportiert');
+    const result = await window.api.exportBackup(password === undefined ? {} : { password });
+    if (result && result.ok) {
+      const passwordInput = document.getElementById('localBackupPasswordInput');
+      const confirmInput = document.getElementById('localBackupPasswordConfirmInput');
+      if (passwordInput) passwordInput.value = '';
+      if (confirmInput) confirmInput.value = '';
+      showCopyToast('Backup exportiert');
+    }
   } catch (err) {
     await showAppAlert('Export fehlgeschlagen: ' + (err.message || err), 'Export fehlgeschlagen');
   }
+}
+
+function secretsMatch(left, right) {
+  const a = String(left || '');
+  const b = String(right || '');
+  const length = Math.max(a.length, b.length);
+  let difference = a.length ^ b.length;
+  for (let index = 0; index < length; index++) {
+    difference |= (a.charCodeAt(index) || 0) ^ (b.charCodeAt(index) || 0);
+  }
+  return difference === 0;
 }
 
 function applyImportedConfig(importedConfig, message) {
@@ -2745,6 +2835,7 @@ function serializeUploadJob(job) {
 
 async function startUpload(opts) {
   if (uploading) return;
+  if (!(opts && opts._restoredAutoStart)) cancelStartupQueueAutoStart();
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
   else _cancelAutoRetry(false);
   uploading = true; // set immediately to prevent double-click race
@@ -2814,7 +2905,7 @@ function _markSkippedJobs(result) {
   for (const skipped of result.skippedJobs) {
     const job = _jobIndexById.get(skipped.jobId);
     if (job) {
-      job.status = 'error';
+      job.status = 'skipped';
       job.error = skipped.reason || 'Kein gültiger Account';
     }
   }
@@ -3240,7 +3331,7 @@ function _retryFailedFromBuckets(buckets, transientOnly) {
   if (toRetry.length === 0) return;
   const jobsToRetry = [];
   for (const item of toRetry) {
-    const job = queueJobs.find(j => (j.fileName === item.fileName) && (j.hoster === item.hoster) && (j.status === 'error' || j.status === 'skipped'));
+    const job = queueJobs.find(j => (j.fileName === item.fileName) && (j.hoster === item.hoster) && j.status === 'error');
     if (job) {
       job.status = 'queued';
       job.progress = 0;
@@ -3565,6 +3656,9 @@ function applySummaryResults(summary) {
       } else if (result.status === 'error') {
         job.status = 'error';
         job.error = result.error || 'Fehlgeschlagen';
+      } else if (result.status === 'skipped') {
+        job.status = 'skipped';
+        job.error = result.error || 'Übersprungen';
       }
       maybeAddSessionFile(job);
     }
@@ -3580,38 +3674,7 @@ function applySummaryResults(summary) {
 let _queueStatsCache = null;
 function _computeQueueStats() {
   if (_queueStatsCache) return _queueStatsCache;
-
-  let remaining = 0, inProgress = 0, done = 0, errors = 0;
-  let bytesRemaining = 0, totalSize = 0, remainingSize = 0, inProgressBytes = 0;
-  const total = queueJobs.length;
-
-  for (let i = 0; i < total; i++) {
-    const job = queueJobs[i];
-    const s = job.status;
-    const bt = job.bytesTotal || 0;
-    const bu = job.bytesUploaded || 0;
-    totalSize += bt;
-
-    if (s === 'uploading' || s === 'getting-server' || s === 'retrying') {
-      inProgress++;
-      remaining++;
-      inProgressBytes += bu;
-      bytesRemaining += Math.max(0, bt - bu);
-      remainingSize += Math.max(0, bt - bu);
-    } else if (s === 'preview' || s === 'queued') {
-      remaining++;
-      bytesRemaining += Math.max(0, bt - bu);
-      remainingSize += Math.max(0, bt - bu);
-    } else if (s === 'done') {
-      done++;
-    } else if (s === 'error') {
-      errors++;
-    } else if (s !== 'skipped') {
-      remainingSize += Math.max(0, bt - bu);
-    }
-  }
-
-  _queueStatsCache = { total, remaining, inProgress, done, errors, bytesRemaining, totalSize, remainingSize, inProgressBytes };
+  _queueStatsCache = window.QueueStats.calculateQueueStats(queueJobs);
   (typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn))(() => { _queueStatsCache = null; });
   return _queueStatsCache;
 }
@@ -3765,7 +3828,7 @@ function setAccountSidebarFilter(value) {
 }
 
 function setHistorySidebarFilter(value) {
-  if (!['all', 'success', 'error'].includes(value)) return;
+  if (!['all', 'success', 'error', 'skipped'].includes(value)) return;
   historySidebarFilter = value;
   _syncSidebarFilterButtons('[data-history-filter]', 'historyFilter', value);
   const container = document.getElementById('historyContainer');
@@ -3779,6 +3842,7 @@ function updateHistorySidebarSummary() {
   _setSidebarCount('historySidebarAllCount', historySidebarCounts.total);
   _setSidebarCount('historySidebarSuccessCount', historySidebarCounts.success);
   _setSidebarCount('historySidebarErrorCount', historySidebarCounts.error);
+  _setSidebarCount('historySidebarSkippedCount', historySidebarCounts.skipped);
   const retention = document.getElementById('historySidebarRetention');
   const select = document.getElementById('historyRetentionSelect');
   const labels = {
@@ -4191,6 +4255,14 @@ function renderSettings() {
           <input type="checkbox" class="settings-autosave" id="showDropTargetInput" ${globalSettings.showDropTarget ? 'checked' : ''}>
         </div>
       </div>
+      <div class="settings-option credential-fallback-option">
+        <div class="settings-option-copy">
+          <label for="allowPlaintextCredentialStorageInput">Unsichere Klartext-Speicherung erlauben</label>
+          <span class="settings-option-description">Nur verwenden, wenn der sichere Betriebssystem-Speicher dauerhaft nicht verfügbar ist. Passwörter und API-Keys liegen dann lesbar in der Konfigurationsdatei.</span>
+          <span class="panel-status" id="secretStoreStatus">Prüfe…</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="allowPlaintextCredentialStorageInput" ${globalSettings.allowPlaintextCredentialStorage ? 'checked' : ''}>
+      </div>
       <div class="settings-section-label">Programmupdate</div>
       <div class="settings-row program-update-row program-update-card">
         <div class="program-update-copy">
@@ -4235,6 +4307,13 @@ function renderSettings() {
           <span class="settings-option-description">Noch nicht abgeschlossene Uploads werden beim nächsten Programmstart erneut angezeigt.</span>
         </div>
         <input type="checkbox" class="settings-autosave" id="resumeQueueOnLaunchInput" ${globalSettings.resumeQueueOnLaunch === false ? '' : 'checked'}>
+      </div>
+      <div class="settings-option">
+        <div class="settings-option-copy">
+          <label for="autoStartRestoredQueueInput">Wiederhergestellte Warteschlange automatisch starten</label>
+          <span class="settings-option-description">Startet wartende Uploads nach einem sichtbaren, abbrechbaren Countdown. Fehler und übersprungene Einträge bleiben unangetastet.</span>
+        </div>
+        <input type="checkbox" class="settings-autosave" id="autoStartRestoredQueueInput" ${globalSettings.autoStartRestoredQueue ? 'checked' : ''}>
       </div>
       <div class="settings-section-label">Quelldateien</div>
       <div class="settings-option source-delete-option">
@@ -4292,6 +4371,10 @@ function renderSettings() {
         <div class="settings-row checkbox-row">
           <label>Unterordner einbeziehen</label>
           <input type="checkbox" class="settings-autosave" id="fmRecursiveInput" ${fm.recursive ? 'checked' : ''}>
+        </div>
+        <div class="settings-row checkbox-row">
+          <label>Vorhandene Dateien einmalig einlesen</label>
+          <input type="checkbox" class="settings-autosave" id="fmIncludeExistingInput" ${fm.includeExisting ? 'checked' : ''}>
         </div>
         <div class="settings-row checkbox-row">
           <label>Duplikate überspringen</label>
@@ -4472,6 +4555,17 @@ function renderSettings() {
         <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
       </section>
       <div class="settings-section-label">Lokales Datei-Backup</div>
+      <div class="settings-row local-backup-password-row">
+        <div class="settings-copy">
+          <label for="protectLocalBackupInput">Mit eigenem Passwort schützen</label>
+          <span class="hint">Ohne dieses Passwort kann das Backup nicht importiert werden.</span>
+        </div>
+        <input type="checkbox" id="protectLocalBackupInput">
+      </div>
+      <div class="local-backup-password-fields" id="localBackupPasswordFields" hidden>
+        <input type="password" class="key-input" id="localBackupPasswordInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort (mindestens 8 Zeichen)">
+        <input type="password" class="key-input" id="localBackupPasswordConfirmInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort wiederholen">
+      </div>
       <div class="backup-file-actions">
         <button class="btn btn-secondary" id="exportBackupBtn">Datei exportieren</button>
         <button class="btn btn-secondary" id="importBackupBtn">Datei importieren</button>
@@ -4752,6 +4846,12 @@ function renderSettings() {
 
   document.getElementById('exportBackupBtn').addEventListener('click', () => doBackupExport());
   document.getElementById('importBackupBtn').addEventListener('click', () => doBackupImport());
+  document.getElementById('protectLocalBackupInput').addEventListener('change', (event) => {
+    const fields = document.getElementById('localBackupPasswordFields');
+    if (!fields) return;
+    fields.hidden = !event.target.checked;
+    if (event.target.checked) document.getElementById('localBackupPasswordInput')?.focus();
+  });
   document.getElementById('createOnlineBackupBtn').addEventListener('click', () => doOnlineBackupCreate());
   document.getElementById('copyOnlineBackupKeyBtn').addEventListener('click', async () => {
     const key = document.getElementById('onlineBackupKeyOutput').value;
@@ -4770,6 +4870,13 @@ function renderSettings() {
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
   document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
+  window.api.getSecretStoreStatus().then(result => {
+    const badge = document.getElementById('secretStoreStatus');
+    if (!badge) return;
+    const available = result?.status === 'available';
+    badge.textContent = available ? 'Sicher verfügbar' : 'Nicht verfügbar';
+    badge.classList.toggle('active', available);
+  }).catch(() => {});
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
@@ -4783,6 +4890,15 @@ function renderSettings() {
           title: 'Quelldateien dauerhaft löschen?',
           message: 'Nach einem vollständigen Upload zu allen ausgewählten Hostern wird die Originaldatei ohne Papierkorb endgültig von diesem PC gelöscht.',
           confirmText: 'Dauerhaftes Löschen aktivieren',
+          danger: true
+        });
+        if (!confirmed) input.checked = false;
+      }
+      if (input.id === 'allowPlaintextCredentialStorageInput' && input.checked) {
+        const confirmed = await showAppConfirm({
+          title: 'Zugangsdaten unverschlüsselt speichern?',
+          message: 'Passwörter und API-Keys werden dann im Klartext auf diesem PC gespeichert. Andere Benutzer oder Programme mit Dateizugriff können sie lesen.',
+          confirmText: 'Klartext-Speicherung erlauben',
           danger: true
         });
         if (!confirmed) input.checked = false;
@@ -4911,6 +5027,8 @@ async function performSaveSettings(options = {}) {
       return (v === 'single' || v === 'daily' || v === 'session') ? v : 'single';
     })(),
     resumeQueueOnLaunch: elChk('resumeQueueOnLaunchInput', cur.resumeQueueOnLaunch !== false),
+    autoStartRestoredQueue: elChk('autoStartRestoredQueueInput', !!cur.autoStartRestoredQueue),
+    allowPlaintextCredentialStorage: elChk('allowPlaintextCredentialStorageInput', !!cur.allowPlaintextCredentialStorage),
     parallelUploadCount: elInt('parallelUploadCountInput', cur.parallelUploadCount ?? 0, 0, 0, 100),
     scaleParallelUploads: elChk('scaleParallelUploadsInput', !!cur.scaleParallelUploads),
     removeFromQueueOnDone: elChk('removeFromQueueOnDoneInput', !!cur.removeFromQueueOnDone),
@@ -4931,6 +5049,7 @@ async function performSaveSettings(options = {}) {
       enabled: elChk('fmEnabledInput', !!curFm.enabled),
       folderPath: elTxt('fmFolderPathInput', curFm.folderPath || '').trim(),
       recursive: elChk('fmRecursiveInput', !!curFm.recursive),
+      includeExisting: elChk('fmIncludeExistingInput', !!curFm.includeExisting),
       filterMode: (() => { const el = document.getElementById('fmFilterModeInput'); return el ? (el.value || 'include') : (curFm.filterMode || 'include'); })(),
       extensions: elTxt('fmExtensionsInput', curFm.extensions || '').trim(),
       skipDuplicates: elChk('fmSkipDuplicatesInput', curFm.skipDuplicates !== false),
@@ -5003,7 +5122,14 @@ async function performSaveSettings(options = {}) {
   const badge = document.getElementById('folderMonitorStatusBadge');
   if (fmSettings && fmSettings.enabled && fmSettings.folderPath) {
     try {
-      await window.api.folderMonitorStart(fmSettings);
+      const folderStart = await window.api.folderMonitorStart(fmSettings);
+      if (folderStart?.includesExisting) {
+        fmSettings.includeExisting = false;
+        globalSettings.folderMonitor.includeExisting = false;
+        config.globalSettings.folderMonitor.includeExisting = false;
+        const includeExistingInput = document.getElementById('fmIncludeExistingInput');
+        if (includeExistingInput) includeExistingInput.checked = false;
+      }
       if (badge) { badge.textContent = 'Aktiv'; badge.className = 'panel-status active'; }
     } catch {
       if (badge) { badge.textContent = 'Fehler'; badge.className = 'panel-status'; }
@@ -6169,7 +6295,7 @@ async function loadHistory() {
     history = await window.api.getHistory();
   } catch (error) {
     historyRowsData = [];
-    historySidebarCounts = { total: 0, success: 0, error: 0 };
+    historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
     updateHistorySidebarSummary();
     syncHistoryClearAction();
     if (container) container.innerHTML = `<div class="empty-state history-error-state" role="alert"><strong>${escapeHtml(localizeUiText('Verlauf konnte nicht geladen werden.'))}</strong><span>${escapeHtml(error?.message || String(error))}</span><button class="btn btn-secondary" type="button" data-retry-history>${escapeHtml(localizeUiText('Erneut versuchen'))}</button></div>`;
@@ -6187,7 +6313,7 @@ async function loadHistory() {
   }
   if (!history || history.length === 0) {
     historyRowsData = [];
-    historySidebarCounts = { total: 0, success: 0, error: 0 };
+    historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
     updateHistorySidebarSummary();
     syncHistoryClearAction();
     container.innerHTML = '<p class="empty-state">Noch keine Uploads.</p>';
@@ -6196,7 +6322,7 @@ async function loadHistory() {
 
   historySortState = { key: 'date', direction: 'desc' };
   historyRowsData = [];
-  historySidebarCounts = { total: 0, success: 0, error: 0 };
+  historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
   let order = 0;
 
   for (const batch of history) {
@@ -6204,17 +6330,15 @@ async function loadHistory() {
     for (const file of (batch.files || [])) {
       for (const result of (file.results || [])) {
         historySidebarCounts.total++;
-        const isError = result.status === 'aborted' || result.status === 'error';
-        if (isError) historySidebarCounts.error++;
-        else historySidebarCounts.success++;
-        const detail = isError
-          ? String(result.error || result.message || (result.status === 'aborted' ? 'Abgebrochen' : 'Fehlgeschlagen'))
-          : (result.download_url || result.embed_url || '');
+        const category = window.HistoryStatus.classifyHistoryStatus(result.status);
+        historySidebarCounts[category]++;
+        const detail = window.HistoryStatus.historyDetail(result);
         historyRowsData.push({
           date: dt.text, dateTs: dt.ts, rawTimestamp: batch.timestamp,
           filename: file.name || '', host: result.hoster || '',
           link: detail,
-          isError, order: order++
+          status: result.status || '', category,
+          isError: category === 'error', order: order++
         });
       }
     }
@@ -6331,7 +6455,7 @@ function _renderRecentVirtualRows() {
   tbody.innerHTML = parts.join('');
 }
 
-function renderRecentUploadsPanel(appendOnly = false) {
+function renderRecentUploadsPanel(_appendOnly = false) {
   const tbody = document.getElementById('recentFilesBody');
   if (!tbody) return;
   _recentPendingAppends = 0;
@@ -6468,7 +6592,7 @@ function _renderHistoryVirtualRows() {
     const row = _historyWorking[i];
     const link = row.link || '';
     parts.push('<tr class="history-row');
-    if (row.isError) parts.push(' error');
+    parts.push(` ${row.category}`);
     parts.push('" data-link="');
     parts.push(escapeAttr(link));
     parts.push(`" style="height:${VIRTUAL_ROW_HEIGHT}px"><td class="col-date">`);
@@ -6481,15 +6605,16 @@ function _renderHistoryVirtualRows() {
     parts.push(escapeAttr(link));
     parts.push('">');
     parts.push(escapeHtml(link));
-    parts.push('</span><button class="history-copy-link" type="button" data-copy-link aria-label="Link kopieren" title="Link kopieren">⧉</button></div></td></tr>');
+    parts.push('</span>');
+    if (row.category === 'success' && link) parts.push('<button class="history-copy-link" type="button" data-copy-link aria-label="Link kopieren" title="Link kopieren">⧉</button>');
+    parts.push('</div></td></tr>');
   }
   if (bottomPad > 0) parts.push(`<tr class="virtual-spacer" style="height:${bottomPad}px"><td colspan="4"></td></tr>`);
   tbody.innerHTML = parts.join('');
 }
 
 function _getVisibleHistoryRows() {
-  if (historySidebarFilter === 'success') return historyRowsData.filter(row => !row.isError);
-  if (historySidebarFilter === 'error') return historyRowsData.filter(row => row.isError);
+  if (historySidebarFilter !== 'all') return historyRowsData.filter(row => row.category === historySidebarFilter);
   return historyRowsData;
 }
 
@@ -6527,7 +6652,7 @@ function renderHistoryTable(container) {
   };
 
   container.innerHTML = `<table class="results-table history-table"><thead><tr>
-    ${headerCell('date', 'Datum')}${headerCell('filename', 'Dateiname')}${headerCell('host', 'Hoster')}${headerCell('link', 'Link')}
+    ${headerCell('date', 'Datum')}${headerCell('filename', 'Dateiname')}${headerCell('host', 'Hoster')}${headerCell('link', 'Ergebnis')}
   </tr></thead><tbody id="historyBody"></tbody></table>`;
 
   if (!_historyListenersBound) {
@@ -6558,7 +6683,7 @@ function renderHistoryTable(container) {
         return;
       }
       const row = e.target.closest('.history-row');
-      if (row && !row.classList.contains('error')) {
+      if (row && row.classList.contains('success')) {
         const link = row.dataset.link;
         if (link) { window.api.copyToClipboard(link); showCopyToast('Link kopiert'); }
       }
@@ -7666,7 +7791,7 @@ function formatDuration(seconds) {
 
 function updateStatsPanel() {
   const stats = _computeQueueStats();
-  const remaining = stats.total - stats.done - stats.errors;
+  const remaining = stats.remaining;
 
   const el = (id) => document.getElementById(id);
   if (el('statQueueTotal')) el('statQueueTotal').textContent = stats.total;

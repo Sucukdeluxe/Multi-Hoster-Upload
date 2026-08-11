@@ -70,4 +70,16 @@ describe('backup-crypto', () => {
     // but both decrypt to same result
     assert.deepStrictEqual(decrypt(a), decrypt(b));
   });
+
+  it('password-protected backups require the exact password', () => {
+    const buf = encrypt(sampleConfig, 'correct horse battery staple');
+    assert.equal(buf.subarray(0, 4).toString('ascii'), 'MHU2');
+    assert.throws(() => decrypt(buf), (error) => error.needsPassword === true);
+    assert.throws(() => decrypt(buf, 'wrong password'), /Falsches Passwort/);
+    assert.deepStrictEqual(decrypt(buf, 'correct horse battery staple'), sampleConfig);
+  });
+
+  it('rejects an empty password instead of silently using the built-in key', () => {
+    assert.throws(() => encrypt(sampleConfig, '   '), /Passwort/);
+  });
 });

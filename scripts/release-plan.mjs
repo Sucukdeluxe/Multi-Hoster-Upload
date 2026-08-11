@@ -43,6 +43,5 @@ export function resolveExistingReleaseId(plan, release) {
 }
 
 export function renderLatestYml(plan, sha, size, releaseDate = new Date().toISOString()) {
-  const releaseAssetName = plan.setupName.replace(/ /g, '.');
-  return `version: ${plan.version}\nfiles:\n  - url: ${releaseAssetName}\n    sha512: ${sha}\n    size: ${size}\npath: ${releaseAssetName}\nsha512: ${sha}\nreleaseDate: '${releaseDate}'\n`;
+  return `version: ${plan.version}\nfiles:\n  - url: ${plan.setupName}\n    sha512: ${sha}\n    size: ${size}\npath: ${plan.setupName}\nsha512: ${sha}\nreleaseDate: '${releaseDate}'\n`;
 }

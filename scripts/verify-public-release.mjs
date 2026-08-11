@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const failures = new Map();
+const publicActionsDir = `.${['git', 'hub'].join('')}`;
+const privateActionsDir = `.${['gi', 'tea'].join('')}`;
 const sourceFiles = [
   '.gitignore',
   'README.md',
@@ -13,6 +15,8 @@ const sourceFiles = [
   'assets/app_icon.ico',
   'assets/app_icon.png',
   'eslint.config.mjs',
+  `${privateActionsDir}/workflows/ci.yml`,
+  `${publicActionsDir}/workflows/ci.yml`,
   'lib/account-auth.js',
   'lib/account-rotation.js',
   'lib/backup-crypto.js',
@@ -23,6 +27,7 @@ const sourceFiles = [
   'lib/diagnostics-collectors.js',
   'lib/doodstream-upload.js',
   'lib/file-probe.js',
+  'lib/file-discovery.js',
   'lib/folder-monitor.js',
   'lib/hosters.js',
   'lib/ip-allowlist.js',
@@ -53,6 +58,7 @@ const sourceFiles = [
   'lib/throttled-cache.js',
   'lib/updater.js',
   'lib/upload-log.js',
+  'lib/upload-confirmation.js',
   'lib/upload-manager.js',
   'lib/vidmoly-upload.js',
   'lib/voe-upload.js',
@@ -65,9 +71,12 @@ const sourceFiles = [
   'renderer/account-status.js',
   'renderer/account-submit.js',
   'renderer/app.js',
+  'renderer/auto-resume.js',
   'renderer/drop-target.html',
   'renderer/i18n.js',
   'renderer/index.html',
+  'renderer/history-status.js',
+  'renderer/queue-stats.js',
   'renderer/styles.css',
   'scripts/afterPack.cjs',
   'scripts/dev-runner.cjs',
@@ -81,6 +90,7 @@ const sourceFiles = [
   'tests/account-auth.test.js',
   'tests/account-rotation.test.js',
   'tests/account-status.test.js',
+  'tests/auto-resume.test.js',
   'tests/backup-crypto.test.js',
   'tests/byse-reject-recovery.test.js',
   'tests/coalesced-set.test.js',
@@ -92,6 +102,9 @@ const sourceFiles = [
   'tests/doodstream-api-upload.test.js',
   'tests/doodstream-upload.test.js',
   'tests/file-probe.test.js',
+  'tests/file-discovery.test.js',
+  'tests/folder-monitor.test.js',
+  'tests/history-status.test.js',
   'tests/history-retention.test.js',
   'tests/hosters.test.js',
   'tests/i18n.test.js',
@@ -108,9 +121,11 @@ const sourceFiles = [
   'tests/queue-dedup.test.js',
   'tests/queue-persistence-scenario.test.js',
   'tests/queue-prune.test.js',
+  'tests/queue-stats.test.js',
   'tests/remote-config.test.js',
   'tests/remote-server.test.js',
   'tests/semaphore.test.js',
+  'tests/secret-store.test.js',
   'tests/serialized-runner.test.js',
   'tests/settings-backup.test.js',
   'tests/settings-import-gate.test.js',
@@ -128,6 +143,7 @@ const sourceFiles = [
   'tests/ui-smoke.js',
   'tests/updater-version.test.js',
   'tests/upload-log.test.js',
+  'tests/upload-confirmation.test.js',
   'tests/upload-manager.test.js',
   'tests/validate-credentials.test.js',
   'tests/webhook-notify.test.js'
@@ -147,6 +163,7 @@ const expectedScripts = {
   dev: 'node scripts/dev-runner.cjs',
   test: 'node --test tests/*.test.js tests/ui-smoke.js',
   'test:backup-api': 'npm --prefix services/backup-api test',
+  verify: 'npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev',
   lint: 'eslint .',
   dist: 'electron-builder --win',
   'release:win': 'electron-builder --publish never --win nsis portable'

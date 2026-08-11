@@ -13,7 +13,7 @@ function createTestConfigStore() {
     getPath: () => tmpDir
   };
   const ConfigStore = require('../lib/config-store');
-  const store = new ConfigStore(mockApp);
+  const store = new ConfigStore(mockApp, { allowPlaintextCredentialStorage: true });
   store.filePath = path.join(tmpDir, 'test-config.json');
   return { store, tmpDir };
 }
