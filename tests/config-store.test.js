@@ -3,7 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const Module = require('node:module');
+const originalLoad = Module._load;
+const safeStorage = {
+  isEncryptionAvailable: () => true,
+  encryptString: value => Buffer.from(`test-protected:${value}`),
+  decryptString: value => value.toString().replace(/^test-protected:/, '')
+};
+Module._load = function load(request, parent, isMain) {
+  if (request === 'electron') return { safeStorage };
+  return originalLoad.call(this, request, parent, isMain);
+};
 const ConfigStore = require('../lib/config-store');
+require('../lib/secret-store').encryptField('test-initialization');
+Module._load = originalLoad;
 
 let tmpDir;
 let store;
@@ -15,7 +28,7 @@ function createStore() {
   };
   // ConfigStore uses path.join(__dirname, '..') for non-packaged
   // We override by setting filePath directly
-  store = new ConfigStore(fakeApp, { allowPlaintextCredentialStorage: true });
+  store = new ConfigStore(fakeApp);
   store.filePath = path.join(tmpDir, 'electron-config.json');
   store.historyPath = path.join(tmpDir, 'electron-history.json');
   return store;
@@ -46,7 +59,7 @@ describe('ConfigStore', () => {
         if (name === 'exe') return path.join(isolatedDir, 'Multi-Hoster-Upload.exe');
         throw new Error(`Unexpected app path: ${name}`);
       }
-    }, { allowPlaintextCredentialStorage: true });
+    });
 
     try {
       assert.equal(explicitStore.filePath, path.join(isolatedDir, 'electron-config.json'));
@@ -76,11 +89,34 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.shutdownAfterFinish, 'nothing');
     assert.equal(config.globalSettings.logFilePath, '');
     assert.equal(config.globalSettings.resumeQueueOnLaunch, true);
+    assert.equal(Object.hasOwn(config.globalSettings, 'allowPlaintextCredentialStorage'), false);
     assert.equal(config.globalSettings.parallelUploadCount, 0);
     assert.equal(config.globalSettings.scaleParallelUploads, false);
     assert.equal(config.globalSettings.lastBrowseDirectory, '');
     assert.equal(config.globalSettings.pendingQueue, null);
     assert.deepEqual(config.history, []);
+  });
+
+  it('drops the retired plaintext credential setting from legacy configurations', () => {
+    fs.writeFileSync(store.filePath, JSON.stringify({
+      hosters: {},
+      hosterSettings: {},
+      globalSettings: { allowPlaintextCredentialStorage: true }
+    }), 'utf-8');
+
+    const config = store.load();
+
+    assert.equal(Object.hasOwn(config.globalSettings, 'allowPlaintextCredentialStorage'), false);
+  });
+
+  it('never writes the retired plaintext credential setting back to disk', async () => {
+    await store.save({
+      globalSettings: { allowPlaintextCredentialStorage: true }
+    });
+
+    const saved = JSON.parse(fs.readFileSync(store.filePath, 'utf-8'));
+
+    assert.equal(Object.hasOwn(saved.globalSettings, 'allowPlaintextCredentialStorage'), false);
   });
 
   it('keeps permanent source deletion disabled by default', () => {
@@ -579,7 +615,7 @@ describe('ConfigStore history split (electron-history.json)', () => {
   let s;
 
   function makeStore() {
-    const st = new ConfigStore({ isPackaged: false, getPath: () => dir }, { allowPlaintextCredentialStorage: true });
+    const st = new ConfigStore({ isPackaged: false, getPath: () => dir });
     st.filePath = path.join(dir, 'electron-config.json');
     st.historyPath = path.join(dir, 'electron-history.json');
     return st;

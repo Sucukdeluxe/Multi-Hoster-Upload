@@ -4255,14 +4255,6 @@ function renderSettings() {
           <input type="checkbox" class="settings-autosave" id="showDropTargetInput" ${globalSettings.showDropTarget ? 'checked' : ''}>
         </div>
       </div>
-      <div class="settings-option credential-fallback-option">
-        <div class="settings-option-copy">
-          <label for="allowPlaintextCredentialStorageInput">Unsichere Klartext-Speicherung erlauben</label>
-          <span class="settings-option-description">Nur verwenden, wenn der sichere Betriebssystem-Speicher dauerhaft nicht verfügbar ist. Passwörter und API-Keys liegen dann lesbar in der Konfigurationsdatei.</span>
-          <span class="panel-status" id="secretStoreStatus">Prüfe…</span>
-        </div>
-        <input type="checkbox" class="settings-autosave" id="allowPlaintextCredentialStorageInput" ${globalSettings.allowPlaintextCredentialStorage ? 'checked' : ''}>
-      </div>
       <div class="settings-section-label">Programmupdate</div>
       <div class="settings-row program-update-row program-update-card">
         <div class="program-update-copy">
@@ -4870,13 +4862,6 @@ function renderSettings() {
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
   document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
-  window.api.getSecretStoreStatus().then(result => {
-    const badge = document.getElementById('secretStoreStatus');
-    if (!badge) return;
-    const available = result?.status === 'available';
-    badge.textContent = available ? 'Sicher verfügbar' : 'Nicht verfügbar';
-    badge.classList.toggle('active', available);
-  }).catch(() => {});
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
@@ -4890,15 +4875,6 @@ function renderSettings() {
           title: 'Quelldateien dauerhaft löschen?',
           message: 'Nach einem vollständigen Upload zu allen ausgewählten Hostern wird die Originaldatei ohne Papierkorb endgültig von diesem PC gelöscht.',
           confirmText: 'Dauerhaftes Löschen aktivieren',
-          danger: true
-        });
-        if (!confirmed) input.checked = false;
-      }
-      if (input.id === 'allowPlaintextCredentialStorageInput' && input.checked) {
-        const confirmed = await showAppConfirm({
-          title: 'Zugangsdaten unverschlüsselt speichern?',
-          message: 'Passwörter und API-Keys werden dann im Klartext auf diesem PC gespeichert. Andere Benutzer oder Programme mit Dateizugriff können sie lesen.',
-          confirmText: 'Klartext-Speicherung erlauben',
           danger: true
         });
         if (!confirmed) input.checked = false;
@@ -5028,7 +5004,6 @@ async function performSaveSettings(options = {}) {
     })(),
     resumeQueueOnLaunch: elChk('resumeQueueOnLaunchInput', cur.resumeQueueOnLaunch !== false),
     autoStartRestoredQueue: elChk('autoStartRestoredQueueInput', !!cur.autoStartRestoredQueue),
-    allowPlaintextCredentialStorage: elChk('allowPlaintextCredentialStorageInput', !!cur.allowPlaintextCredentialStorage),
     parallelUploadCount: elInt('parallelUploadCountInput', cur.parallelUploadCount ?? 0, 0, 0, 100),
     scaleParallelUploads: elChk('scaleParallelUploadsInput', !!cur.scaleParallelUploads),
     removeFromQueueOnDone: elChk('removeFromQueueOnDoneInput', !!cur.removeFromQueueOnDone),

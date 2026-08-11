@@ -3,6 +3,25 @@ const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const Module = require('node:module');
+
+const originalLoad = Module._load;
+Module._load = function load(request, parent, isMain) {
+  if (request === 'electron') {
+    return {
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: value => Buffer.from(`test-protected:${value}`),
+        decryptString: value => value.toString().replace(/^test-protected:/, '')
+      }
+    };
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+const ConfigStore = require('../lib/config-store');
+require('../lib/secret-store').encryptField('test-initialization');
+Module._load = originalLoad;
 
 // Minimal app mock for ConfigStore
 function createTestConfigStore() {
@@ -12,8 +31,7 @@ function createTestConfigStore() {
     getPath: (name) => tmpDir,
     getPath: () => tmpDir
   };
-  const ConfigStore = require('../lib/config-store');
-  const store = new ConfigStore(mockApp, { allowPlaintextCredentialStorage: true });
+  const store = new ConfigStore(mockApp);
   store.filePath = path.join(tmpDir, 'test-config.json');
   return { store, tmpDir };
 }

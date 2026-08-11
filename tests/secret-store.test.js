@@ -28,15 +28,6 @@ function availableSafeStorage(overrides = {}) {
   };
 }
 
-test('reports whether secure credential storage is available', () => {
-  withSecretStore(availableSafeStorage(), secretStore => {
-    assert.equal(secretStore.getAvailabilityStatus(), 'available');
-  });
-  withSecretStore(null, secretStore => {
-    assert.equal(secretStore.getAvailabilityStatus(), 'unavailable');
-  });
-});
-
 test('encrypts and decrypts fields when secure storage is available', () => {
   withSecretStore(availableSafeStorage(), secretStore => {
     const encrypted = secretStore.encryptField('secret');
@@ -55,13 +46,18 @@ test('refuses plaintext storage by default when secure storage is unavailable', 
   });
 });
 
-test('allows plaintext storage only through an explicit opt-in', () => {
+test('never allows plaintext storage when secure storage is unavailable', () => {
   withSecretStore(null, secretStore => {
-    assert.equal(secretStore.encryptField('secret', { allowPlaintext: true }), 'secret');
+    assert.throws(
+      () => secretStore.encryptField('secret', { allowPlaintext: true }),
+      error => error instanceof secretStore.SecretStoreError
+        && error.code === 'SECRET_STORE_UNAVAILABLE'
+    );
     const config = { hosters: { example: [{ password: 'secret' }] } };
-    assert.equal(
-      secretStore.encryptCredentials(config, { allowPlaintext: true }).hosters.example[0].password,
-      'secret'
+    assert.throws(
+      () => secretStore.encryptCredentials(config, { allowPlaintext: true }),
+      error => error instanceof secretStore.SecretStoreError
+        && error.code === 'SECRET_STORE_UNAVAILABLE'
     );
   });
 });
@@ -75,7 +71,12 @@ test('refuses plaintext storage by default when encryption fails', () => {
         && error.code === 'SECRET_STORE_ENCRYPT_FAILED'
         && error.cause === failure
     );
-    assert.equal(secretStore.encryptField('secret', { allowPlaintext: true }), 'secret');
+    assert.throws(
+      () => secretStore.encryptField('secret', { allowPlaintext: true }),
+      error => error instanceof secretStore.SecretStoreError
+        && error.code === 'SECRET_STORE_ENCRYPT_FAILED'
+        && error.cause === failure
+    );
   });
 });
 
