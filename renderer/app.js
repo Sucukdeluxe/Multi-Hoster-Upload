@@ -2305,6 +2305,8 @@ function showRecentContextMenu(row, x, y) {
     applyRecentSelectionClasses();
   }
   const menu = document.getElementById('recentContextMenu');
+  const copyItem = menu.querySelector('[data-action="recent-copy-links"]');
+  if (copyItem) copyItem.textContent = selectedRecentIds.size > 1 ? `Links kopieren (${selectedRecentIds.size})` : 'Link kopieren';
   menu.style.display = 'block';
   menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 5) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 5) + 'px';
