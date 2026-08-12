@@ -1486,6 +1486,9 @@ setTimeout(async () => {
     const historyWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
     check('History view separates sidebar and main workspace', historyWorkspaceLayout === true);
 
+    const singleRecentLinkContextLabel = await wc.executeJavaScript('(() => { selectedRecentIds.clear(); const row = document.createElement("tr"); row.dataset.order = "1001"; showRecentContextMenu(row, 8, 8); const label = document.querySelector("#recentContextMenu [data-action=recent-copy-links]")?.textContent?.trim(); hideContextMenu(); return label; })()');
+    check('Recent upload context menu uses singular copy text for one link', singleRecentLinkContextLabel === 'Link kopieren');
+
     const historySidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#history-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#history-view .view-sidebar-section")?.getBoundingClientRect(); const retention = document.getElementById("historySidebarRetention")?.textContent?.trim(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && retention === "Alles behalten"); })()');
     check('History sidebar shows the active retention in its lower area', historySidebarInformation === true);
 

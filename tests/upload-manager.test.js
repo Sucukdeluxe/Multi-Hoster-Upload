@@ -225,6 +225,39 @@ describe('UploadManager', () => {
     assert.ok(batchDone, 'batch-done should be emitted even after cancel');
   });
 
+  it('does not emit one aborted progress event per job when cancelling a whole batch', async () => {
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 10000);
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Aborted'));
+        }, { once: true });
+      });
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const statuses = [];
+    mgr.on('progress', (data) => statuses.push(data.status));
+
+    const tasks = Array.from({ length: 60 }, (_, index) => ({
+      jobId: `cancel-${index}`,
+      file: `/test/cancel-${index}.mp4`,
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }));
+    const batchPromise = mgr.startBatch(tasks);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    mgr.cancel();
+    await batchPromise;
+
+    assert.equal(statuses.filter((status) => status === 'aborted').length, 0);
+  });
+
   it('maxSizeMb filter skips oversized files', async () => {
     fakeFileSize = 5 * 1024 * 1024; // 5 MB
 
