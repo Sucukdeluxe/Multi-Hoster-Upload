@@ -343,6 +343,9 @@ const _doneRemovalCoalescer = window.CoalescedSet
   : null;
 const queueSortState = { key: 'filename', direction: 'asc' };
 let uploadSidebarFilter = 'all';
+let queueSearchQuery = '';
+let queueHosterFilter = '';
+let queueStatusFilter = '';
 let _queueFilterCache = { filter: '', source: null, result: [] };
 
 // History state
@@ -415,6 +418,8 @@ async function init() {
   renderRecentUploadsPanel();
   updateUploadView();
   updateStatusBar();
+  const interruptedCount = queueJobs.filter(job => job.interrupted).length;
+  if (interruptedCount > 0) showCopyToast(interruptedCount === 1 ? '1 unterbrochener Upload kann fortgesetzt werden.' : `${interruptedCount} unterbrochene Uploads können fortgesetzt werden.`, 7000);
 
   // Version display
   try {
@@ -1178,6 +1183,7 @@ function restoreQueueStateFromConfig() {
       .map(file => ({ path: file.path, name: file.name || file.path.split(/[\\/]/).pop(), size: file.size || 0 }))
     : [];
 
+  const interruptedJobIds = new Set(Array.isArray(config?.globalSettings?.uploadRecovery?.jobIds) ? config.globalSettings.uploadRecovery.jobIds : []);
   const rawJobs = Array.isArray(pending.queueJobs)
     ? pending.queueJobs
       .filter(job => job && job.fileName && job.hoster)
@@ -1194,6 +1200,8 @@ function restoreQueueStateFromConfig() {
         elapsed: 0,
         remaining: 0,
         error: job.error || null,
+        failureDetails: job.failureDetails || null,
+        interrupted: interruptedJobIds.size > 0 && !['done', 'error', 'skipped'].includes(job.status),
         result: job.result || null,
         sourceCleanupToken: job.sourceCleanupToken || null,
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
@@ -1270,6 +1278,7 @@ function buildPersistedQueueState() {
         status: isTerminal ? job.status : 'preview',
         bytesTotal: job.bytesTotal || 0,
         error: isTerminal ? (job.error || null) : null,
+        failureDetails: isTerminal ? (job.failureDetails || null) : null,
         result: isTerminal ? (job.result || null) : null,
         sourceCleanupToken: job.sourceCleanupToken || null,
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
@@ -1894,10 +1903,20 @@ function _matchesUploadSidebarFilter(job, filter = uploadSidebarFilter) {
   return true;
 }
 
+function _matchesQueueDetailFilter(job) {
+  if (queueSearchQuery && !String(job.fileName || '').toLocaleLowerCase(getUiLocale()).includes(queueSearchQuery)) return false;
+  if (queueHosterFilter && job.hoster !== queueHosterFilter) return false;
+  if (queueStatusFilter === 'active') return ['uploading', 'getting-server', 'retrying'].includes(job.status);
+  if (queueStatusFilter === 'waiting') return ['preview', 'queued'].includes(job.status);
+  if (queueStatusFilter === 'done') return job.status === 'done';
+  return !queueStatusFilter || job.status === queueStatusFilter;
+}
+
 function _getVisibleQueueJobs() {
-  if (uploadSidebarFilter === 'all') return queueJobs;
-  const filtered = queueJobs.filter(job => _matchesUploadSidebarFilter(job));
-  if (_queueFilterCache.filter === uploadSidebarFilter && _queueFilterCache.source === queueJobs && _queueFilterCache.result.length === filtered.length) {
+  const filterKey = `${uploadSidebarFilter}\u0001${queueSearchQuery}\u0001${queueHosterFilter}\u0001${queueStatusFilter}`;
+  if (filterKey === 'all\u0001\u0001\u0001') return queueJobs;
+  const filtered = queueJobs.filter(job => _matchesUploadSidebarFilter(job) && _matchesQueueDetailFilter(job));
+  if (_queueFilterCache.filter === filterKey && _queueFilterCache.source === queueJobs && _queueFilterCache.result.length === filtered.length) {
     let unchanged = true;
     for (let index = 0; index < filtered.length; index++) {
       if (_queueFilterCache.result[index] !== filtered[index]) {
@@ -1907,7 +1926,7 @@ function _getVisibleQueueJobs() {
     }
     if (unchanged) return _queueFilterCache.result;
   }
-  _queueFilterCache = { filter: uploadSidebarFilter, source: queueJobs, result: filtered };
+  _queueFilterCache = { filter: filterKey, source: queueJobs, result: filtered };
   return filtered;
 }
 
@@ -1934,13 +1953,14 @@ function renderQueueTable() {
   const tbody = document.getElementById('queueBody');
   if (!tbody) return;
 
+  syncQueueHosterFilterOptions();
   const visibleJobs = _getVisibleQueueJobs();
   const selectionChanged = _normalizeQueueSelectionToVisible(visibleJobs);
   _sortedJobsCache = sortQueueJobs(visibleJobs);
   if (selectionChanged) updateQueueActionButtons();
   const totalRows = _sortedJobsCache.length;
   const queueContainer = document.getElementById('queueContainer');
-  const filteredEmpty = totalRows === 0 && queueJobs.length > 0 && uploadSidebarFilter !== 'all';
+  const filteredEmpty = totalRows === 0 && queueJobs.length > 0 && (uploadSidebarFilter !== 'all' || queueSearchQuery || queueHosterFilter || queueStatusFilter);
   queueContainer?.classList.toggle('filter-empty', filteredEmpty);
   if (queueContainer) queueContainer.dataset.emptyLabel = filteredEmpty ? localizeUiText('Keine Uploads entsprechen diesem Filter.') : '';
 
@@ -2150,7 +2170,7 @@ function getStatusText(job) {
   const accSuffix = acc ? ` · ${acc}` : '';
   let text;
   switch (job.status) {
-    case 'preview': text = 'Bereit'; break;
+    case 'preview': text = job.interrupted ? 'Unterbrochen · bereit zum Fortsetzen' : 'Bereit'; break;
     case 'queued': text = 'Wartet'; break;
     case 'getting-server': text = `Server…${accSuffix}`; break;
     case 'uploading': text = `Upload${accSuffix}`; break;
@@ -3089,6 +3109,7 @@ function _handleProgressImpl(data) {
 
   // Update job state
   job.status = data.status;
+  if (data.status !== 'preview') job.interrupted = false;
   job.bytesUploaded = data.bytesUploaded || 0;
   job.bytesTotal = data.bytesTotal || job.bytesTotal;
   // Track session total bytes (survives removeFromQueueOnDone)
@@ -3100,6 +3121,7 @@ function _handleProgressImpl(data) {
   job.elapsed = data.elapsed || 0;
   job.remaining = data.remaining || 0;
   job.error = data.error || null;
+  job.failureDetails = data.failureDetails || job.failureDetails || null;
   job.result = data.result || job.result;
   job.attempt = data.attempt || 0;
   job.maxAttempts = data.maxAttempts || 0;
@@ -3107,6 +3129,11 @@ function _handleProgressImpl(data) {
   // Track which account the backend is currently using so the status cell
   // can display "Primär" vs "Fallback #N" during rotation.
   if (data.accountId) job.accountId = data.accountId;
+  if (data.accountId && data.hoster) {
+    const status = accountStatuses[data.accountId] || { status: 'unchecked', message: '' };
+    if (data.status === 'done') accountStatuses[data.accountId] = { ...status, status: 'ok', message: 'Letzter Upload erfolgreich', lastSuccessAt: new Date().toISOString() };
+    else if (data.status === 'error') accountStatuses[data.accountId] = { ...status, status: 'error', message: data.error || 'Letzter Upload fehlgeschlagen', lastFailureAt: new Date().toISOString() };
+  }
   if (data.uploadId) {
     job.uploadId = data.uploadId;
     _jobIndexByUploadId.set(data.uploadId, job);
@@ -3430,7 +3457,17 @@ async function showJobLogModal() {
       .join(' ');
     return `[${t}] [${e.event}] ${rest}`;
   };
-  bodyEl.textContent = entries.map(fmt).join('\n');
+  const details = job.failureDetails && typeof job.failureDetails === 'object'
+    ? Object.entries(job.failureDetails).map(([key, value]) => `${key}: ${value}`).join('\n')
+    : '';
+  const summary = [
+    `Hoster: ${job.hoster || '–'}`,
+    `Account: ${getAccountLabel(job) || job.accountId || '–'}`,
+    `Versuch: ${job.attempt || '–'} / ${job.maxAttempts || '–'}`,
+    job.error ? `Fehler: ${job.error}` : '',
+    details ? `Diagnose:\n${details}` : ''
+  ].filter(Boolean).join('\n');
+  bodyEl.textContent = `${summary}\n\n${entries.map(fmt).join('\n')}`;
 }
 
 function hideJobLogModal() {
@@ -3652,12 +3689,14 @@ function applySummaryResults(summary) {
         job.error = null;
         job.progress = 1;
         job.bytesUploaded = job.bytesTotal || file.size || 0;
+        job.failureDetails = null;
       } else if (result.status === 'aborted') {
         job.status = 'aborted';
         job.error = result.error || 'Abgebrochen';
       } else if (result.status === 'error') {
         job.status = 'error';
         job.error = result.error || 'Fehlgeschlagen';
+        job.failureDetails = result.failureDetails || job.failureDetails || null;
       } else if (result.status === 'skipped') {
         job.status = 'skipped';
         job.error = result.error || 'Übersprungen';
@@ -3730,6 +3769,26 @@ function setUploadSidebarFilter(value) {
   const container = document.getElementById('queueContainer');
   if (container) container.scrollTop = 0;
   renderQueueTable();
+}
+
+function applyQueueDetailFilters() {
+  queueSearchQuery = String(document.getElementById('queueSearchInput')?.value || '').trim().toLocaleLowerCase(getUiLocale());
+  queueHosterFilter = String(document.getElementById('queueHosterFilter')?.value || '');
+  queueStatusFilter = String(document.getElementById('queueStatusFilter')?.value || '');
+  _queueFilterCache = { filter: '', source: null, result: [] };
+  _normalizeQueueSelectionToVisible();
+  _lastVisibleRange = { start: -1, end: -1 };
+  renderQueueTable();
+}
+
+function syncQueueHosterFilterOptions() {
+  const select = document.getElementById('queueHosterFilter');
+  if (!select) return;
+  const names = [...new Set(queueJobs.map(job => job.hoster).filter(Boolean))].sort(_collatorSimple.compare);
+  const current = select.value;
+  select.innerHTML = `<option value="">Alle Hoster</option>${names.map(name => `<option value="${escapeAttr(name)}">${escapeHtml(getHosterLabel(name))}</option>`).join('')}`;
+  select.value = names.includes(current) ? current : '';
+  queueHosterFilter = select.value;
 }
 
 function updateUploadSidebarSummary(stats = _computeQueueStats()) {
@@ -4088,9 +4147,10 @@ async function executeHealthCheck(hosters, _mode) {
     if (!row) return;
     const key = row.accountId || row.hoster;
     if (key) {
-      accountStatuses[key] = {
-        status: row.status || 'unchecked',
-        message: row.message || ''
+    accountStatuses[key] = {
+      status: row.status || 'unchecked',
+      message: row.message || '',
+      checkedAt: result.checkedAt || new Date().toISOString()
       };
     }
   });
@@ -4121,7 +4181,7 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
   // Mark all accounts as checking
   for (const h of hosters) {
     const key = typeof h === 'string' ? h : (h.accountId || h.hoster);
-    accountStatuses[key] = { status: 'checking', message: '' };
+    accountStatuses[key] = { status: 'checking', message: '', checkedAt: null };
   }
   renderAccounts();
   try {
@@ -5180,6 +5240,7 @@ function _buildAccountCardHtml(name, account, idx) {
   // disambiguator for accounts that otherwise look identical (e.g. two byse
   // API-key accounts where you can't tell what's what from the masked key).
   const subtitleText = (userLabel ? `Label: ${userLabel} • ` : '') + credLabel;
+  const checkedText = st.checkedAt ? ` • geprüft ${new Date(st.checkedAt).toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit' })}` : '';
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
 
@@ -5199,7 +5260,7 @@ function _buildAccountCardHtml(name, account, idx) {
       <div class="account-card-drag-handle" role="button" tabindex="0" aria-label="Priorität ändern. Alt und Pfeil nach oben oder unten verwenden" title="Ziehen oder Alt und Pfeiltasten zum Sortieren">&#9776;</div>
       <div class="account-card-info">
         <div class="account-card-title">${escapeHtml(getAccountDisplayName(name, account))} <span class="account-priority-badge">${priorityLabel}</span> ${sessionPausedBadge}</div>
-        <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}</div>
+        <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}${checkedText}</div>
         ${otpAction}
       </div>
       <span class="account-status status-${statusClass}">
@@ -6946,6 +7007,16 @@ function setupListeners() {
     closeHistoryClearModal();
   }, true);
   document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
+  document.getElementById('exportSessionReportBtn').addEventListener('click', async () => {
+    const format = await showAppChoice({ title: 'Sitzungsbericht exportieren', message: 'Welches Format möchtest du speichern?', confirmText: 'CSV', alternateText: 'JSON' });
+    if (format === false) return;
+    const result = await window.api.exportSessionReport(format === 'alternate' ? 'json' : 'csv');
+    if (result?.ok) showCopyToast(`Sitzungsbericht mit ${result.totalRows} Uploads exportiert`);
+    else if (!result?.canceled) await showAppAlert(result?.error || 'Sitzungsbericht konnte nicht exportiert werden.');
+  });
+  document.getElementById('queueSearchInput').addEventListener('input', applyQueueDetailFilters);
+  document.getElementById('queueHosterFilter').addEventListener('change', applyQueueDetailFilters);
+  document.getElementById('queueStatusFilter').addEventListener('change', applyQueueDetailFilters);
 
   const historyRetentionPicker = document.getElementById('historyRetentionPicker');
   const historyRetentionTrigger = document.getElementById('historyRetentionTrigger');

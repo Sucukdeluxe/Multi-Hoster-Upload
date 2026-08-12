@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   clearHistory: () => ipcRenderer.invoke('clear-history'),
   pruneHistory: (retention, opts) => ipcRenderer.invoke('prune-history', { retention, dryRun: !!(opts && opts.dryRun) }),
   exportHistory: (format) => ipcRenderer.invoke('export-history', format),
+  exportSessionReport: (format) => ipcRenderer.invoke('export-session-report', format),
   saveTextFile: (defaultName, content, filters) => ipcRenderer.invoke('save-text-file', defaultName, content, filters),
 
   // Hoster settings
