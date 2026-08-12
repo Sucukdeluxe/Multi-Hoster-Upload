@@ -22,6 +22,32 @@ test('accepts upload URLs for every supported hoster and its subdomains', () => 
   }
 });
 
+test('accepts Doodstream result links on its current public domains', () => {
+  const result = {
+    file_code: 'DOODCODE1234',
+    download_url: 'https://dood.to/d/DOODCODE1234',
+    embed_url: 'https://dood.la/e/DOODCODE1234'
+  };
+  assert.deepEqual(assertUploadConfirmation(result, 'doodstream.com'), {
+    ...result,
+    download_url: 'https://doodstream.com/d/DOODCODE1234',
+    embed_url: 'https://doodstream.com/e/DOODCODE1234'
+  });
+});
+
+test('accepts the Doodstream result domain returned by the current upload service', () => {
+  const result = {
+    file_code: 'DOODCODE1234',
+    download_url: 'https://dsvplay.com/d/DOODCODE1234',
+    embed_url: 'https://dsvplay.com/e/DOODCODE1234'
+  };
+  assert.deepEqual(assertUploadConfirmation(result, 'doodstream.com'), {
+    ...result,
+    download_url: 'https://doodstream.com/d/DOODCODE1234',
+    embed_url: 'https://doodstream.com/e/DOODCODE1234'
+  });
+});
+
 test('rejects an upload URL from a different domain', () => {
   assert.throws(
     () => assertUploadConfirmation({ file_code: 'abc123', download_url: 'https://attacker.invalid/file/abc123' }, 'voe.sx'),
@@ -39,7 +65,11 @@ test('rejects a syntactically invalid file code despite a valid hoster URL', () 
 test('rejects a valid hoster URL without a file code', () => {
   assert.throws(
     () => assertUploadConfirmation({ download_url: 'https://byse.sx/d/abc123' }, 'byse.sx'),
-    /Upload zu byse\.sx wurde nicht bestätigt/
+    (err) => {
+      assert.match(err.message, /Upload zu byse\.sx wurde nicht bestätigt/);
+      assert.equal(err.diagnostic.payloadSnippet, '{"fileCodeLength":0,"urlHosts":["byse.sx"]}');
+      return true;
+    }
   );
 });
 
