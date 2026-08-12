@@ -276,6 +276,14 @@
           </button>
         </div>
 
+        <div class="queue-filter-bar" aria-label="Warteschlange filtern">
+          <input class="key-input" id="queueSearchInput" type="search" placeholder="Dateiname suchen" aria-label="Dateiname suchen" style="max-width:260px">
+          <select class="hs-input" id="queueHosterFilter" aria-label="Nach Hoster filtern" style="width:auto;min-width:150px"><option value="">Alle Hoster</option></select>
+          <select class="hs-input" id="queueStatusFilter" aria-label="Nach Status filtern" style="width:auto;min-width:150px">
+            <option value="">Alle Status</option><option value="error">Nur Fehler</option><option value="active">Aktiv</option><option value="waiting">Wartend</option><option value="done">Erfolgreich</option>
+          </select>
+        </div>
+
         <div class="queue-container" id="queueContainer">
           <table class="queue-table" id="queueTable">
             <thead>
@@ -596,6 +604,7 @@
             <option value="1000">Letzte 1000 Uploads</option>
           </select>
           <button class="btn btn-secondary" id="exportHistoryBtn">Verlauf exportieren</button>
+          <button class="btn btn-secondary" id="exportSessionReportBtn">Sitzungsbericht</button>
           <button class="btn btn-danger" id="clearHistoryBtn" disabled>Verlauf löschen</button>
         </div>
       </div>

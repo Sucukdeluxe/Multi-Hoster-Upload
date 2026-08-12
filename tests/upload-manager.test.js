@@ -199,6 +199,26 @@ describe('UploadManager', () => {
     assert.equal(summary.succeeded, 0);
   });
 
+  it('stores only sanitized hoster diagnostics in rotation logs', async () => {
+    const error = new Error('Upload rejected');
+    error.fileRejected = true;
+    error.diagnostic = {
+      http: 403,
+      contentType: 'application/json',
+      payloadSnippet: 'token=very-secret https://cdn.example.test/upload?apiKey=also-secret'
+    };
+    mockUploadFile.mock.mockImplementation(async () => { throw error; });
+
+    const mgr = new UploadManager({ 'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } });
+    const logs = [];
+    mgr.on('rot-log', (entry) => logs.push(entry));
+
+    await mgr.startBatch([{ file: '/test/diagnostic.mp4', hoster: 'doodstream.com', apiKey: 'key1' }]);
+
+    const failure = logs.find(entry => entry.event === 'upload-failure');
+    assert.equal(failure.payloadSnippet, 'token=[redacted] cdn.example.test/upload');
+  });
+
   it('cancel aborts running uploads', async () => {
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
       // Simulate a slow upload

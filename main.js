@@ -34,6 +34,7 @@ const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
 const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
+const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -116,6 +117,7 @@ let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
+let lastSessionSummary = null;
 let sourceDeleteJournal = null;
 const pendingUploadFinalizations = new Map();
 
@@ -1964,6 +1966,23 @@ ipcMain.handle('resolve-folder-files', async (_event, folderPath) => {
   return walkFolderAsync(folderPath);
 });
 
+ipcMain.handle('export-session-report', async (_event, format) => {
+  if (!lastSessionSummary) return { ok: false, error: 'Für diese Sitzung liegt noch kein abgeschlossener Upload vor' };
+  const normalizedFormat = String(format || 'csv').toLowerCase() === 'json' ? 'json' : 'csv';
+  const report = buildSessionReport(lastSessionSummary);
+  const datePrefix = new Date().toISOString().slice(0, 10);
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: shellText('Sitzungsbericht exportieren', 'Export session report'),
+    defaultPath: `upload-session-report-${datePrefix}.${normalizedFormat}`,
+    filters: normalizedFormat === 'json'
+      ? [{ name: shellText('JSON-Datei', 'JSON file'), extensions: ['json'] }]
+      : [{ name: shellText('CSV-Datei', 'CSV file'), extensions: ['csv'] }]
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  fs.writeFileSync(filePath, normalizedFormat === 'json' ? JSON.stringify(report, null, 2) : buildSessionReportCsv(report), 'utf-8');
+  return { ok: true, path: filePath, format: normalizedFormat, totalRows: report.totals.total };
+});
+
 ipcMain.handle('get-file-sizes', async (_event, paths) => {
   if (!Array.isArray(paths)) return {};
   const fsp = fs.promises;
@@ -2030,6 +2049,13 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     setImmediate(() => safeSend('upload-batch-done', skippedSummary));
     return { started: true, taskCount: 0, skippedJobs };
   }
+
+  const recovery = {
+    id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    startedAt: new Date().toISOString(),
+    jobIds: tasks.map(task => task.jobId).filter(Boolean)
+  };
+  try { await configStore.saveUploadRecovery(recovery); } catch (error) { debugLog(`upload recovery state could not be saved: ${error.message}`); }
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2208,6 +2234,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
     summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
+    lastSessionSummary = summary;
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
     logMemorySnapshot('batch-done');
@@ -2228,6 +2255,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
     const queuePersisted = await requestUploadFinalization(summary);
+    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
     _producerTracker.finish();
@@ -2278,6 +2306,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
         error: err ? err.message : 'Unbekannter Fehler'
       };
       safeSend('upload-batch-done', errorSummary);
+      configStore.saveUploadRecovery(null).catch(error => debugLog(`upload recovery state could not be cleared after start failure: ${error.message}`));
       _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
