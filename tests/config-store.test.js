@@ -17,9 +17,35 @@ Module._load = function load(request, parent, isMain) {
 const ConfigStore = require('../lib/config-store');
 require('../lib/secret-store').encryptField('test-initialization');
 Module._load = originalLoad;
+const { createCollectors } = require('../lib/diagnostics-collectors');
+const { createAgent } = require('../lib/diagnostics-agent');
+const support = require('../lib/support-bundle');
+const stats = require('../lib/stats');
 
 let tmpDir;
 let store;
+
+function thrownBy(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  assert.fail('Expected function to throw');
+}
+
+function createDiagnosticsAgent(configStore, logDir) {
+  return createAgent(createCollectors({
+    loadConfig: () => configStore.loadDiagnosticsConfig(),
+    loadHistory: () => configStore.loadDiagnosticsHistory(),
+    getAllLogPaths: () => ({ logDir }),
+    support,
+    stats,
+    appInfo: () => ({}),
+    systemInfo: () => ({}),
+    agentInfo: () => ({})
+  }));
+}
 
 function createStore() {
   const fakeApp = {
@@ -685,6 +711,27 @@ describe('ConfigStore', () => {
     assert.throws(() => store.loadDiagnosticsConfig());
   });
 
+  it('strict diagnostics config errors never expose malformed JSON or file paths', () => {
+    const opaque = 'opaque-config-42';
+    fs.writeFileSync(store.filePath, opaque, 'utf-8');
+
+    let error = thrownBy(() => store.loadDiagnosticsConfig());
+    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_INVALID');
+    assert.equal(error.message, 'Die Diagnosekonfiguration ist ungültig');
+    assert.ok(!error.message.includes(opaque));
+
+    fs.writeFileSync(store.filePath, '{}', 'utf-8');
+    error = thrownBy(() => store.loadDiagnosticsConfig());
+    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_INVALID');
+    assert.equal(error.message, 'Die Diagnosekonfiguration ist ungültig');
+
+    fs.rmSync(store.filePath);
+    error = thrownBy(() => store.loadDiagnosticsConfig());
+    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_READ_FAILED');
+    assert.equal(error.message, 'Die Diagnosekonfiguration konnte nicht gelesen werden');
+    assert.ok(!error.message.includes(store.filePath));
+  });
+
   it('strict diagnostics config loading decrypts current credentials and propagates decryption failures', () => {
     assert.equal(typeof store.loadDiagnosticsConfig, 'function');
 
@@ -781,12 +828,31 @@ describe('ConfigStore history split (electron-history.json)', () => {
 
     for (const invalidHistory of ['null', '{}', '{"history":null}', '{broken-history']) {
       fs.writeFileSync(s.historyPath, invalidHistory, 'utf-8');
-      assert.throws(() => s.loadDiagnosticsHistory());
+      const error = thrownBy(() => s.loadDiagnosticsHistory());
+      assert.equal(error.code, 'DIAGNOSTIC_HISTORY_INVALID');
+      assert.equal(error.message, 'Die Diagnoseverlaufsdatei ist ungültig');
+      assert.ok(!error.message.includes(invalidHistory));
     }
 
     fs.rmSync(s.historyPath);
     fs.mkdirSync(s.historyPath);
-    assert.throws(() => s.loadDiagnosticsHistory());
+    const error = thrownBy(() => s.loadDiagnosticsHistory());
+    assert.equal(error.code, 'DIAGNOSTIC_HISTORY_READ_FAILED');
+    assert.equal(error.message, 'Die Diagnoseverlaufsdatei konnte nicht gelesen werden');
+    assert.ok(!error.message.includes(s.historyPath));
+  });
+
+  it('real diagnostics agent never returns opaque corrupt dedicated history content', () => {
+    const opaque = 'opaque42';
+    writeConfigWithHistory(0);
+    fs.writeFileSync(s.historyPath, opaque, 'utf-8');
+    const agent = createDiagnosticsAgent(s, dir);
+
+    for (const operation of ['get_history', 'list_errors', 'server_health']) {
+      const response = agent.handle(operation, {});
+      assert.deepEqual(response, { ok: false, error: 'Die Diagnoseverlaufsdatei ist ungültig' });
+      assert.ok(!JSON.stringify(response).includes(opaque));
+    }
   });
 
   it('strict diagnostics history never falls back to stale config history when a dedicated file exists', () => {
