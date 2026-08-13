@@ -122,6 +122,7 @@ const sourceFiles = [
   'tests/log-mode.test.js',
   'tests/log-policy.test.js',
   'tests/log-rotation.test.js',
+  'tests/main-remote-input.test.js',
   'tests/online-backup-service.test.js',
   'tests/online-backup.test.js',
   'tests/orphan-tmp.test.js',
