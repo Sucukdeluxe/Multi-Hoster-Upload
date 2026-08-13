@@ -749,8 +749,9 @@ test('upload interval is enforced at the admitted upload start', async () => {
   const hosterSettings = settings('byse.sx', 1);
   hosterSettings['byse.sx'].timeIntervalSec = 1;
   const manager = new UploadManager(hosterSettings);
-  manager._waitForInterval = async () => {
+  manager._waitForInterval = async (hoster, intervalMs, signal, acquireSlots) => {
     events.push('interval');
+    await acquireSlots();
   };
   const batch = runBatch(manager, [
     { jobId: 'interval-first', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
@@ -767,6 +768,61 @@ test('upload interval is enforced at the admitted upload start', async () => {
   assert.equal(intervalsBeforeRelease, 1, JSON.stringify(events));
   assert.equal(summary.succeeded, 3);
   assert.deepEqual(events.filter(event => event === 'interval'), ['interval', 'interval', 'interval']);
+});
+
+test('an interval wait never occupies the global slot of another hoster', async () => {
+  let markIntervalWaiting;
+  let releaseInterval;
+  let markOtherStarted;
+  const intervalWaiting = new Promise(resolve => {
+    markIntervalWaiting = resolve;
+  });
+  const intervalGate = new Promise(resolve => {
+    releaseInterval = resolve;
+  });
+  const otherStarted = new Promise(resolve => {
+    markOtherStarted = resolve;
+  });
+  loadManager(async (hoster) => {
+    if (hoster === 'voe.sx') markOtherStarted();
+    const code = hoster === 'voe.sx' ? 'VOEINTERVAL1' : 'BYSEINTERVAL1';
+    return {
+      file_code: code,
+      download_url: hoster === 'voe.sx' ? `https://voe.sx/${code}` : `https://byse.sx/d/${code}`,
+      embed_url: hoster === 'voe.sx' ? `https://voe.sx/e/${code}` : `https://byse.sx/e/${code}`
+    };
+  });
+  const hosterSettings = {
+    ...settings('byse.sx', 1),
+    ...settings('voe.sx', 1)
+  };
+  hosterSettings['byse.sx'].timeIntervalSec = 1;
+  const manager = new UploadManager(hosterSettings, { parallelUploadCount: 1 });
+  const originalWait = manager._waitForInterval.bind(manager);
+  manager._waitForInterval = async (hoster, intervalMs, signal, acquireSlots) => {
+    if (hoster === 'byse.sx') {
+      markIntervalWaiting();
+      await intervalGate;
+    }
+    return originalWait(hoster, 0, signal, acquireSlots);
+  };
+  const batch = runBatch(manager, [
+    { jobId: 'interval-waiting-hoster', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
+    { jobId: 'interval-independent-hoster', file: distinctPath, hoster: 'voe.sx', accountId: 'VOE_ACCOUNT', apiKey: 'VOE_KEY' }
+  ]);
+
+  await waitFor(intervalWaiting, 500, 'Configured interval did not start waiting');
+  let blockedError = null;
+  try {
+    await waitFor(otherStarted, 500, 'Interval wait occupied the global upload slot');
+  } catch (error) {
+    blockedError = error;
+  } finally {
+    releaseInterval();
+  }
+  const summary = await batch;
+  if (blockedError) throw blockedError;
+  assert.equal(summary.succeeded, 2);
 });
 
 for (const scenario of [

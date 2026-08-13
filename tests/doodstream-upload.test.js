@@ -329,3 +329,35 @@ test('redirect fetch failure after upload is marked as an uncertain remote commi
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('fallback form fetch failure after upload is marked as an uncertain remote commit', async () => {
+  const up = new DoodstreamUploader();
+  up._fetch = async () => {
+    throw new Error('fallback request failed');
+  };
+  await assert.rejects(
+    () => up._parseUploadResponse('<form action="https://doodstream.com/result"></form>'),
+    (err) => {
+      assert.equal(err.remoteCommitUncertain, true);
+      assert.equal(err.diagnostic.phase, 'upload-result-submit');
+      return true;
+    }
+  );
+});
+
+test('fallback form body failure after upload is marked as an uncertain remote commit', async () => {
+  const up = new DoodstreamUploader();
+  up._fetch = async () => ({
+    text: async () => {
+      throw new Error('fallback body failed');
+    }
+  });
+  await assert.rejects(
+    () => up._parseUploadResponse('<form action="https://doodstream.com/result"></form>'),
+    (err) => {
+      assert.equal(err.remoteCommitUncertain, true);
+      assert.equal(err.diagnostic.phase, 'upload-result-submit');
+      return true;
+    }
+  );
+});
