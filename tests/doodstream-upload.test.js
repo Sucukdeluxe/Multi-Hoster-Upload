@@ -1,5 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const DoodstreamUploader = require('../lib/doodstream-upload');
 
 // The CDN hands back an XFileSharing form. `fn` is the filecode, `st` is the
@@ -267,4 +270,62 @@ test('getUploadServer: failures expose safe structured diagnostics without respo
       return true;
     }
   );
+});
+
+test('upload response read failure is marked as an uncertain remote commit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-dood-response-'));
+  const file = path.join(root, 'episode.mkv');
+  fs.writeFileSync(file, Buffer.alloc(16, 1));
+  const up = new DoodstreamUploader();
+  up.sessId = 'SESSION';
+  up._getUploadServer = async () => 'https://node.example/upload/01';
+  up._requestUpload = async () => ({
+    statusCode: 200,
+    headers: {},
+    body: { text: async () => { throw new Error('socket closed'); } }
+  });
+  try {
+    await assert.rejects(
+      () => up.upload(file),
+      (err) => {
+        assert.equal(err.remoteCommitUncertain, true);
+        assert.equal(err.diagnostic.phase, 'upload-response-read');
+        return true;
+      }
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('redirect fetch failure after upload is marked as an uncertain remote commit', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-dood-redirect-'));
+  const file = path.join(root, 'episode.mkv');
+  fs.writeFileSync(file, Buffer.alloc(16, 1));
+  const up = new DoodstreamUploader();
+  up.sessId = 'SESSION';
+  up._getUploadServer = async () => 'https://node.example/upload/01';
+  up._requestUpload = async () => ({
+    statusCode: 302,
+    headers: { location: 'https://doodstream.com/upload-result' },
+    body: { text: async () => '' }
+  });
+  up._fetch = async () => {
+    const error = new Error('redirect fetch failed');
+    error.diagnostic = { phase: 'web-request' };
+    error.transientNetwork = true;
+    throw error;
+  };
+  try {
+    await assert.rejects(
+      () => up.upload(file),
+      (err) => {
+        assert.equal(err.remoteCommitUncertain, true);
+        assert.equal(err.diagnostic.phase, 'web-request');
+        return true;
+      }
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

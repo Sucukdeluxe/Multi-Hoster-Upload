@@ -532,12 +532,12 @@ test('Doodstream key resolution is singleflight per account', async () => {
   });
 });
 
-test('Doodstream web and API auth paths use one canonical account claim identity', async () => {
+test('Doodstream web and API auth paths use one canonical remote account identity across profile IDs', async () => {
   const sharedCode = 'DOODALLAUTH01';
   await withDoodstreamMethods({
     login: async function () {},
     deriveApiKey: async function () {
-      return null;
+      return 'DOOD_API_KEY';
     },
     upload: async function () {
       await new Promise(resolve => setImmediate(resolve));
@@ -567,7 +567,7 @@ test('Doodstream web and API auth paths use one canonical account claim identity
         jobId: 'dood-web-auth',
         file: firstPath,
         hoster: 'doodstream.com',
-        accountId: 'DOOD_SHARED_ACCOUNT',
+        accountId: 'DOOD_WEB_PROFILE',
         username: 'account@example.test',
         password: 'password'
       },
@@ -575,7 +575,7 @@ test('Doodstream web and API auth paths use one canonical account claim identity
         jobId: 'dood-api-auth',
         file: distinctPath,
         hoster: 'doodstream.com',
-        accountId: 'DOOD_SHARED_ACCOUNT',
+        accountId: 'DOOD_API_PROFILE',
         apiKey: 'DOOD_API_KEY'
       }
     ]);
@@ -583,6 +583,190 @@ test('Doodstream web and API auth paths use one canonical account claim identity
     assert.equal(summary.succeeded, 1);
     assert.equal(summary.failed, 1);
   });
+});
+
+test('Doodstream uncertainty blocks a same-title API profile with a different local ID', async () => {
+  let markWebStarted;
+  let releaseWeb;
+  let uploadCalls = 0;
+  const webStarted = new Promise(resolve => {
+    markWebStarted = resolve;
+  });
+  const webGate = new Promise(resolve => {
+    releaseWeb = resolve;
+  });
+  await withDoodstreamMethods({
+    login: async function () {},
+    deriveApiKey: async function () {
+      return null;
+    },
+    upload: async function () {
+      uploadCalls++;
+      markWebStarted();
+      await webGate;
+      const error = new Error('Doodstream upload result could not be read');
+      error.remoteCommitUncertain = true;
+      throw error;
+    }
+  }, async () => {
+    loadManager(async () => {
+      uploadCalls++;
+      return {
+        file_code: 'UNSAFE_CROSS_AUTH',
+        download_url: 'https://doodstream.com/d/UNSAFE_CROSS_AUTH',
+        embed_url: 'https://doodstream.com/e/UNSAFE_CROSS_AUTH'
+      };
+    });
+    const manager = new UploadManager(settings('doodstream.com', 2));
+    const batch = runBatch(manager, [
+      {
+        jobId: 'dood-web-uncertain-profile',
+        file: firstPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_WEB_PROFILE',
+        username: 'account@example.test',
+        password: 'password'
+      }
+    ]);
+    await waitFor(webStarted, 500, 'Doodstream web upload did not start');
+    const added = manager.addJobs([
+      {
+        jobId: 'dood-api-after-uncertain-profile',
+        file: secondPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_API_PROFILE',
+        apiKey: 'DOOD_API_KEY'
+      }
+    ]);
+    assert.equal(added.added, 1);
+    releaseWeb();
+    const summary = await batch;
+
+    assert.equal(summary.succeeded, 0);
+    assert.equal(summary.failed, 2);
+    assert.equal(uploadCalls, 1);
+  });
+});
+
+test('VOE mixed auth profiles share a fail-closed recovery boundary', async () => {
+  const sharedCode = 'VOECROSSAUTH1';
+  await withUploaderMethods(
+    VoeUploader,
+    async function () {
+      await new Promise(resolve => setImmediate(resolve));
+      return this._buildUrls(sharedCode);
+    },
+    async () => {
+      loadManager(async (hoster, file, apiKey, onProgress, signal, throttle, options) => {
+        if (!options.recoveryClaim.reserve(sharedCode)) {
+          const error = new Error('Remote identity already claimed');
+          error.hosterTransient = true;
+          throw error;
+        }
+        return {
+          file_code: sharedCode,
+          download_url: `https://voe.sx/${sharedCode}`,
+          embed_url: `https://voe.sx/e/${sharedCode}`
+        };
+      });
+      const manager = new UploadManager(settings('voe.sx', 2));
+      const summary = await runBatch(manager, [
+        {
+          jobId: 'voe-web-auth-profile',
+          file: firstPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_WEB_PROFILE',
+          username: 'account@example.test',
+          password: 'password'
+        },
+        {
+          jobId: 'voe-api-auth-profile',
+          file: secondPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_API_PROFILE',
+          apiKey: 'VOE_API_KEY'
+        }
+      ]);
+
+      assert.equal(summary.succeeded, 1);
+      assert.equal(summary.failed, 1);
+    }
+  );
+});
+
+test('batch completion clears Doodstream key and baseline caches', async () => {
+  await withDoodstreamMethods({
+    login: async function () {},
+    deriveApiKey: async function () {
+      return 'DOOD_BATCH_KEY';
+    }
+  }, async () => {
+    loadManager(async () => ({
+      file_code: 'DOODBATCHDONE1',
+      download_url: 'https://doodstream.com/d/DOODBATCHDONE1',
+      embed_url: 'https://doodstream.com/e/DOODBATCHDONE1'
+    }));
+    const manager = new UploadManager(settings('doodstream.com', 1));
+    const summary = await runBatch(manager, [{
+      jobId: 'dood-cache-cleanup',
+      file: firstPath,
+      hoster: 'doodstream.com',
+      accountId: 'DOOD_CACHE_PROFILE',
+      username: 'account@example.test',
+      password: 'password'
+    }]);
+
+    assert.equal(summary.succeeded, 1);
+    assert.equal(manager._doodApiKeyCache.size, 0);
+    assert.equal(manager._baselineCache.size, 0);
+  });
+});
+
+test('upload interval is enforced at the admitted upload start', async () => {
+  const events = [];
+  let releaseFirst;
+  let markFirstStarted;
+  const firstGate = new Promise(resolve => {
+    releaseFirst = resolve;
+  });
+  const firstStarted = new Promise(resolve => {
+    markFirstStarted = resolve;
+  });
+  let uploadCount = 0;
+  loadManager(async (hoster, file) => {
+    uploadCount++;
+    events.push(`start:${path.basename(file)}`);
+    if (uploadCount === 1) {
+      markFirstStarted();
+      await firstGate;
+    }
+    return {
+      file_code: `INTERVAL${events.length}`,
+      download_url: `https://byse.sx/d/INTERVAL${events.length}`,
+      embed_url: `https://byse.sx/e/INTERVAL${events.length}`
+    };
+  });
+  const hosterSettings = settings('byse.sx', 1);
+  hosterSettings['byse.sx'].timeIntervalSec = 1;
+  const manager = new UploadManager(hosterSettings);
+  manager._waitForInterval = async () => {
+    events.push('interval');
+  };
+  const batch = runBatch(manager, [
+    { jobId: 'interval-first', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
+    { jobId: 'interval-second', file: secondPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
+    { jobId: 'interval-third', file: distinctPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' }
+  ]);
+
+  await waitFor(firstStarted, 500, 'First admitted upload did not start');
+  await new Promise(resolve => setImmediate(resolve));
+  const intervalsBeforeRelease = events.filter(event => event === 'interval').length;
+  releaseFirst();
+  const summary = await batch;
+
+  assert.equal(intervalsBeforeRelease, 1, JSON.stringify(events));
+  assert.equal(summary.succeeded, 3);
+  assert.deepEqual(events.filter(event => event === 'interval'), ['interval', 'interval', 'interval']);
 });
 
 for (const scenario of [
