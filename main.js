@@ -5,7 +5,13 @@ const path = require('path');
 app.setPath('userData', path.join(app.getPath('appData'), 'multi-hoster-uploader'));
 app.setName('Multi Hoster Uploader');
 app.setAppUserModelId('com.multihoster.uploader');
-const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('./lib/startup-renderer');
+const {
+  configureStartupRenderer,
+  createStartupFailureDocument,
+  createStartupRecoveryCoordinator,
+  createStartupWindow,
+  resolveStartupLanguage
+} = require('./lib/startup-renderer');
 configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
 const fs = require('fs');
@@ -41,6 +47,8 @@ const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { buildTerminalJobSnapshots } = require('./lib/upload-recovery');
 const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
+const { createBatchMutationGate } = require('./lib/batch-mutation-gate');
+const { createUploadStartReservation } = require('./lib/upload-start-reservation');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -123,7 +131,9 @@ let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
+const uploadBatchMutationGates = new WeakMap();
 let lastSessionSummary = null;
+let startupRecoveryCoordinator = null;
 let sourceDeleteJournal = null;
 const pendingUploadFinalizations = new Map();
 
@@ -145,7 +155,8 @@ function requestUploadFinalization(summary, historyPersisted) {
   });
 }
 const activeUploadProducerTrackers = new Set();
-const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
+const uploadStartReservation = createUploadStartReservation();
+const settingsImportGate = createSettingsImportGate(() => !!uploadManager || uploadStartReservation.isActive());
 let diagnosticAgent = null;
 let _diagHandler = null;
 
@@ -905,10 +916,7 @@ async function _persistFallbackLogPath(workingPath) {
       const base = path.basename(workingPath);
       toSave = path.join(dir, stripModeStampFromFileName(base));
     }
-    if (gs.logFilePath === toSave) return true;
-    gs.logFilePath = toSave;
-    cfg.globalSettings = gs;
-    await configStore.save({ globalSettings: gs });
+    await configStore.saveFallbackLogPath(toSave);
     _invalidateUploadLogTargetCache();
     _invalidateLogSettings();
     safeSend('log-path-auto-updated', { logFilePath: toSave });
@@ -1458,26 +1466,7 @@ function createWindow() {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        const choice = dialog.showMessageBoxSync(mainWindow, {
-          type: 'error',
-          title: shellText('Renderer abgestürzt', 'Renderer crashed'),
-          message: shellText(`Der Renderer-Prozess ist abgestürzt (${details.reason}).`, `The renderer process crashed (${details.reason}).`),
-          detail: shellText('Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.', 'Export and send a diagnostics package. Click "Reload" to restore the interface; uploads running in the main process remain active.'),
-          buttons: [shellText('Neu laden', 'Reload'), shellText('Beenden', 'Quit')],
-          defaultId: 0,
-          cancelId: 1
-        });
-        if (choice === 0) {
-          mainWindow.webContents.reload();
-        } else {
-          app.exit(1);
-        }
-      } catch {
-        try { mainWindow.webContents.reload(); } catch {}
-      }
-    }
+    if (startupRecoveryCoordinator) void startupRecoveryCoordinator.rendererCrashed(details);
   });
 
   mainWindow.webContents.on('unresponsive', () => {
@@ -1501,10 +1490,27 @@ function createWindow() {
 
   let startupLanguage = 'en';
   try { startupLanguage = resolveStartupLanguage(configStore.load()); } catch {}
-  startupWindow.load(path.join(__dirname, 'renderer', 'index.html'), (err) => {
-    _writeCrashLog('LOAD FILE FAILED', err);
-    debugLog(`LOAD FILE FAILED: ${err && err.stack ? err.stack : err}`);
-  }, { query: { language: startupLanguage } });
+  const rendererTarget = path.join(__dirname, 'renderer', 'index.html');
+  const rendererOptions = { query: { language: startupLanguage } };
+  const loadRendererSurface = async () => {
+    try {
+      return await mainWindow.loadFile(rendererTarget, rendererOptions);
+    } catch (error) {
+      _writeCrashLog('LOAD FILE FAILED', error);
+      debugLog(`LOAD FILE FAILED: ${error && error.stack ? error.stack : error}`);
+      throw error;
+    }
+  };
+  startupRecoveryCoordinator = createStartupRecoveryCoordinator({
+    load: loadRendererSurface,
+    reload: loadRendererSurface,
+    reveal: () => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show();
+    },
+    showFailure: () => mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupFailureDocument(startupLanguage))}`),
+    close: () => app.exit(1)
+  });
+  void startupRecoveryCoordinator.loadInitial(rendererTarget, rendererOptions);
 }
 
 function createTray() {
@@ -2009,7 +2015,13 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
 ipcMain.handle('start-upload', async (_event, payload) => {
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
-  if (uploadManager) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
+  if (uploadManager || uploadStartReservation.isActive()) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
+  const startLease = uploadStartReservation.acquire();
+  if (!startLease) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
+  return executeReservedUploadStart(payload, startLease).finally(() => startLease.release());
+});
+
+async function executeReservedUploadStart(payload, startLease) {
   const config = configStore.load();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
@@ -2020,8 +2032,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
 
   // At 500+ jobs JSON.stringify blew up the debug log with MB-sized lines
   // per start-upload and added noticeable delay — log counts only.
-  logMarker('BATCH START', batchPlan);
-  debugLog(`start-upload: files=${batchPlan.fileCount}, hosters=${batchPlan.destinationCount}, jobs=${batchPlan.plannedUploadCount}`);
+  logMarker('BATCH START');
 
   const pick = makeAccountPicker(config);
   const tasks = jobs.length > 0
@@ -2042,15 +2053,15 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     debugLog(`  skipped ${skippedJobs.length} jobs: ${skippedJobs.map(s => s.hoster).join(', ')}`);
   }
 
-  debugLog(`  tasks built: ${tasks.length}`);
-
   const auditedStart = await runAfterDurableAudit(
     () => appendUploadPlanAudit(batchPlan, 'start'),
-    () => tasks.length > 0 ? new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config)) : null
+    () => true
   );
   if (!auditedStart.ok) {
     return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
   }
+  if (startLease.isCancelled()) return { error: 'Upload wurde abgebrochen' };
+  if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   persistRotation(pick);
 
   if (tasks.length === 0) {
@@ -2070,7 +2081,9 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     return { started: true, taskCount: 0, skippedJobs };
   }
 
-  uploadManager = auditedStart.value;
+  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
+  const batchMutationGate = createBatchMutationGate();
+  uploadBatchMutationGates.set(uploadManager, batchMutationGate);
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
 
@@ -2255,6 +2268,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // create a fresh manager which the trailing `uploadManager = null` then
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
+    const hadActiveBatchMutation = await batchMutationGate.sealAndDrain();
     summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
     lastSessionSummary = summary;
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
@@ -2281,13 +2295,22 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       settledAt: new Date().toISOString(),
       terminalJobs: buildTerminalJobSnapshots(summary)
     };
-    try { await configStore.saveUploadRecovery(recoveryWithTerminalJobs); } catch (error) { debugLog(`upload recovery outcomes could not be saved: ${error.message}`); }
+    let terminalRecoveryPersisted = true;
+    try { await configStore.saveUploadRecovery(recoveryWithTerminalJobs); } catch (error) {
+      terminalRecoveryPersisted = false;
+      debugLog(`upload recovery outcomes could not be saved: ${error.message}`);
+    }
     const queuePersisted = await requestUploadFinalization(summary, historyPersisted);
-    if (queuePersisted) {
+    if (queuePersisted && terminalRecoveryPersisted) {
       try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
     }
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
-    await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
+    if (!terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
+    if (hadActiveBatchMutation) debugLog('source cleanup blocked: batch mutation overlapped finalization');
+    await sourceCleanup.finishBatch({
+      historyPersisted,
+      queuePersisted: queuePersisted && terminalRecoveryPersisted && !hadActiveBatchMutation
+    });
     _producerTracker.finish();
 
     const fullyAborted = isAllAborted(summary);
@@ -2308,6 +2331,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // Defer startBatch to next tick so the IPC response is sent first.
   // This ensures webContents.send() calls from upload events
   // are not interleaved with the handle() response.
+  if (startLease.isCancelled()) _thisManager.cancel();
   setImmediate(() => {
     if (uploadManager !== _thisManager) {
       debugLog('setImmediate: uploadManager was replaced before startBatch');
@@ -2346,7 +2370,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   logMemorySnapshot('batch-start');
   debugLog(`start-upload returning started=true (startBatch deferred to nextTick)`);
   return { started: true, taskCount: tasks.length, skippedJobs, sourceCleanupFingerprints };
-});
+}
 
 // Logged at batch boundaries so we can spot memory growth between batches
 // across long sessions (main process side only — the renderer's live view
@@ -2360,6 +2384,7 @@ function logMemorySnapshot(label) {
 }
 
 ipcMain.handle('cancel-upload', () => {
+  uploadStartReservation.cancel();
   if (uploadManager) {
     uploadManager.cancel();
   }
@@ -2379,48 +2404,55 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     return { error: 'Kein Upload aktiv' };
   }
   const batchManager = uploadManager;
-  const config = configStore.load();
-  const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
-  const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
-  const pick = makeAccountPicker(config);
-  const tasks = buildUploadTasksFromJobs(config, jobs, pick);
-  const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
-  const skippedJobs = jobs
-    .filter(j => j && j.id && !taskJobIds.has(j.id))
-    .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
-  if (jobs.length > 0) {
-    const auditedAdd = await runAfterDurableAudit(
-      () => appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add'),
-      () => true
+  const batchMutationGate = uploadBatchMutationGates.get(batchManager);
+  const batchMutationLease = batchMutationGate && batchMutationGate.acquire();
+  if (!batchMutationLease) return { error: 'Kein Upload aktiv' };
+  try {
+    const config = configStore.load();
+    const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+    const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
+    const pick = makeAccountPicker(config);
+    const tasks = buildUploadTasksFromJobs(config, jobs, pick);
+    const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
+    const skippedJobs = jobs
+      .filter(j => j && j.id && !taskJobIds.has(j.id))
+      .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
+    if (jobs.length > 0) {
+      const auditedAdd = await runAfterDurableAudit(
+        () => appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add'),
+        () => true
+      );
+      if (!auditedAdd.ok) return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
+    }
+    persistRotation(pick);
+    const sourceCleanupFingerprints = batchManager.sourceFileCleanup
+      ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
+      : {};
+    if (uploadManager !== batchManager || !batchManager.running) {
+      return { error: 'Kein Upload aktiv' };
+    }
+    if (batchManager.sourceFileCleanup) {
+      for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
+    }
+
+    if (tasks.length === 0) {
+      debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
+      return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
+    }
+
+    const addResult = batchManager.addJobs(tasks);
+    const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
+    const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
+      ? addResult.alreadyInBatchJobIds
+      : [];
+
+    debugLog(
+      `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
     );
-    if (!auditedAdd.ok) return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
+    return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
+  } finally {
+    batchMutationLease.finish();
   }
-  persistRotation(pick);
-  const sourceCleanupFingerprints = batchManager.sourceFileCleanup
-    ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
-    : {};
-  if (uploadManager !== batchManager || !batchManager.running) {
-    return { error: 'Kein Upload aktiv' };
-  }
-  if (batchManager.sourceFileCleanup) {
-    for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
-  }
-
-  if (tasks.length === 0) {
-    debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
-    return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
-  }
-
-  const addResult = batchManager.addJobs(tasks);
-  const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
-  const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
-    ? addResult.alreadyInBatchJobIds
-    : [];
-
-  debugLog(
-    `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
-  );
-  return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
 });
 
 ipcMain.handle('finish-after-active', () => {
@@ -2915,7 +2947,10 @@ ipcMain.handle('app:quit', () => {
 });
 
 ipcMain.on('app:close-handshake-ready', (event) => {
-  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) closeHandshakeReady = true;
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+    closeHandshakeReady = true;
+    if (startupRecoveryCoordinator) startupRecoveryCoordinator.rendererReady();
+  }
 });
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {

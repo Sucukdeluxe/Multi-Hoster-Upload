@@ -66,6 +66,7 @@ const sourceFiles = [
   'lib/upload-diagnostics.js',
   'lib/upload-manager.js',
   'lib/upload-recovery.js',
+  'lib/upload-start-reservation.js',
   'lib/vidmoly-upload.js',
   'lib/voe-upload.js',
   'lib/webhook-notify.js',
@@ -158,6 +159,7 @@ const sourceFiles = [
   'tests/upload-diagnostics.test.js',
   'tests/upload-manager.test.js',
   'tests/upload-recovery.test.js',
+  'tests/upload-start-reservation.test.js',
   'tests/session-report.test.js',
   'tests/validate-credentials.test.js',
   'tests/webhook-notify.test.js'

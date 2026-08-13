@@ -5,10 +5,32 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   configureStartupRenderer,
+  createStartupFailureDocument,
   createStartupRecoveryCoordinator,
   createStartupWindow,
   resolveStartupLanguage
 } = require('../lib/startup-renderer');
+
+test('startup failure document is a localized visible application surface', () => {
+  const english = createStartupFailureDocument('en');
+  const german = createStartupFailureDocument('de');
+
+  assert.match(english, /Multi Hoster Uploader/);
+  assert.match(english, /could not load/);
+  assert.match(english, /Close/);
+  assert.match(german, /konnte nicht geladen werden/);
+  assert.match(german, /Schließen/);
+  assert.doesNotMatch(english, /Electron/);
+});
+
+test('main process wires bounded startup recovery into real load and crash paths', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(source, /createStartupRecoveryCoordinator/);
+  assert.match(source, /startupRecoveryCoordinator\.loadInitial/);
+  assert.match(source, /startupRecoveryCoordinator\.rendererCrashed/);
+  assert.match(source, /startupRecoveryCoordinator\.rendererReady/);
+  assert.match(source, /createStartupFailureDocument/);
+});
 
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {

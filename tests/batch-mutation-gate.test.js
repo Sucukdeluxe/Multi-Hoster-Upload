@@ -1,7 +1,22 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { createBatchMutationGate } = require('../lib/batch-mutation-gate');
+
+it('drains main-process batch mutations before source cleanup finalization', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  const batchDoneStart = source.indexOf("uploadManager.on('batch-done'");
+  const sealAndDrain = source.indexOf('batchMutationGate.sealAndDrain()', batchDoneStart);
+  const cleanupFinish = source.indexOf('sourceCleanup.finishBatch', batchDoneStart);
+  assert.ok(batchDoneStart >= 0);
+  assert.ok(sealAndDrain > batchDoneStart);
+  assert.ok(cleanupFinish > sealAndDrain);
+  assert.match(source.slice(sealAndDrain, cleanupFinish + 300), /!hadActiveBatchMutation/);
+  assert.match(source, /batchMutationGate\.acquire\(\)/);
+  assert.match(source, /finally\s*{\s*batchMutationLease\.finish\(\)/);
+});
 
 describe('batch mutation gate', () => {
   it('keeps a seal pending until every lease active at seal has finished', async () => {
