@@ -18,6 +18,10 @@ function createWatchedPaths(projectRoot) {
   ].map(target => path.join(projectRoot, target));
 }
 
+function formatChangeMessage(file) {
+  return `[hotdev] change detected: ${file}\n`;
+}
+
 function createRestartController({ startChild, stopChild, onUnexpectedExit = () => {} }) {
   let child = null;
   let terminatingChild = null;
@@ -208,7 +212,7 @@ function runDevRunner() {
   }
 
   watcher.on('all', (_event, file) => {
-    process.stdout.write(`[hotdev] renderer change detected: ${file}\n`);
+    process.stdout.write(formatChangeMessage(file));
     scheduleRestart();
   });
 
@@ -243,6 +247,6 @@ function runDevRunner() {
   controller.start();
 }
 
-module.exports = { createRestartController, createWatchedPaths };
+module.exports = { createRestartController, createWatchedPaths, formatChangeMessage };
 
 if (require.main === module) runDevRunner();

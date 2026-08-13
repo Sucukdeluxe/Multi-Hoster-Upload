@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
-const { createRestartController, createWatchedPaths } = require('../scripts/dev-runner.cjs');
+const { createRestartController, createWatchedPaths, formatChangeMessage } = require('../scripts/dev-runner.cjs');
 
 function createDeferred() {
   let resolve;
@@ -117,4 +117,8 @@ test('watch paths still cover main, preloads, lib and renderer', () => {
     path.join(projectRoot, 'lib'),
     path.join(projectRoot, 'renderer')
   ]);
+});
+
+test('change log identifies every watched file without calling it a renderer change', () => {
+  assert.equal(formatChangeMessage('C:\\project\\lib\\hosters.js'), '[hotdev] change detected: C:\\project\\lib\\hosters.js\n');
 });
