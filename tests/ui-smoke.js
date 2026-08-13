@@ -218,7 +218,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
 
     const germanStartupReady = await waitUntil(() => wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")'));
-    check('Returning German profiles never expose an English frame while startup config is pending', startupLanguagePendingSnapshot !== null && (!startupLanguagePendingSnapshot.visible || startupLanguagePendingSnapshot.language === 'de') && startupLanguagePendingSnapshot.query === '?language=de' && germanStartupReady === 'de|de|Upload,Accounts,Einstellungen,Verlauf');
+    check('Returning German profiles never expose an English frame while startup config is pending', startupLanguagePendingSnapshot !== null && (!startupLanguagePendingSnapshot.visible || startupLanguagePendingSnapshot.language === 'de') && new URLSearchParams(startupLanguagePendingSnapshot.query).get('language') === 'de' && germanStartupReady === 'de|de|Upload,Accounts,Einstellungen,Verlauf');
     await wc.executeJavaScript('(async () => { config.globalSettings = { ...(config.globalSettings || {}), language: "en" }; await window.api.saveGlobalSettings(config.globalSettings); setUiLanguage("en"); renderSettings(); })()');
     const languageReady = await waitUntil(() => wc.executeJavaScript('Boolean(document.getElementById("languageInput"))'));
     check('Runtime language switching renders the complete English interface', languageReady === true && await wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")') === 'en|en|Upload,Accounts,Settings,History');
@@ -292,7 +292,7 @@ setTimeout(async () => {
     await languageReloadFinished;
     const reloadedLanguageState = await waitUntil(() => wc.executeJavaScript(\`(() => {
       if (typeof config !== 'object' || config.globalSettings?.language !== 'en') return '';
-      return [document.documentElement.lang, location.search, [...document.querySelectorAll('.tab')].map(tab => tab.textContent.trim()).join(',')].join('|');
+      return [document.documentElement.lang, new URL(location.href).searchParams.get('language'), [...document.querySelectorAll('.tab')].map(tab => tab.textContent.trim()).join(',')].join('|');
     })()\`));
     const germanLanguageQuery = await wc.executeJavaScript(\`(async () => {
       const input = document.getElementById('languageInput');
@@ -301,7 +301,7 @@ setTimeout(async () => {
       await saveSettings({ feedbackText: 'Gespeichert' });
       return { query: new URL(location.href).searchParams.get('language'), active: document.documentElement.lang };
     })()\`);
-    check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === 'en|?language=en|Upload,Accounts,Settings,History' && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
+    check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === 'en|en|Upload,Accounts,Settings,History' && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
 
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
@@ -2040,7 +2040,7 @@ setTimeout(async () => {
         _deletedJobIds.clear();
         if (deletedJobId) _deletedJobIds.add(deletedJobId);
         _handleProgressImpl(event);
-        return queueJobs.map(job => ({ id: job.id, status: job.status, link: job.result?.download_url || null }));
+        return queueJobs.map(job => ({ id: job.id, uploadId: job.uploadId || null, status: job.status, link: job.result?.download_url || null }));
       };
       const exact = run([
         { id: 'completion-exact-a', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 },
@@ -2052,6 +2052,9 @@ setTimeout(async () => {
       const deletedExact = run([
         { id: 'completion-survivor', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
       ], { jobId: 'completion-deleted', fileName: 'same.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/deleted' } }, 'completion-deleted');
+      const deletedUploadLegacy = run([
+        { id: 'completion-replacement', fileName: 'reused.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
+      ], { uploadId: 'completion-deleted-upload', fileName: 'reused.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/deleted-upload' } }, 'completion-deleted-upload');
       const ambiguousLegacy = run([
         { id: 'completion-legacy-a', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'queued', bytesTotal: 10 },
         { id: 'completion-legacy-b', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'preview', bytesTotal: 10 }
@@ -2064,10 +2067,11 @@ setTimeout(async () => {
       selectedFiles = [];
       _deletedJobIds.clear();
       rebuildJobIndex();
-      return { exact, missingExact, deletedExact, ambiguousLegacy, uniqueLegacy };
+      return { exact, missingExact, deletedExact, deletedUploadLegacy, ambiguousLegacy, uniqueLegacy };
     })()\`);
     check('Completion events with jobId update only their exact live job', completionIdentityRaces.exact[0].status === 'queued' && completionIdentityRaces.exact[1].status === 'done' && completionIdentityRaces.exact[1].link === 'https://example.invalid/exact-b');
     check('Missing or deleted exact completion IDs never fall back to another job', completionIdentityRaces.missingExact.length === 1 && completionIdentityRaces.missingExact[0].status === 'queued' && completionIdentityRaces.deletedExact.length === 1 && completionIdentityRaces.deletedExact[0].status === 'queued');
+    check('Deleted legacy upload IDs never bind to a unique replacement job', completionIdentityRaces.deletedUploadLegacy.length === 1 && completionIdentityRaces.deletedUploadLegacy[0].status === 'queued' && completionIdentityRaces.deletedUploadLegacy[0].uploadId === null && completionIdentityRaces.deletedUploadLegacy[0].link === null);
     check('Legacy completion identity applies only to one unambiguous candidate', completionIdentityRaces.ambiguousLegacy.every(job => job.status !== 'done') && completionIdentityRaces.uniqueLegacy.length === 1 && completionIdentityRaces.uniqueLegacy[0].status === 'done' && completionIdentityRaces.uniqueLegacy[0].link === 'https://example.invalid/unique');
     restoreInitialIpcHandler('complete-upload-finalization');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');

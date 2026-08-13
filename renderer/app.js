@@ -3371,7 +3371,10 @@ function _handleProgressImpl(data) {
   const hasJobId = data.jobId !== undefined && data.jobId !== null && data.jobId !== '';
   let job = hasJobId ? _jobIndexById.get(data.jobId) : null;
   if (hasJobId && !job) return;
-  if (!hasJobId && data.uploadId) job = _jobIndexByUploadId.get(data.uploadId);
+  if (!hasJobId && data.uploadId) {
+    job = _jobIndexByUploadId.get(data.uploadId);
+    if (!job && _deletedJobIds.has(data.uploadId)) return;
+  }
   if (!job) {
     const candidates = queueJobs.filter(candidate =>
       candidate.fileName === data.fileName &&
@@ -3388,7 +3391,6 @@ function _handleProgressImpl(data) {
   }
   if (!job) {
     if (['done', 'error', 'aborted', 'skipped'].includes(data.status)) return;
-    if (data.uploadId && _deletedJobIds.has(data.uploadId)) return;
     job = {
       id: data.uploadId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       uploadId: data.uploadId,
