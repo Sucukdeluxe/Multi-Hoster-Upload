@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { __test } = require('../lib/hosters');
+const { __test, createRecoveryClaimRegistry } = require('../lib/hosters');
 
 describe('hosters helpers', () => {
   it('extracts VOE file_code from nested result payloads', () => {
@@ -92,5 +92,76 @@ describe('hosters helpers', () => {
     assert.equal(r.file_code, 'GOOD123');
     assert.equal(r.download_url, 'https://byse.sx/d/GOOD123');
     assert.equal(r.embed_url, 'https://byse.sx/e/GOOD123');
+  });
+});
+
+describe('recovery claim registry', () => {
+  it('claims remote codes across every title of one normalized hoster account', () => {
+    const registry = createRecoveryClaimRegistry();
+    const first = registry.forUpload(' VOE.SX ', 'ＡＣＣＯＵＮＴ', 'First Episode.mkv');
+    const differentTitle = registry.forUpload('voe.sx', 'ACCOUNT', 'Second Episode.mp4');
+    const differentAccount = registry.forUpload('voe.sx', 'ACCOUNT-B', 'Second Episode.mp4');
+
+    assert.equal(first.reserve('REMOTE-CODE'), true);
+    assert.equal(differentTitle.reserve('REMOTE-CODE'), false);
+    assert.equal(differentAccount.reserve('REMOTE-CODE'), true);
+  });
+
+  it('serializes canonically equivalent titles without blocking an independent title', async () => {
+    const registry = createRecoveryClaimRegistry();
+    const composed = registry.forUpload('voe.sx', 'ACCOUNT', 'Café.mkv');
+    const decomposed = registry.forUpload('voe.sx', 'ACCOUNT', 'Cafe\u0301.mp4');
+    const independent = registry.forUpload('voe.sx', 'ACCOUNT', 'Other Episode.mkv');
+    const events = [];
+    let releaseFirst;
+    const firstGate = new Promise(resolve => {
+      releaseFirst = resolve;
+    });
+    assert.equal(composed.reserve('UNICODE-CODE'), true);
+    assert.equal(decomposed.reserve('UNICODE-CODE'), false);
+
+    const first = composed.runExclusive(async () => {
+      events.push('first-started');
+      await firstGate;
+      events.push('first-finished');
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    const equivalent = decomposed.runExclusive(async () => {
+      events.push('equivalent-started');
+    });
+    const other = independent.runExclusive(async () => {
+      events.push('independent-started');
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(events, ['first-started', 'independent-started']);
+    releaseFirst();
+    await Promise.all([first, equivalent, other]);
+    assert.deepEqual(events, ['first-started', 'independent-started', 'first-finished', 'equivalent-started']);
+  });
+
+  it('fails closed for later jobs after a title becomes uncertain', async () => {
+    const registry = createRecoveryClaimRegistry();
+    const first = registry.forUpload('vidmoly.me', 'ACCOUNT', 'Shared Episode.mkv');
+    const later = registry.forUpload('vidmoly.me', 'ACCOUNT', 'shared-episode.mp4');
+    const error = first.markUncertain(new Error('Remote commit could not be confirmed'));
+
+    assert.equal(error.remoteCommitUncertain, true);
+    assert.equal(error.hosterTransient, true);
+    await assert.rejects(
+      () => later.runExclusive(async () => 'unsafe-success'),
+      err => err.remoteCommitUncertain === true && err.hosterTransient === true
+    );
+  });
+
+  it('drops every claim when the registry is cleared', () => {
+    const registry = createRecoveryClaimRegistry();
+    const first = registry.forUpload('voe.sx', 'ACCOUNT', 'Episode.mkv');
+    assert.equal(first.reserve('REMOTE-CODE'), true);
+
+    registry.clear();
+
+    const nextBatch = registry.forUpload('voe.sx', 'ACCOUNT', 'Episode.mkv');
+    assert.equal(nextBatch.reserve('REMOTE-CODE'), true);
   });
 });

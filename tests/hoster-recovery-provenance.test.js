@@ -187,3 +187,46 @@ test('Vidmoly concurrent same-name recovery accepts distinct remote codes', asyn
 
   assert.deepEqual(results.map(result => result.file_code), ['VIDFIRST0001', 'VIDSECOND001']);
 });
+
+for (const scenario of [
+  {
+    label: 'VOE',
+    hoster: 'voe.sx',
+    Uploader: VoeUploader,
+    sharedCode: 'VOE_UNCERTAIN',
+    lateCode: 'VOE_LATE_CODE',
+    build(uploader, code) {
+      return uploader._buildUrls(code);
+    }
+  },
+  {
+    label: 'Vidmoly',
+    hoster: 'vidmoly.me',
+    Uploader: VidmolyUploader,
+    sharedCode: 'VIDUNCERTAIN',
+    lateCode: 'VIDLATECODE1',
+    build(uploader, code) {
+      return uploader._buildUrlsFromCode(code);
+    }
+  }
+]) {
+  test(`${scenario.label} marks a duplicate direct identity uncertain and blocks a later title match`, async () => {
+    const registry = createRecoveryClaimRegistry();
+    const firstClaim = registry.forUpload(scenario.hoster, 'ACCOUNT', 'First Episode.mkv');
+    const uncertainClaim = registry.forUpload(scenario.hoster, 'ACCOUNT', 'Second Episode.mkv');
+    const first = new scenario.Uploader(firstClaim);
+    const uncertain = new scenario.Uploader(uncertainClaim);
+
+    scenario.build(first, scenario.sharedCode);
+    assert.throws(
+      () => scenario.build(uncertain, scenario.sharedCode),
+      err => err.remoteIdentityClaimed === true && err.remoteCommitUncertain === true
+    );
+
+    const laterClaim = registry.forUpload(scenario.hoster, 'ACCOUNT', 'Second Episode.mp4');
+    await assert.rejects(
+      () => laterClaim.runExclusive(async () => scenario.build(new scenario.Uploader(laterClaim), scenario.lateCode)),
+      err => err.remoteCommitUncertain === true
+    );
+  });
+}
