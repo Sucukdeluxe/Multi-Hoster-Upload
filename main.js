@@ -36,6 +36,7 @@ const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
+const { buildTerminalJobSnapshots } = require('./lib/upload-recovery');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -2272,8 +2273,16 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
+    const recoveryWithTerminalJobs = {
+      ...recovery,
+      settledAt: new Date().toISOString(),
+      terminalJobs: buildTerminalJobSnapshots(summary)
+    };
+    try { await configStore.saveUploadRecovery(recoveryWithTerminalJobs); } catch (error) { debugLog(`upload recovery outcomes could not be saved: ${error.message}`); }
     const queuePersisted = await requestUploadFinalization(summary, historyPersisted);
-    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
+    if (queuePersisted) {
+      try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
+    }
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
     _producerTracker.finish();

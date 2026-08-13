@@ -10,6 +10,38 @@ test('packages every Electron preload referenced by the main process', () => {
   assert.equal(packageJson.build.win.signAndEditExecutable, false);
 });
 
+test('floating drop target resolves native paths through Electron webUtils', () => {
+  let exposedApi = null;
+  const nativeFile = { name: 'fixture.mkv' };
+  const electronMock = {
+    contextBridge: {
+      exposeInMainWorld: (_name, api) => { exposedApi = api; }
+    },
+    ipcRenderer: {
+      send: () => {}
+    },
+    webUtils: {
+      getPathForFile: file => file === nativeFile ? 'C:\\fixtures\\fixture.mkv' : ''
+    }
+  };
+  const originalLoad = Module._load;
+  const preloadPath = require.resolve('../preload-drop-target');
+  delete require.cache[preloadPath];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'electron') return electronMock;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    require(preloadPath);
+  } finally {
+    Module._load = originalLoad;
+    delete require.cache[preloadPath];
+  }
+
+  assert.equal(typeof exposedApi.getPathForFile, 'function');
+  assert.equal(exposedApi.getPathForFile(nativeFile), 'C:\\fixtures\\fixture.mkv');
+});
+
 test('afterPack brands the executable metadata shown by Windows', async () => {
   let editCall = null;
   const originalLoad = Module._load;

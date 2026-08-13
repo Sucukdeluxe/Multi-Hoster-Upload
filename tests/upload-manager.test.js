@@ -160,6 +160,7 @@ describe('UploadManager', () => {
     assert.equal(summary.succeeded, 2);
     assert.equal(summary.failed, 0);
     assert.equal(summary.files.length, 2);
+    assert.ok(summary.files.flatMap(file => file.results).every(result => typeof result.jobId === 'string' && result.jobId.length > 0));
   });
 
   it('emits a final idle stats snapshot after a normal batch', async () => {

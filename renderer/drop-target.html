@@ -79,12 +79,20 @@
       e.preventDefault();
       e.stopPropagation();
       target.classList.remove('drag-over');
-      const paths = [];
+      const files = [];
       for (const file of e.dataTransfer.files) {
-        if (file.path) paths.push(file.path);
+        let filePath = '';
+        try { filePath = window.dropTargetApi.getPathForFile(file); } catch {}
+        if (!filePath) continue;
+        files.push({
+          path: filePath,
+          name: file.name || '',
+          size: Number.isFinite(file.size) ? file.size : 0,
+          isDirectory: file.type === '' && file.size === 0
+        });
       }
-      if (paths.length > 0) {
-        window.dropTargetApi.sendFiles(paths);
+      if (files.length > 0) {
+        window.dropTargetApi.sendFiles(files);
       }
     });
   </script>

@@ -228,7 +228,9 @@ setTimeout(async () => {
     const liveLanguageSwitch = await wc.executeJavaScript('(() => { const input = document.getElementById("languageInput"); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); const german = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "en"; input.dispatchEvent(new Event("change", { bubbles: true })); const english = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); return [german, english, document.documentElement.lang].join("|"); })()');
     check('Language changes apply immediately in both directions', liveLanguageSwitch === 'Upload,Accounts,Einstellungen,Verlauf|Upload,Accounts,Settings,History|de');
     const localizedStableMetric = await wc.executeJavaScript(\`(async () => {
-      _sessionDoneCount = 1234;
+      const previousJobs = queueJobs;
+      queueJobs = Array.from({ length: 1234 }, (_, index) => ({ id: 'ui-locale-done-' + index, status: 'done' }));
+      _queueStatsCache = null;
       updateStatusBar();
       await new Promise(resolve => setTimeout(resolve, 360));
       const metric = document.getElementById('uploadTelemetryCompleted');
@@ -236,7 +238,8 @@ setTimeout(async () => {
       setUiLanguage('en');
       const english = [metric?.textContent.trim(), metric?.getAttribute('aria-label')];
       setUiLanguage('de');
-      _sessionDoneCount = 0;
+      queueJobs = previousJobs;
+      _queueStatsCache = null;
       updateStatusBar();
       return { german, english };
     })()\`);
@@ -370,6 +373,24 @@ setTimeout(async () => {
       try { fs.unlinkSync(desktopDropFixture); } catch {}
     }
     check('Desktop file drop reaches the upload selection with its native path', desktopDropState?.modal === 'flex' && desktopDropState.paths.length === 1 && desktopDropState.paths[0] === desktopDropFixture);
+
+    const floatingDropFolder = fs.mkdtempSync(path.join(app.getPath('temp'), 'mhu-floating-folder-drop-'));
+    const floatingDropNested = path.join(floatingDropFolder, 'nested');
+    const floatingDropFirst = path.join(floatingDropFolder, 'first.mkv');
+    const floatingDropSecond = path.join(floatingDropNested, 'second.mp4');
+    fs.mkdirSync(floatingDropNested);
+    fs.writeFileSync(floatingDropFirst, Buffer.from('first floating drop fixture'));
+    fs.writeFileSync(floatingDropSecond, Buffer.from('second floating drop fixture'));
+    let floatingFolderDropState = null;
+    try {
+      wc.send('drop-target:files', [{ path: floatingDropFolder, name: path.basename(floatingDropFolder), size: 0, isDirectory: true }]);
+      await waitUntil(() => wc.executeJavaScript('document.getElementById("hosterModal")?.style.display === "flex" && _pendingFiles.length === 2'));
+      floatingFolderDropState = await wc.executeJavaScript('(() => ({ modal: document.getElementById("hosterModal")?.style.display, paths: _pendingFiles.map(file => file.path).sort() }))()');
+      await wc.executeJavaScript('cancelHosterModal()');
+    } finally {
+      fs.rmSync(floatingDropFolder, { recursive: true, force: true });
+    }
+    check('Floating drop target recursively expands folders before hoster selection', floatingFolderDropState?.modal === 'flex' && floatingFolderDropState.paths.join('|') === [floatingDropFirst, floatingDropSecond].sort().join('|'));
 
     const populatedDropFixture = path.join(app.getPath('temp'), 'mhu-populated-drop-' + process.pid + '.mkv');
     fs.writeFileSync(populatedDropFixture, Buffer.from('populated queue drop fixture'));
@@ -525,7 +546,7 @@ setTimeout(async () => {
         speedPair: [document.getElementById('uploadTelemetrySpeed')?.textContent, document.getElementById('uploadSpeedValue')?.textContent].join('|')
       };
     })()\`);
-    check('Upload telemetry reflects queue and session activity', telemetryUpdate.values === '4|1|2|1|7|2|2 kB/s|00:03');
+    check('Upload telemetry reflects current queue activity', telemetryUpdate.values === '4|1|2|1|1|1|2 kB/s|00:03');
     check('Changing integer telemetry rolls vertically', telemetryUpdate.rolling === 2 && telemetryUpdate.direction === 'up');
     check('Header and sidebar speed update synchronously from the same live sample', telemetryUpdate.speedPair === '2 kB/s|2 kB/s');
     const secondSynchronizedSpeed = await wc.executeJavaScript('lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 1536 }; updateStatusBar(); [document.getElementById("uploadTelemetrySpeed")?.textContent, document.getElementById("uploadSpeedValue")?.textContent].join("|")');
@@ -750,6 +771,33 @@ setTimeout(async () => {
     const removeAllDanger = await wc.executeJavaScript('(() => { const item = document.querySelector("#contextMenu [data-action=delete-all]"); const channels = getComputedStyle(item).color.match(/[0-9.]+/g)?.map(Number) || []; return Boolean(item && channels.length >= 3 && channels[0] > channels[1] * 1.2 && channels[0] > channels[2] * 1.15); })()');
     check('Remove all is visually marked as a destructive queue action', removeAllDanger === true);
 
+    const queueTelemetryState = await wc.executeJavaScript(\`(async () => {
+      queueJobs = [
+        { id: 'telemetry-done-a', status: 'done' },
+        { id: 'telemetry-done-b', status: 'done' },
+        { id: 'telemetry-error', status: 'error' },
+        { id: 'telemetry-queued', status: 'queued' }
+      ];
+      _sessionDoneCount = 91;
+      _sessionErrorCount = 92;
+      _queueStatsCache = null;
+      updateStatusBar();
+      await new Promise(resolve => setTimeout(resolve, 360));
+      const result = {
+        completed: document.getElementById('uploadTelemetryCompleted')?.textContent.trim(),
+        failed: document.getElementById('uploadTelemetryFailed')?.textContent.trim(),
+        sidebarDone: document.getElementById('uploadSidebarDoneCount')?.textContent.trim(),
+        sidebarFailed: document.getElementById('uploadSidebarErrorCount')?.textContent.trim()
+      };
+      queueJobs = [];
+      _sessionDoneCount = 0;
+      _sessionErrorCount = 0;
+      _queueStatsCache = null;
+      updateStatusBar();
+      return result;
+    })()\`);
+    check('Lower telemetry and sidebar badges use the same current queue state', queueTelemetryState.completed === '2' && queueTelemetryState.failed === '1' && queueTelemetryState.sidebarDone === '2' && queueTelemetryState.sidebarFailed === '1');
+
     let releaseSelectedQueueCancel = null;
     ipcMain.removeHandler('cancel-selected-jobs');
     ipcMain.handle('cancel-selected-jobs', () => new Promise(resolve => { releaseSelectedQueueCancel = () => resolve(true); }));
@@ -773,14 +821,14 @@ setTimeout(async () => {
     });
     ipcMain.removeHandler('cancel-selected-jobs');
     ipcMain.handle('cancel-selected-jobs', () => { selectedQueueCancelCalls++; return true; });
-    await wc.executeJavaScript('(() => { uploading = true; queueJobs = ["a", "b", "c"].map(id => ({ id: "ui-delete-all-" + id, file: "C:/ui/delete-all-" + id + ".bin", fileName: "delete-all-" + id + ".bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 })); selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteAllPromise = handleContextAction("delete-all"); return true; })()');
+    await wc.executeJavaScript('(() => { uploading = true; queueJobs = Array.from({ length: 100 }, (_, index) => ({ id: "ui-delete-all-" + index, file: "C:/ui/delete-all-" + index + ".bin", fileName: "delete-all-" + index + ".bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 })); selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteAllPromise = handleContextAction("delete-all"); return true; })()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
     await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
     await waitUntil(() => releaseFullQueueCancel);
     const fullQueueStillPresent = await wc.executeJavaScript('queueJobs.length');
     releaseFullQueueCancel();
     const fullQueueAfterCancel = await wc.executeJavaScript('window.__uiDeleteAllPromise.then(() => { delete window.__uiDeleteAllPromise; return { length: queueJobs.length, uploading }; })');
-    check('Remove all awaits one batch cancellation instead of issuing one cancellation per queued job', fullQueueStillPresent === 3 && fullQueueAfterCancel.length === 0 && fullQueueAfterCancel.uploading === false && fullQueueCancelCalls === 1 && selectedQueueCancelCalls === 0);
+    check('Remove all keeps a 100-job cancellation responsive and issues one batch cancellation', fullQueueStillPresent === 100 && fullQueueAfterCancel.length === 0 && fullQueueAfterCancel.uploading === false && fullQueueCancelCalls === 1 && selectedQueueCancelCalls === 0);
     restoreInitialIpcHandler('cancel-upload');
     restoreInitialIpcHandler('cancel-selected-jobs');
 
@@ -1901,6 +1949,41 @@ setTimeout(async () => {
     const singleRecentLinkContextLabel = await wc.executeJavaScript('(() => { selectedRecentIds.clear(); const row = document.createElement("tr"); row.dataset.order = "1001"; showRecentContextMenu(row, 8, 8); const label = document.querySelector("#recentContextMenu [data-action=recent-copy-links]")?.textContent?.trim(); hideContextMenu(); return label; })()');
     check('Recent upload context menu uses singular copy text for one link', singleRecentLinkContextLabel === 'Link kopieren');
 
+    const copyableLinkContextLabels = await wc.executeJavaScript(\`(() => {
+      const previousJobs = queueJobs;
+      const previousRecent = sessionFilesData;
+      queueJobs = [
+        { id: 'copyable-link', status: 'done', result: { download_url: 'https://example.invalid/copyable' } },
+        { id: 'missing-link', status: 'done', result: null }
+      ];
+      rebuildJobIndex();
+      selectedJobIds.clear();
+      selectedJobIds.add('copyable-link');
+      selectedJobIds.add('missing-link');
+      showContextMenu(8, 8);
+      const queueLabel = document.querySelector('#contextMenu [data-action=copy-links]')?.textContent?.trim();
+      hideContextMenu();
+      sessionFilesData = [
+        { order: 2001, link: 'https://example.invalid/recent', isError: false },
+        { order: 2002, link: '', isError: true }
+      ];
+      selectedRecentIds.clear();
+      selectedRecentIds.add(2001);
+      selectedRecentIds.add(2002);
+      const row = document.createElement('tr');
+      row.dataset.order = '2001';
+      showRecentContextMenu(row, 8, 8);
+      const recentLabel = document.querySelector('#recentContextMenu [data-action=recent-copy-links]')?.textContent?.trim();
+      hideContextMenu();
+      queueJobs = previousJobs;
+      sessionFilesData = previousRecent;
+      selectedJobIds.clear();
+      selectedRecentIds.clear();
+      rebuildJobIndex();
+      return { queueLabel, recentLabel };
+    })()\`);
+    check('Copy-link context labels count only links that can actually be copied', copyableLinkContextLabels.queueLabel === 'Link kopieren' && copyableLinkContextLabels.recentLabel === 'Link kopieren');
+
     const historySidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#history-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#history-view .view-sidebar-section")?.getBoundingClientRect(); const retention = document.getElementById("historySidebarRetention")?.textContent?.trim(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && retention === "Alles behalten"); })()');
     check('History sidebar shows the active retention in its lower area', historySidebarInformation === true);
 
@@ -2253,7 +2336,9 @@ setTimeout(async () => {
     check('Rapid main-view switches never paint a blank, duplicate, or overflowing active view', rapidViewStability.length === 12 && invalidViewFrames.length === 0);
 
     const languageFrameStability = await wc.executeJavaScript(\`(async () => {
-      _sessionDoneCount = 1234;
+      const previousJobs = queueJobs;
+      queueJobs = Array.from({ length: 1234 }, (_, index) => ({ id: 'ui-language-frame-done-' + index, status: 'done' }));
+      _queueStatsCache = null;
       const languages = ['en', 'de', 'en', 'de', 'en', 'de', 'en', 'de', 'en', 'de', 'en', 'de'];
       const samples = [];
       for (const language of languages) {
@@ -2270,7 +2355,8 @@ setTimeout(async () => {
           metricLabel: metric?.getAttribute('aria-label')
         });
       }
-      _sessionDoneCount = 0;
+      queueJobs = previousJobs;
+      _queueStatsCache = null;
       updateStatusBar();
       return samples;
     })()\`);
@@ -2286,8 +2372,11 @@ setTimeout(async () => {
       const metric = document.getElementById('uploadTelemetryCompleted');
       const initialRect = metric.getBoundingClientRect();
       const frames = [];
+      const previousJobs = queueJobs;
+      queueJobs = Array.from({ length: 999 }, (_, index) => ({ id: 'ui-rolling-done-' + index, status: 'done' }));
       for (let value = 1000; value <= 1020; value++) {
-        _sessionDoneCount = value;
+        queueJobs.push({ id: 'ui-rolling-done-' + value, status: 'done' });
+        _queueStatsCache = null;
         updateStatusBar();
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const rect = metric.getBoundingClientRect();
@@ -2301,7 +2390,8 @@ setTimeout(async () => {
       }
       await new Promise(resolve => setTimeout(resolve, 360));
       const settled = { text: metric.textContent.trim(), label: metric.getAttribute('aria-label'), direction: metric.dataset.direction };
-      _sessionDoneCount = 0;
+      queueJobs = previousJobs;
+      _queueStatsCache = null;
       updateStatusBar();
       return { initialRect: { width: initialRect.width, height: initialRect.height }, frames, settled };
     })()\`);

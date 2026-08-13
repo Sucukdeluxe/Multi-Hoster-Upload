@@ -540,8 +540,8 @@ async function init() {
   });
 
   // Drop target window: files dropped on the small floating window
-  window.api.onDropTargetFiles((paths) => {
-    addPathsToQueue(paths);
+  window.api.onDropTargetFiles((entries) => {
+    addDropTargetEntries(entries).catch(console.error);
   });
 
   // Remote client count updates (registered once, not per renderSettings call)
@@ -1198,39 +1198,44 @@ function restoreQueueStateFromConfig() {
       .map(file => ({ path: file.path, name: file.name || file.path.split(/[\\/]/).pop(), size: file.size || 0 }))
     : [];
 
-  const interruptedJobIds = new Set(Array.isArray(config?.globalSettings?.uploadRecovery?.jobIds) ? config.globalSettings.uploadRecovery.jobIds : []);
+  const uploadRecovery = config?.globalSettings?.uploadRecovery || null;
   const rawJobs = Array.isArray(pending.queueJobs)
     ? pending.queueJobs
       .filter(job => job && job.fileName && job.hoster)
-      .map(job => ({
-        id: job.id || `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        uploadId: null,
-        file: job.file || '',
-        fileName: job.fileName,
-        hoster: job.hoster,
-        status: normalizeRestoredJobStatus(job.status),
-        bytesUploaded: job.status === 'done' ? (job.bytesTotal || 0) : 0,
-        bytesTotal: job.bytesTotal || 0,
-        speedKbs: 0,
-        elapsed: 0,
-        remaining: 0,
-        error: job.error || null,
-        failureDetails: job.failureDetails || null,
-        interrupted: interruptedJobIds.size > 0 && !['done', 'error', 'skipped'].includes(job.status),
-        result: job.result || null,
-        sourceCleanupMetadataVersion: job.sourceCleanupMetadataVersion === 2 ? 2 : null,
-        sourceCleanupToken: job.sourceCleanupToken || null,
-        sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
-        sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
-          ? [...job.sourceCleanupConfirmedHosters]
-          : [],
-        sourceCleanupProvisionalHosters: [],
-        sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
-        attempt: 0,
-        maxAttempts: job.maxAttempts || 0,
-        link: '',
-        progress: job.status === 'done' ? 1 : 0
-      }))
+      .map(job => {
+        const id = job.id || `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const recoveryOutcome = window.UploadRecovery.getRecoveryOutcome({ ...job, id }, uploadRecovery);
+        const status = normalizeRestoredJobStatus(recoveryOutcome.status);
+        return {
+          id,
+          uploadId: null,
+          file: job.file || '',
+          fileName: job.fileName,
+          hoster: job.hoster,
+          status,
+          bytesUploaded: status === 'done' ? (job.bytesTotal || 0) : 0,
+          bytesTotal: job.bytesTotal || 0,
+          speedKbs: 0,
+          elapsed: 0,
+          remaining: 0,
+          error: Object.hasOwn(recoveryOutcome, 'error') ? recoveryOutcome.error : (job.error || null),
+          failureDetails: Object.hasOwn(recoveryOutcome, 'failureDetails') ? recoveryOutcome.failureDetails : (job.failureDetails || null),
+          interrupted: recoveryOutcome.interrupted === true,
+          result: Object.hasOwn(recoveryOutcome, 'result') ? recoveryOutcome.result : (job.result || null),
+          sourceCleanupMetadataVersion: job.sourceCleanupMetadataVersion === 2 ? 2 : null,
+          sourceCleanupToken: job.sourceCleanupToken || null,
+          sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
+          sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
+            ? [...job.sourceCleanupConfirmedHosters]
+            : [],
+          sourceCleanupProvisionalHosters: [],
+          sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
+          attempt: 0,
+          maxAttempts: job.maxAttempts || 0,
+          link: '',
+          progress: status === 'done' ? 1 : 0
+        };
+      })
     : [];
 
   // Deduplicate: keep the job with the best status for each file+hoster pair
@@ -1376,6 +1381,23 @@ function setupDragDrop() {
 let _pendingFiles = []; // Files waiting for hoster modal confirmation
 
 let _addingDropped = false;
+
+async function addDropTargetEntries(entries) {
+  const files = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const filePath = typeof entry === 'string' ? entry : entry?.path;
+    if (!filePath) continue;
+    if (entry && typeof entry === 'object' && entry.isDirectory) {
+      try {
+        const folderFiles = await window.api.resolveFolderFiles(filePath);
+        if (Array.isArray(folderFiles)) files.push(...folderFiles);
+      } catch {}
+      continue;
+    }
+    files.push(entry);
+  }
+  addPathsToQueue(files);
+}
 
 async function addDroppedFiles(fileList) {
   if (_addingDropped) return;
@@ -2305,8 +2327,12 @@ function showContextMenu(x, y) {
   const n = selectedJobIds.size;
   const delItem = menu.querySelector('[data-action="delete-selected"]');
   if (delItem) delItem.textContent = n > 1 ? `Entfernen (${n})` : 'Entfernen';
+  const copyableLinkCount = getSelectedJobLinks().length;
   const copyItem = menu.querySelector('[data-action="copy-links"]');
-  if (copyItem) copyItem.textContent = n > 1 ? `Links kopieren (${n})` : 'Link kopieren';
+  if (copyItem) {
+    copyItem.textContent = copyableLinkCount > 1 ? `Links kopieren (${copyableLinkCount})` : 'Link kopieren';
+    copyItem.style.display = copyableLinkCount > 0 ? '' : 'none';
+  }
   menu.querySelectorAll('[data-action="retry-selected"]').forEach(el => {
     el.textContent = n > 1 ? `Erneut versuchen (${n})` : 'Erneut versuchen';
   });
@@ -2364,8 +2390,12 @@ function showRecentContextMenu(row, x, y) {
     applyRecentSelectionClasses();
   }
   const menu = document.getElementById('recentContextMenu');
+  const copyableLinkCount = getSelectedRecentLinks().length;
   const copyItem = menu.querySelector('[data-action="recent-copy-links"]');
-  if (copyItem) copyItem.textContent = selectedRecentIds.size > 1 ? `Links kopieren (${selectedRecentIds.size})` : 'Link kopieren';
+  if (copyItem) {
+    copyItem.textContent = copyableLinkCount > 1 ? `Links kopieren (${copyableLinkCount})` : 'Link kopieren';
+    copyItem.style.display = copyableLinkCount > 0 ? '' : 'none';
+  }
   menu.style.display = 'block';
   menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 5) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 5) + 'px';
@@ -2438,11 +2468,15 @@ async function exportAllRecentFiles() {
   }
 }
 
-function copySelectedRecentLinks() {
-  const links = sessionFilesData
+function getSelectedRecentLinks() {
+  return sessionFilesData
     .filter(r => selectedRecentIds.has(r.order) && !r.isError)
     .map(r => r.link)
     .filter(Boolean);
+}
+
+function copySelectedRecentLinks() {
+  const links = getSelectedRecentLinks();
   if (links.length) { window.api.copyToClipboard(links.join('\n')); showCopyToast(`${links.length} Links kopiert`); }
 }
 
@@ -2923,7 +2957,7 @@ async function completeSourceCleanupFinalization(data) {
     }
     return window.api.completeUploadFinalization({
       finalizationId: data.finalizationId,
-      pendingQueue: queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
+      pendingQueue: data.historyPersisted !== true || queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
         ? buildPersistedQueueState()
         : null
     });
@@ -4169,8 +4203,8 @@ function updateStatusBar() {
   _setRollingUploadMetric('uploadTelemetryConnections', lastUploadStats.activeJobs || 0);
   _setRollingUploadMetric('uploadTelemetryRemaining', stats.remaining);
   _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
-  _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
-  _setRollingUploadMetric('uploadTelemetryFailed', Math.max(_sessionErrorCount, stats.errors));
+  _setRollingUploadMetric('uploadTelemetryCompleted', stats.done);
+  _setRollingUploadMetric('uploadTelemetryFailed', stats.errors);
   updateUploadSpeedDisplays();
   _setUploadTelemetryText('uploadTelemetryEta', etaSeconds > 0 ? formatTime(etaSeconds) : '--:--');
   updateUploadSidebarSummary(stats);
