@@ -385,10 +385,141 @@ let historySidebarFilter = 'all';
 let _knownUpdateInfo = null;
 let _updateCheckBusy = false;
 let _updateInstallBusy = false;
-let _updateDialogReturnFocus = null;
-let _updateDialogInertState = [];
 let _startupAutoResumeController = null;
 let _startupAutoResumeCanceled = false;
+
+const modalController = (() => {
+  const stack = [];
+  const baselineInert = new Map();
+  const focusSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  const resolveOverlay = value => typeof value === 'string' ? document.getElementById(value) : value;
+  const getDialog = overlay => overlay?.querySelector('[role="dialog"]') || overlay;
+  const isFocusable = element => {
+    if (!(element instanceof HTMLElement) || element.hidden || element.matches(':disabled')) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const getFocusable = overlay => Array.from(getDialog(overlay)?.querySelectorAll(focusSelector) || []).filter(isFocusable);
+  const resolveFocusTarget = (entry, value) => {
+    const candidate = typeof value === 'function'
+      ? value()
+      : typeof value === 'string'
+        ? entry.overlay.querySelector(value) || document.querySelector(value)
+        : value;
+    return isFocusable(candidate) ? candidate : null;
+  };
+  const syncIsolation = () => {
+    const top = stack.at(-1);
+    if (!top) {
+      baselineInert.forEach((inert, element) => {
+        if (element.isConnected) element.inert = inert;
+      });
+      baselineInert.clear();
+      return;
+    }
+    Array.from(document.body.children).forEach(element => {
+      if (!baselineInert.has(element)) baselineInert.set(element, element.inert);
+      element.inert = element !== top.overlay;
+    });
+  };
+  const focusEntry = entry => {
+    if (!entry || stack.at(-1) !== entry) return;
+    const dialog = getDialog(entry.overlay);
+    const target = resolveFocusTarget(entry, entry.options.initialFocus) || getFocusable(entry.overlay)[0] || dialog;
+    if (target instanceof HTMLElement && !target.matches(':disabled')) target.focus();
+  };
+  const open = (value, options = {}) => {
+    const overlay = resolveOverlay(value);
+    if (!overlay) return false;
+    let entry = stack.find(item => item.overlay === overlay);
+    if (entry) {
+      entry.options = { ...entry.options, ...options };
+      stack.splice(stack.indexOf(entry), 1);
+      stack.push(entry);
+    } else {
+      entry = {
+        overlay,
+        options,
+        returnFocus: options.returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+      };
+      stack.push(entry);
+    }
+    overlay.style.display = options.display || 'flex';
+    overlay.setAttribute('aria-hidden', 'false');
+    overlay.inert = false;
+    syncIsolation();
+    if (!getDialog(overlay)?.contains(document.activeElement)) focusEntry(entry);
+    requestAnimationFrame(() => {
+      if (stack.at(-1) === entry && !getDialog(overlay)?.contains(document.activeElement)) focusEntry(entry);
+    });
+    return true;
+  };
+  const close = (value, options = {}) => {
+    const overlay = resolveOverlay(value);
+    const index = stack.findIndex(item => item.overlay === overlay);
+    if (index < 0) {
+      if (overlay) {
+        overlay.style.display = 'none';
+        overlay.setAttribute('aria-hidden', 'true');
+      }
+      return false;
+    }
+    const wasTop = index === stack.length - 1;
+    const [entry] = stack.splice(index, 1);
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    syncIsolation();
+    if (wasTop && options.restoreFocus !== false) {
+      const fallback = resolveFocusTarget(entry, options.fallbackFocus ?? entry.options.fallbackFocus);
+      const target = resolveFocusTarget(entry, entry.returnFocus) || fallback;
+      if (target) target.focus();
+      else if (stack.length > 0) focusEntry(stack.at(-1));
+    }
+    return true;
+  };
+  const isOpen = value => {
+    const overlay = resolveOverlay(value);
+    return Boolean(overlay && stack.some(item => item.overlay === overlay));
+  };
+  const handleKeydown = event => {
+    const entry = stack.at(-1);
+    if (!entry) return;
+    const dialog = getDialog(entry.overlay);
+    if (!dialog) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      entry.options.onEscape?.();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = getFocusable(entry.overlay);
+    event.stopImmediatePropagation();
+    if (focusable.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!dialog.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  };
+  const handleClick = event => {
+    const entry = stack.at(-1);
+    if (!entry || event.target !== entry.overlay || typeof entry.options.onBackdrop !== 'function') return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    entry.options.onBackdrop();
+  };
+
+  document.addEventListener('keydown', handleKeydown, true);
+  document.addEventListener('click', handleClick, true);
+  return { open, close, isOpen };
+})();
 
 // Session-specific files for the "Files" panel (resets each session)
 let sessionFilesData = [];
@@ -1140,12 +1271,16 @@ function renderHosterModal() {
 function openHosterModal() {
   syncSelectedUploadHosters();
   renderHosterModal();
-  document.getElementById('hosterModal').style.display = 'flex';
+  modalController.open('hosterModal', {
+    initialFocus: '#cancelHosterModalBtn',
+    fallbackFocus: '#addFilesBtn',
+    onEscape: cancelHosterModal,
+    onBackdrop: cancelHosterModal
+  });
 }
 
 function closeHosterModal() {
-  const modal = document.getElementById('hosterModal');
-  if (modal) modal.style.display = 'none';
+  modalController.close('hosterModal', { fallbackFocus: '#addFilesBtn' });
 }
 
 async function applyHosterSelection() {
@@ -1173,7 +1308,7 @@ async function applyHosterSelection() {
 
   updateUploadView();
   persistQueueStateSoon(true); // immediate persist after adding files
-  document.getElementById('hosterModal').style.display = 'none';
+  closeHosterModal();
 }
 
 function cancelHosterModal() {
@@ -2788,21 +2923,8 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.context-menu')) hideContextMenu();
 });
 document.addEventListener('keydown', (e) => {
-  if (_isUpdateDialogVisible()) return;
-  const accountModal = document.getElementById('accountModal');
-  if (e.key === 'Tab' && accountModal && accountModal.style.display !== 'none') {
-    const focusable = Array.from(accountModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (first && last && ((!e.shiftKey && document.activeElement === last) || (e.shiftKey && document.activeElement === first))) {
-      e.preventDefault();
-      (e.shiftKey ? last : first).focus();
-    }
-  }
   if (e.key === 'Escape') {
     hideContextMenu();
-    cancelHosterModal();
-    if (accountModal && accountModal.style.display !== 'none') closeAccountModal();
   }
   if (e.target instanceof window.Element && e.target.closest('input, textarea, select')) return;
   const activeView = document.querySelector('.view.active');
@@ -2953,11 +3075,27 @@ async function persistSourceCleanupRevocations(preparation) {
   if (Array.isArray(preparation?.revokedHosters) && preparation.revokedHosters.length > 0) {
     sourceCleanupRevocationPending = true;
   }
-  if (!sourceCleanupRevocationPending) return;
-  queuePersistThrottle.cancel();
-  await persistQueueStateNow();
-  await flushConfigWrites();
-  sourceCleanupRevocationPending = false;
+  if (!sourceCleanupRevocationPending) return false;
+  await _persistQueueSnapshotBeforeUploadStart();
+  return true;
+}
+
+async function persistQueueBeforeUploadStart(preparation) {
+  if (await persistSourceCleanupRevocations(preparation)) return;
+  await _persistQueueSnapshotBeforeUploadStart();
+}
+
+async function _persistQueueSnapshotBeforeUploadStart() {
+  try {
+    queuePersistThrottle.cancel();
+    await persistQueueStateNow();
+    await flushConfigWrites();
+    sourceCleanupRevocationPending = false;
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    error.queuePersistenceFailure = true;
+    throw error;
+  }
 }
 
 async function completeSourceCleanupFinalization(data) {
@@ -3044,7 +3182,7 @@ async function startUpload(opts) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
-    await persistSourceCleanupRevocations(cleanupPreparation);
+    await persistQueueBeforeUploadStart(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
@@ -3069,7 +3207,8 @@ async function startUpload(opts) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    await showAppAlert(formatLocalizedError('Upload-Start fehlgeschlagen', err), 'Upload-Start fehlgeschlagen');
+    const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Upload-Start fehlgeschlagen';
+    await showAppAlert(formatLocalizedError(prefix, err), 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -3104,13 +3243,14 @@ async function startSelectedUpload(explicitJobs) {
       renderQueueTable();
       let result = null;
       try {
-        await persistSourceCleanupRevocations(cleanupPreparation);
+        await persistQueueBeforeUploadStart(cleanupPreparation);
         result = await window.api.addJobsToBatch({
           jobs: addable.map(serializeUploadJob),
           sourceCleanupGroups: cleanupPreparation.groups
         });
       } catch (err) {
-        showCopyToast(formatLocalizedError('Jobs konnten nicht hinzugefügt werden', err));
+        const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Jobs konnten nicht hinzugefügt werden';
+        showCopyToast(formatLocalizedError(prefix, err));
         return;
       }
 
@@ -3128,21 +3268,20 @@ async function startSelectedUpload(explicitJobs) {
       }
       persistQueueStateSoon();
       const added = Number(result && result.added) || 0;
-      // Use ASCII-only toast text here to avoid encoding artifacts on some systems.
       const skipped = Array.isArray(result && result.skippedJobs) ? result.skippedJobs.length : 0;
       const alreadyInBatch = Array.isArray(result && result.alreadyInBatchJobIds)
         ? result.alreadyInBatchJobIds.length
         : Math.max(0, addable.length - added - skipped);
       const toastParts = [];
-      if (added > 0) toastParts.push(`${added} hinzugefuegt`);
-      if (alreadyInBatch > 0) toastParts.push(`${alreadyInBatch} bereits im Batch`);
-      if (skipped > 0) toastParts.push(`${skipped} ohne gueltigen Account`);
+      if (added > 0) toastParts.push(localizeUiText(`${added} hinzugefügt`));
+      if (alreadyInBatch > 0) toastParts.push(localizeUiText(`${alreadyInBatch} bereits im Batch`));
+      if (skipped > 0) toastParts.push(localizeUiText(`${skipped} ohne gültigen Account`));
       if (result && result.error) {
         showCopyToast(formatLocalizedError('Jobs konnten nicht hinzugefügt werden', result.error));
       } else if (toastParts.length > 0) {
         showCopyToast(`Jobs: ${toastParts.join(', ')}`);
       } else {
-        showCopyToast('Keine Jobs hinzugefuegt');
+        showCopyToast('Keine Jobs hinzugefügt');
       }
       return;
     }
@@ -3168,7 +3307,7 @@ async function startSelectedUpload(explicitJobs) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
-    await persistSourceCleanupRevocations(cleanupPreparation);
+    await persistQueueBeforeUploadStart(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
@@ -3192,7 +3331,8 @@ async function startSelectedUpload(explicitJobs) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    await showAppAlert(formatLocalizedError('Upload-Start fehlgeschlagen', err), 'Upload-Start fehlgeschlagen');
+    const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Upload-Start fehlgeschlagen';
+    await showAppAlert(formatLocalizedError(prefix, err), 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -3228,26 +3368,29 @@ function handleProgress(data) {
   }
 }
 function _handleProgressImpl(data) {
-  let job = data.jobId ? _jobIndexById.get(data.jobId) : null;
-  if (!job && data.uploadId) job = _jobIndexByUploadId.get(data.uploadId);
+  const hasJobId = data.jobId !== undefined && data.jobId !== null && data.jobId !== '';
+  let job = hasJobId ? _jobIndexById.get(data.jobId) : null;
+  if (hasJobId && !job) return;
+  if (!hasJobId && data.uploadId) job = _jobIndexByUploadId.get(data.uploadId);
   if (!job) {
-    job = queueJobs.find(j =>
-      j.fileName === data.fileName && j.hoster === data.hoster && j.status === 'queued'
-    ) || queueJobs.find(j =>
-      j.fileName === data.fileName && j.hoster === data.hoster && j.status === 'preview'
+    const candidates = queueJobs.filter(candidate =>
+      candidate.fileName === data.fileName &&
+      candidate.hoster === data.hoster &&
+      candidate.status !== 'done' &&
+      candidate.status !== 'skipped'
     );
+    if (candidates.length > 1) return;
+    job = candidates.length === 1 ? candidates[0] : null;
     if (job && data.uploadId) {
       job.uploadId = data.uploadId;
       _jobIndexByUploadId.set(data.uploadId, job);
     }
   }
   if (!job) {
-    // Don't re-create jobs that were explicitly deleted by the user
-    if ((data.jobId && _deletedJobIds.has(data.jobId)) || (data.uploadId && _deletedJobIds.has(data.uploadId))) {
-      return;
-    }
+    if (['done', 'error', 'aborted', 'skipped'].includes(data.status)) return;
+    if (data.uploadId && _deletedJobIds.has(data.uploadId)) return;
     job = {
-      id: data.jobId || data.uploadId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: data.uploadId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       uploadId: data.uploadId,
       file: '', fileName: data.fileName, hoster: data.hoster,
       status: data.status, bytesUploaded: 0, bytesTotal: data.bytesTotal || 0,
@@ -3575,6 +3718,9 @@ function _handleStatsImpl(data) {
 }
 
 // --- Per-job log modal ---
+let _jobLogGeneration = 0;
+let _jobLogJobId = null;
+
 async function showJobLogModal() {
   const selectedJobs = _getVisibleSelectedQueueJobs();
   if (selectedJobs.length === 0) return;
@@ -3582,20 +3728,28 @@ async function showJobLogModal() {
   // make sense here.
   const job = selectedJobs[0];
   const jobId = job.id;
+  const generation = ++_jobLogGeneration;
+  _jobLogJobId = jobId;
   const modal = document.getElementById('jobLogModal');
   const titleEl = document.getElementById('jobLogTitle');
   const bodyEl = document.getElementById('jobLogBody');
   if (!modal || !titleEl || !bodyEl) return;
 
   titleEl.textContent = job && job.fileName ? `Log · ${job.fileName}` : 'Upload-Log';
-  bodyEl.textContent = 'Lade…';
-  modal.style.display = 'flex';
+  bodyEl.textContent = localizeUiText('Lade…');
+  modalController.open(modal, {
+    initialFocus: '#closeJobLogBtn',
+    fallbackFocus: '#addFilesBtn',
+    onEscape: hideJobLogModal,
+    onBackdrop: hideJobLogModal
+  });
 
   let entries = [];
   try { entries = await window.api.getJobLog(jobId); } catch {}
+  if (generation !== _jobLogGeneration || _jobLogJobId !== jobId || !modalController.isOpen(modal) || _jobIndexById.get(jobId) !== job) return;
 
   if (!Array.isArray(entries) || entries.length === 0) {
-    bodyEl.textContent = 'Keine Log-Einträge für diesen Job (entweder noch nichts passiert oder aus vorherigem Batch und schon geräumt).';
+    bodyEl.textContent = localizeUiText('Keine Log-Einträge für diesen Job (entweder noch nichts passiert oder aus vorherigem Batch und schon geräumt).');
     return;
   }
 
@@ -3619,18 +3773,19 @@ async function showJobLogModal() {
     ? Object.entries(job.failureDetails).map(([key, value]) => `${key}: ${value}`).join('\n')
     : '';
   const summary = [
-    `Hoster: ${job.hoster || '–'}`,
-    `Account: ${getAccountLabel(job) || job.accountId || '–'}`,
-    `Versuch: ${job.attempt || '–'} / ${job.maxAttempts || '–'}`,
-    job.error ? `Fehler: ${job.error}` : '',
-    details ? `Diagnose:\n${details}` : ''
+    `${localizeUiText('Hoster')}: ${job.hoster || '–'}`,
+    `${localizeUiText('Account')}: ${getAccountLabel(job) || job.accountId || '–'}`,
+    `${localizeUiText('Versuch')}: ${job.attempt || '–'} / ${job.maxAttempts || '–'}`,
+    job.error ? `${localizeUiText('Fehler')}: ${job.error}` : '',
+    details ? `${localizeUiText('Diagnose')}:\n${details}` : ''
   ].filter(Boolean).join('\n');
   bodyEl.textContent = `${summary}\n\n${entries.map(fmt).join('\n')}`;
 }
 
 function hideJobLogModal() {
-  const m = document.getElementById('jobLogModal');
-  if (m) m.style.display = 'none';
+  _jobLogGeneration++;
+  _jobLogJobId = null;
+  modalController.close('jobLogModal', { fallbackFocus: '#addFilesBtn' });
 }
 
 async function copyJobLogToClipboard() {
@@ -4114,16 +4269,23 @@ function _setRollingUploadMetric(id, value) {
 
   const direction = numericValue > previousValue ? 'up' : 'down';
   const previousText = element.getAttribute('aria-label') || previousValue.toLocaleString(getUiLocale());
+  element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
+  element.dataset.numericValue = String(numericValue);
+  element.setAttribute('aria-label', nextText);
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    const settled = document.createElement('span');
+    settled.textContent = nextText;
+    element.replaceChildren(settled);
+    element.dataset.direction = 'none';
+    return;
+  }
   const outgoing = document.createElement('span');
   const incoming = document.createElement('span');
   outgoing.textContent = previousText;
   incoming.textContent = nextText;
   outgoing.className = 'upload-rolling-outgoing';
   incoming.className = 'upload-rolling-incoming';
-  element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
-  element.dataset.numericValue = String(numericValue);
   element.dataset.direction = direction;
-  element.setAttribute('aria-label', nextText);
   element.replaceChildren(outgoing, incoming);
 
   const distance = direction === 'up' ? -1 : 1;
@@ -4244,37 +4406,13 @@ function renderHealthCheckResults(_results) {
 }
 
 let _appAlertResolve = null;
-let _appAlertReturnFocus = null;
-let _appAlertInertState = [];
-
-function _setAppAlertBackgroundInert(active) {
-  const modal = document.getElementById('appAlertModal');
-  if (!modal) return;
-  if (active) {
-    if (_appAlertInertState.length > 0) return;
-    _appAlertInertState = Array.from(document.body.children)
-      .filter(element => element !== modal && 'inert' in element)
-      .map(element => ({ element, inert: element.inert }));
-    _appAlertInertState.forEach(({ element }) => { element.inert = true; });
-    return;
-  }
-  _appAlertInertState.forEach(({ element, inert }) => {
-    if (element.isConnected) element.inert = inert;
-  });
-  _appAlertInertState = [];
-}
 
 function closeAppAlert(result = false) {
   const modal = document.getElementById('appAlertModal');
   if (!modal) return;
-  modal.style.display = 'none';
-  modal.setAttribute('aria-hidden', 'true');
-  _setAppAlertBackgroundInert(false);
   const resolve = _appAlertResolve;
   _appAlertResolve = null;
-  const returnFocus = _appAlertReturnFocus;
-  _appAlertReturnFocus = null;
-  if (returnFocus?.isConnected) returnFocus.focus();
+  modalController.close(modal);
   if (resolve) resolve(result);
 }
 
@@ -4287,7 +4425,6 @@ function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelT
   const alternate = document.getElementById('appAlertAlternateBtn');
   if (!modal || !titleEl || !messageEl || !confirm || !cancel || !alternate) return Promise.resolve(false);
   if (_appAlertResolve) closeAppAlert(false);
-  _appAlertReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   titleEl.textContent = localizeUiText(title);
   messageEl.textContent = localizeUiText(String(message || ''));
   confirm.textContent = localizeUiText(confirmText);
@@ -4296,10 +4433,11 @@ function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelT
   cancel.hidden = !showCancel;
   alternate.textContent = localizeUiText(alternateText);
   alternate.hidden = !alternateText;
-  modal.style.display = 'flex';
-  modal.setAttribute('aria-hidden', 'false');
-  _setAppAlertBackgroundInert(true);
-  (showCancel ? cancel : confirm).focus();
+  modalController.open(modal, {
+    initialFocus: () => showCancel ? cancel : confirm,
+    onEscape: () => closeAppAlert(false),
+    onBackdrop: () => closeAppAlert(false)
+  });
   return new Promise(resolve => { _appAlertResolve = resolve; });
 }
 
@@ -4330,27 +4468,6 @@ function setupAppAlertListeners() {
   alternate.addEventListener('click', () => closeAppAlert('alternate'));
   cancel.addEventListener('click', () => closeAppAlert(false));
   close.addEventListener('click', () => closeAppAlert(false));
-  modal.addEventListener('click', event => {
-    if (event.target === modal) closeAppAlert(false);
-  });
-  document.addEventListener('keydown', event => {
-    if (modal.style.display !== 'flex') return;
-    const focusable = [...modal.querySelectorAll('button:not([disabled]):not([hidden])')];
-    if (event.key === 'Tab' && focusable.length) {
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      }
-      return;
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      closeAppAlert(false);
-    }
-  }, true);
 }
 
 async function executeHealthCheck(hosters, _mode, generations) {
@@ -6079,10 +6196,7 @@ function wireCredentialVisibilityButtons(container) {
   });
 }
 
-let _accountModalReturnFocus = null;
-
 function openAccountModal(editAccountId) {
-  _accountModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   editingAccountId = editAccountId || null;
   _resetAccountModalState();
   const modal = document.getElementById('accountModal');
@@ -6126,26 +6240,19 @@ function openAccountModal(editAccountId) {
 
   _wireCredFieldInvalidation();
 
-  modal.style.display = 'flex';
-  requestAnimationFrame(() => {
-    const firstControl = editingAccountId
-      ? document.getElementById('accField_label')
-      : hosterSelect;
-    if (firstControl) firstControl.focus();
+  modalController.open(modal, {
+    initialFocus: () => editingAccountId ? document.getElementById('accField_label') : hosterSelect,
+    fallbackFocus: '#addAccountBtn',
+    onEscape: closeAccountModal,
+    onBackdrop: closeAccountModal
   });
 }
 
 function closeAccountModal() {
-  document.getElementById('accountModal').style.display = 'none';
+  modalController.close('accountModal', { fallbackFocus: '#addAccountBtn' });
   _hideOtpField();
   editingAccountId = null;
   _resetAccountModalState();
-  const returnFocus = _accountModalReturnFocus;
-  _accountModalReturnFocus = null;
-  const focusTarget = returnFocus && returnFocus.isConnected
-    ? returnFocus
-    : document.getElementById('addAccountBtn');
-  if (focusTarget) focusTarget.focus();
 }
 
 function openDeleteAccountModal(accountId) {
@@ -6155,11 +6262,16 @@ function openDeleteAccountModal(accountId) {
   const msg = document.getElementById('deleteAccountMessage');
   msg.textContent = `Account "${getAccountDisplayName(found.name, found.account)}" wirklich löschen?`;
   modal.dataset.accountId = accountId;
-  modal.style.display = 'flex';
+  modalController.open(modal, {
+    initialFocus: '#cancelDeleteBtn',
+    fallbackFocus: '#addAccountBtn',
+    onEscape: closeDeleteModal,
+    onBackdrop: closeDeleteModal
+  });
 }
 
 function closeDeleteModal() {
-  document.getElementById('deleteAccountModal').style.display = 'none';
+  modalController.close('deleteAccountModal', { fallbackFocus: '#addAccountBtn' });
 }
 
 async function deleteAccount(accountId) {
@@ -6175,12 +6287,12 @@ async function deleteAccount(accountId) {
   // saveConfig is async — close the modal immediately so the UI feels
   // responsive instead of waiting for the atomic write + safeStorage encrypt.
   // The in-memory config already reflects the delete; the IPC just persists it.
-  closeDeleteModal();
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   if (getAllAccountsFlat().length === 0) renderHealthCheckResults([]);
   renderAccounts();
   renderHosterSummary();
+  closeDeleteModal();
   // Fire-and-forget the persist. The earlier `await getConfig()` round-trip
   // was redundant (we already have the truth in memory) and was the main
   // source of perceived lag on add/delete.
@@ -6492,54 +6604,21 @@ function syncHistoryClearAction() {
   syncDataActionState();
 }
 
-let historyClearReturnFocus = null;
-let historyClearInertState = [];
-
-function setHistoryClearBackgroundInert(active) {
-  const modal = document.getElementById('historyClearModal');
-  if (!modal) return;
-  if (active) {
-    if (historyClearInertState.length > 0) return;
-    historyClearInertState = Array.from(document.body.children)
-      .filter(element => element !== modal)
-      .map(element => ({ element, inert: element.inert }));
-    historyClearInertState.forEach(({ element }) => { element.inert = true; });
-    return;
-  }
-  historyClearInertState.forEach(({ element, inert }) => {
-    if (element.isConnected) element.inert = inert;
-  });
-  historyClearInertState = [];
-}
-
-function getHistoryClearFocusable() {
-  const modal = document.getElementById('historyClearModal');
-  if (!modal) return [];
-  return Array.from(modal.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
-    .filter(element => !element.hidden && window.getComputedStyle(element).display !== 'none' && window.getComputedStyle(element).visibility !== 'hidden');
-}
-
 function closeHistoryClearModal() {
-  const modal = document.getElementById('historyClearModal');
-  if (!modal) return;
-  modal.style.display = 'none';
-  modal.setAttribute('aria-hidden', 'true');
-  setHistoryClearBackgroundInert(false);
-  const returnFocus = historyClearReturnFocus;
-  historyClearReturnFocus = null;
-  if (returnFocus?.isConnected && !returnFocus.disabled) returnFocus.focus();
-  else document.getElementById('clearHistoryBtn')?.focus();
+  modalController.close('historyClearModal', { fallbackFocus: '#clearHistoryBtn' });
 }
 
 function openHistoryClearModal() {
   const button = document.getElementById('clearHistoryBtn');
   const modal = document.getElementById('historyClearModal');
   if (!modal || !button || button.disabled) return;
-  historyClearReturnFocus = button;
-  modal.style.display = 'flex';
-  modal.setAttribute('aria-hidden', 'false');
-  setHistoryClearBackgroundInert(true);
-  document.getElementById('cancelHistoryClearBtn')?.focus();
+  modalController.open(modal, {
+    initialFocus: '#cancelHistoryClearBtn',
+    returnFocus: button,
+    fallbackFocus: '#clearHistoryBtn',
+    onEscape: closeHistoryClearModal,
+    onBackdrop: closeHistoryClearModal
+  });
 }
 
 async function confirmHistoryClear() {
@@ -6982,7 +7061,6 @@ function sortHistoryRows(rows) {
 }
 
 let closePreparationPromise = null;
-let closePreparationInertState = [];
 let closePreparationOverlayState = null;
 let closePreparationGeneration = 0;
 let activeClosePreparationAttempt = null;
@@ -7003,27 +7081,31 @@ function setClosePreparationUi(active) {
   if (active) {
     if (closePreparationOverlayState) return;
     closePreparationOverlayState = {
-      display: overlay.style.display,
+      wasOpen: modalController.isOpen(overlay),
       message: message.innerHTML,
       cancelDisplay: cancelButton.style.display
     };
-    closePreparationInertState = Array.from(document.body.children)
-      .filter(element => element !== overlay && 'inert' in element)
-      .map(element => ({ element, inert: element.inert }));
-    closePreparationInertState.forEach(({ element }) => { element.inert = true; });
     message.textContent = 'Einstellungen werden gespeichert…';
     cancelButton.style.display = 'none';
-    overlay.style.display = 'flex';
+    modalController.open(overlay, {
+      initialFocus: () => overlay.querySelector('[role="dialog"]'),
+      onEscape: () => {}
+    });
     return;
   }
-  closePreparationInertState.forEach(({ element, inert }) => {
-    if (element.isConnected) element.inert = inert;
-  });
-  closePreparationInertState = [];
-  overlay.style.display = closePreparationOverlayState ? closePreparationOverlayState.display : 'none';
-  message.innerHTML = closePreparationOverlayState ? closePreparationOverlayState.message : '';
-  cancelButton.style.display = closePreparationOverlayState ? closePreparationOverlayState.cancelDisplay : '';
+  const previousState = closePreparationOverlayState;
+  message.innerHTML = previousState ? previousState.message : '';
+  cancelButton.style.display = previousState ? previousState.cancelDisplay : '';
   closePreparationOverlayState = null;
+  if (previousState?.wasOpen) {
+    modalController.open(overlay, {
+      initialFocus: '#cancelShutdownBtn',
+      onEscape: cancelShutdownCountdown
+    });
+    requestAnimationFrame(() => cancelButton.focus());
+  } else {
+    modalController.close(overlay);
+  }
 }
 
 function isCurrentClosePreparation(generation, attempt) {
@@ -7212,41 +7294,12 @@ function setupListeners() {
   document.getElementById('confirmHistoryClearBtn').addEventListener('click', confirmHistoryClear);
   document.getElementById('cancelHistoryClearBtn').addEventListener('click', closeHistoryClearModal);
   document.getElementById('closeHistoryClearModalBtn').addEventListener('click', closeHistoryClearModal);
-  document.getElementById('historyClearModal').addEventListener('click', event => {
-    if (event.target.id === 'historyClearModal') closeHistoryClearModal();
-  });
-  document.addEventListener('keydown', event => {
-    const modal = document.getElementById('historyClearModal');
-    if (modal?.style.display !== 'flex') return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      closeHistoryClearModal();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const focusable = getHistoryClearFocusable();
-    if (!focusable.length) {
-      event.preventDefault();
-      modal.querySelector('[role="dialog"]')?.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }, true);
   document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
   document.getElementById('exportSessionReportBtn').addEventListener('click', async () => {
     const format = await showAppChoice({ title: 'Sitzungsbericht exportieren', message: 'Welches Format möchtest du speichern?', confirmText: 'CSV', alternateText: 'JSON' });
     if (format === false) return;
     const result = await window.api.exportSessionReport(format === 'alternate' ? 'json' : 'csv');
-    if (result?.ok) showCopyToast(`Sitzungsbericht mit ${result.totalRows} Uploads exportiert`);
+    if (result?.ok) showCopyToast(result.totalRows === 1 ? 'Sitzungsbericht mit 1 Upload exportiert' : `Sitzungsbericht mit ${result.totalRows} Uploads exportiert`);
     else if (!result?.canceled) await showAppAlert(result?.error || 'Sitzungsbericht konnte nicht exportiert werden.');
   });
   document.getElementById('queueSearchInput').addEventListener('input', applyQueueDetailFilters);
@@ -7376,13 +7429,7 @@ function setupListeners() {
   setupColumnResizing();
 
   // Shutdown cancel
-  document.getElementById('cancelShutdownBtn').addEventListener('click', async () => {
-    await window.api.cancelShutdown();
-    if (shutdownCountdownInterval) { clearInterval(shutdownCountdownInterval); shutdownCountdownInterval = null; }
-    const overlay = document.getElementById('shutdownOverlay');
-    overlay.style.display = 'none';
-    overlay.setAttribute('aria-hidden', 'true');
-  });
+  document.getElementById('cancelShutdownBtn').addEventListener('click', cancelShutdownCountdown);
 
   // Click on empty area in queue → deselect all
   document.getElementById('upload-view').addEventListener('click', (e) => {
@@ -7404,19 +7451,11 @@ function setupListeners() {
     showContextMenu(e.clientX, e.clientY);
   });
 
-  document.getElementById('hosterModal').addEventListener('click', (e) => {
-    if (e.target.id === 'hosterModal') cancelHosterModal();
-  });
-
   // Account management
   document.getElementById('addAccountBtn').addEventListener('click', () => openAccountModal(null));
   document.getElementById('closeAccountModalBtn').addEventListener('click', closeAccountModal);
   document.getElementById('cancelAccountModalBtn').addEventListener('click', closeAccountModal);
   document.getElementById('saveAccountBtn').addEventListener('click', saveAccount);
-  document.getElementById('accountModal').addEventListener('click', (e) => {
-    if (e.target.id === 'accountModal') closeAccountModal();
-  });
-
   // Account hoster select change → update credential fields
   document.getElementById('accountHosterSelect').addEventListener('change', (e) => {
     _invalidateAccountSubmit();
@@ -7436,26 +7475,14 @@ function setupListeners() {
     const accountId = modal.dataset.accountId;
     if (accountId) deleteAccount(accountId);
   });
-  document.getElementById('deleteAccountModal').addEventListener('click', (e) => {
-    if (e.target.id === 'deleteAccountModal') closeDeleteModal();
-  });
-
   // Job log modal
   document.getElementById('closeJobLogBtn')?.addEventListener('click', hideJobLogModal);
   document.getElementById('closeJobLogBtn2')?.addEventListener('click', hideJobLogModal);
   document.getElementById('copyJobLogBtn')?.addEventListener('click', copyJobLogToClipboard);
-  document.getElementById('jobLogModal')?.addEventListener('click', (e) => {
-    if (e.target.id === 'jobLogModal') hideJobLogModal();
-  });
-
   document.getElementById('headerUpdateBtn')?.addEventListener('click', requestUpdateCheck);
   document.getElementById('installUpdateBtn')?.addEventListener('click', installKnownUpdate);
   document.getElementById('dismissUpdateBtn')?.addEventListener('click', closeUpdateDialog);
   document.getElementById('updateCloseBtn')?.addEventListener('click', closeUpdateDialog);
-  document.getElementById('updateBanner')?.addEventListener('click', (event) => {
-    if (event.target.id === 'updateBanner') closeUpdateDialog();
-  });
-  document.addEventListener('keydown', _handleUpdateDialogKeydown, true);
   _syncHeaderUpdateState();
 }
 
@@ -7566,6 +7593,7 @@ function handleUpdateProgress(data) {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
     _setUpdateProgress(0, 'Update fehlgeschlagen');
+    _setUpdateProgressVisible(false);
     if (message) {
       message.hidden = false;
       message.textContent = formatLocalizedError('Update fehlgeschlagen', progress.error);
@@ -7579,98 +7607,21 @@ function handleUpdateProgress(data) {
 }
 
 function _isUpdateDialogVisible() {
-  const overlay = document.getElementById('updateBanner');
-  return Boolean(overlay && overlay.style.display !== 'none' && overlay.getAttribute('aria-hidden') !== 'true');
-}
-
-function _setUpdateBackgroundInert(active) {
-  const overlay = document.getElementById('updateBanner');
-  if (!overlay) return;
-  if (active) {
-    if (_updateDialogInertState.length > 0) return;
-    _updateDialogInertState = Array.from(document.body.children)
-      .filter(element => element !== overlay && 'inert' in element)
-      .map(element => ({ element, inert: element.inert }));
-    _updateDialogInertState.forEach(({ element }) => { element.inert = true; });
-    return;
-  }
-  _updateDialogInertState.forEach(({ element, inert }) => {
-    if (element.isConnected) element.inert = inert;
-  });
-  _updateDialogInertState = [];
-}
-
-function _getUpdateDialogFocusable() {
-  const dialog = document.querySelector('#updateBanner .update-dialog');
-  if (!dialog) return [];
-  return Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
-    .filter(element => !element.hidden && element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden');
-}
-
-function _focusUpdateDialog() {
-  const dialog = document.querySelector('#updateBanner .update-dialog');
-  if (!dialog) return;
-  const target = _getUpdateDialogFocusable()[0] || dialog;
-  target.focus();
-}
-
-function _handleUpdateDialogKeydown(event) {
-  if (!_isUpdateDialogVisible()) return;
-  const dialog = document.querySelector('#updateBanner .update-dialog');
-  if (!dialog) return;
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    if (!_updateInstallBusy) closeUpdateDialog();
-    return;
-  }
-  if (event.key !== 'Tab') {
-    if (!dialog.contains(event.target)) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      _focusUpdateDialog();
-    }
-    return;
-  }
-  const focusable = _getUpdateDialogFocusable();
-  if (focusable.length === 0) {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    dialog.focus();
-    return;
-  }
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const activeElement = document.activeElement;
-  if (!dialog.contains(activeElement) || (!event.shiftKey && activeElement === last) || (event.shiftKey && activeElement === first)) {
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    (event.shiftKey ? last : first).focus();
-  }
+  return modalController.isOpen('updateBanner');
 }
 
 function _setUpdateDialogVisible(visible) {
   const overlay = document.getElementById('updateBanner');
   if (!overlay) return;
   if (visible) {
-    const wasVisible = _isUpdateDialogVisible();
-    if (!wasVisible) {
-      _updateDialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      _setUpdateBackgroundInert(true);
-    }
-    overlay.style.display = 'flex';
-    overlay.setAttribute('aria-hidden', 'false');
-    requestAnimationFrame(() => {
-      const dialog = overlay.querySelector('.update-dialog');
-      if (_isUpdateDialogVisible() && dialog && !dialog.contains(document.activeElement)) _focusUpdateDialog();
+    modalController.open(overlay, {
+      initialFocus: '#updateCloseBtn',
+      fallbackFocus: '#headerUpdateBtn',
+      onEscape: closeUpdateDialog,
+      onBackdrop: closeUpdateDialog
     });
   } else {
-    overlay.style.display = 'none';
-    overlay.setAttribute('aria-hidden', 'true');
-    _setUpdateBackgroundInert(false);
-    const returnFocus = _updateDialogReturnFocus;
-    _updateDialogReturnFocus = null;
-    if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
+    modalController.close(overlay, { fallbackFocus: '#headerUpdateBtn' });
   }
 }
 
@@ -7691,6 +7642,7 @@ function _setUpdateDialogBusy(busy) {
 }
 
 function _setUpdateProgress(percent, text) {
+  _setUpdateProgressVisible(true);
   const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   const progressText = document.getElementById('updateProgressText');
   const progressBar = document.getElementById('updateProgressBar');
@@ -7701,6 +7653,13 @@ function _setUpdateProgress(percent, text) {
     if ('value' in progressBar) progressBar.value = value;
     progressBar.style.width = `${value}%`;
   }
+}
+
+function _setUpdateProgressVisible(visible) {
+  const progress = document.querySelector('#updateBanner .update-progress');
+  const text = document.getElementById('updateProgressText');
+  if (progress) progress.hidden = !visible;
+  if (text) text.hidden = !visible;
 }
 
 async function installKnownUpdate() {
@@ -7725,24 +7684,38 @@ async function installKnownUpdate() {
 
 // --- Shutdown ---
 let shutdownCountdownInterval = null;
+
+async function cancelShutdownCountdown() {
+  await window.api.cancelShutdown();
+  if (shutdownCountdownInterval) clearInterval(shutdownCountdownInterval);
+  shutdownCountdownInterval = null;
+  modalController.close('shutdownOverlay');
+}
+
 function handleShutdownCountdown(data) {
   const overlay = document.getElementById('shutdownOverlay');
   const msgEl = document.getElementById('shutdownMessage');
-  const secEl = document.getElementById('shutdownSeconds');
-  overlay.style.display = 'flex';
+  if (!overlay || !msgEl) return;
 
   const labels = { sleep: 'Ruhezustand', shutdown: 'Herunterfahren', restart: 'Neustart' };
   let remaining = data.seconds || 60;
-  secEl.textContent = remaining;
-  msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
-  overlay.setAttribute('aria-hidden', 'false');
+  const render = () => {
+    msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
+  };
+  render();
+  modalController.open(overlay, {
+    initialFocus: '#cancelShutdownBtn',
+    onEscape: cancelShutdownCountdown
+  });
 
   if (shutdownCountdownInterval) clearInterval(shutdownCountdownInterval);
   shutdownCountdownInterval = setInterval(() => {
     remaining--;
-    secEl.textContent = remaining;
-    msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
-    if (remaining <= 0) { clearInterval(shutdownCountdownInterval); }
+    render();
+    if (remaining <= 0) {
+      clearInterval(shutdownCountdownInterval);
+      shutdownCountdownInterval = null;
+    }
   }, 1000);
 }
 

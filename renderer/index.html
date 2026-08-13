@@ -148,7 +148,7 @@
       </div>
       <div class="update-dialog-copy">
         <h2 id="updateDialogTitle">Eine neue Version ist verfügbar</h2>
-        <p id="updateMessage"></p>
+        <p id="updateMessage" aria-live="polite"></p>
       </div>
       <div class="update-release-notes" id="updateReleaseNotes" hidden>
         <div class="update-release-notes-title">Changelog</div>
@@ -430,8 +430,8 @@
     </main>
   </div>
 
-  <div class="modal-overlay" id="accountModal" style="display:none">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-describedby="accountModalSubtitle">
+  <div class="modal-overlay" id="accountModal" style="display:none" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-describedby="accountModalSubtitle" tabindex="-1">
       <div class="modal-header">
         <div>
           <h3 id="accountModalTitle">Account hinzufügen</h3>
@@ -458,8 +458,8 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="jobLogModal" style="display:none">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="jobLogTitle" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
+  <div class="modal-overlay" id="jobLogModal" style="display:none" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="jobLogTitle" tabindex="-1" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
       <div class="modal-header">
         <div><h3 id="jobLogTitle">Upload-Log</h3></div>
         <button class="icon-btn" id="closeJobLogBtn" aria-label="Schließen">&times;</button>
@@ -474,8 +474,8 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="deleteAccountModal" style="display:none">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteAccountTitle" aria-describedby="deleteAccountMessage" style="width:min(400px,100%)">
+  <div class="modal-overlay" id="deleteAccountModal" style="display:none" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteAccountTitle" aria-describedby="deleteAccountMessage" tabindex="-1" style="width:min(400px,100%)">
       <div class="modal-header">
         <div><h3 id="deleteAccountTitle">Account löschen?</h3></div>
         <button class="icon-btn" id="closeDeleteModalBtn" aria-label="Schließen">&times;</button>
@@ -491,7 +491,7 @@
   </div>
 
   <div class="modal-overlay app-alert-modal" id="appAlertModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appAlertTitle" aria-describedby="appAlertMessage" style="width:min(420px,100%)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appAlertTitle" aria-describedby="appAlertMessage" tabindex="-1" style="width:min(420px,100%)">
       <div class="modal-header">
         <div><h3 id="appAlertTitle">Hinweis</h3></div>
         <button class="icon-btn" id="appAlertCloseBtn" aria-label="Schließen">&times;</button>
@@ -508,7 +508,7 @@
   </div>
 
   <div class="modal-overlay" id="historyClearModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="historyClearModalTitle" aria-describedby="historyClearModalMessage" style="width:min(440px,100%)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="historyClearModalTitle" aria-describedby="historyClearModalMessage" tabindex="-1" style="width:min(440px,100%)">
       <div class="modal-header">
         <div><h3 id="historyClearModalTitle">Verlauf löschen?</h3></div>
         <button class="icon-btn" id="closeHistoryClearModalBtn" aria-label="Schließen">&times;</button>
@@ -642,14 +642,14 @@
   </div>
 
   <div class="shutdown-overlay" id="shutdownOverlay" style="display:none" aria-hidden="true">
-    <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage">
+    <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage" tabindex="-1">
       <p id="shutdownMessage">System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...</p>
       <button class="btn btn-danger" id="cancelShutdownBtn">Abbrechen</button>
     </div>
   </div>
 
   <div class="modal-overlay" id="hosterModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hosterModalTitle" aria-describedby="hosterModalDescription">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hosterModalTitle" aria-describedby="hosterModalDescription" tabindex="-1">
       <div class="modal-header">
         <div>
           <h3 id="hosterModalTitle">Upload-Ziele auswählen</h3>

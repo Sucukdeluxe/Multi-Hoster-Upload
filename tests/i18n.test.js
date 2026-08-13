@@ -160,6 +160,31 @@ test('interpolated rare errors translate without leaking German copy', () => {
   }
 });
 
+test('resume, queue, job log, and session report feedback translate in both languages', () => {
+  const cases = [
+    ['1 unterbrochener Upload kann fortgesetzt werden.', '1 interrupted upload can be resumed.'],
+    ['3 unterbrochene Uploads können fortgesetzt werden.', '3 interrupted uploads can be resumed.'],
+    ['Wiederhergestellte Warteschlange startet in 5 s (3 Jobs).', 'Restored queue starts in 5 s (3 jobs).'],
+    ['2 hinzugefügt', '2 added'],
+    ['1 bereits im Batch', '1 already in the batch'],
+    ['3 ohne gültigen Account', '3 without a valid account'],
+    ['Keine Jobs hinzugefügt', 'No jobs added'],
+    ['Keine startbaren Jobs ausgewählt (alle laufen schon oder sind fertig).', 'No startable jobs selected because all are already running or completed.'],
+    ['Hoster', 'Host'],
+    ['Versuch', 'Attempt'],
+    ['Diagnose', 'Diagnostics'],
+    ['Sitzungsbericht mit 1 Upload exportiert', 'Session report with 1 upload exported'],
+    ['Sitzungsbericht mit 4 Uploads exportiert', 'Session report with 4 uploads exported'],
+    ['Sitzungsbericht konnte nicht exportiert werden.', 'The session report could not be exported.'],
+    ['Warteschlange konnte vor dem Upload-Start nicht gespeichert werden', 'The queue could not be saved before starting the upload']
+  ];
+
+  for (const [german, english] of cases) {
+    assert.equal(translateText(german, 'en'), english, german);
+    assert.equal(translateText(english, 'de'), german, english);
+  }
+});
+
 test('main-process user-facing copy contains no mojibake', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
   assert.doesNotMatch(source, /Ã|Â|â€/u);

@@ -1350,6 +1350,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\\'automatik\\\']")?.click()');
     const automationInputAlignment = await wc.executeJavaScript('(() => { const first = document.getElementById("autoRetryRoundsInput")?.getBoundingClientRect(); const second = document.getElementById("autoRetryDelayMinInput")?.getBoundingClientRect(); const firstHintEl = document.getElementById("autoRetryRoundsInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const secondHintEl = document.getElementById("autoRetryDelayMinInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const firstHint = firstHintEl?.getBoundingClientRect(); const secondHint = secondHintEl?.getBoundingClientRect(); if (!first || !second || !firstHint || !secondHint || !firstHintEl || !secondHintEl) return "missing"; const firstTextLeft = firstHint.left + parseFloat(getComputedStyle(firstHintEl).paddingLeft); const secondTextLeft = secondHint.left + parseFloat(getComputedStyle(secondHintEl).paddingLeft); return [Math.round(Math.abs(first.left - second.left)), Math.round(first.width), Math.round(second.width), firstHint.top >= first.bottom + 6, secondHint.top >= second.bottom + 6, Math.round(Math.abs(firstTextLeft - first.left)) <= 1, Math.round(Math.abs(secondTextLeft - second.left)) <= 1].join("|"); })()');
     check('Automation retry hints start directly below their aligned inputs', automationInputAlignment === '0|100|100|true|true|true|true');
+    await captureVisual('03-automation.png');
     await wc.executeJavaScript('document.querySelector("[data-settings-page=allgemein]")?.click()');
     const updateActionAlignment = await wc.executeJavaScript('(() => { const row = document.querySelector(".program-update-row")?.getBoundingClientRect(); const button = document.getElementById("manualUpdateCheckBtn")?.getBoundingClientRect(); return row && button ? [Math.abs(row.right - button.right) <= 16, button.bottom <= row.bottom, button.left > row.left + row.width / 2].join("|") : "missing"; })()');
     check('Program update action sits at the lower right of its card', updateActionAlignment === 'true|true|true');
@@ -1843,6 +1844,91 @@ setTimeout(async () => {
     restoreInitialIpcHandler('save-pending-queue');
     await wc.executeJavaScript('flushConfigWrites()');
     check('A failed cleanup revocation save stays mandatory for the next start attempt', sourceCleanupRevocationRetry.firstFailed === true && sourceCleanupRevocationRetry.secondSucceeded === true && sourceCleanupRevocationRetry.secondRevocations.length === 0 && sourceCleanupRevocationCallsBeforeRecovery >= 2);
+    const initialStartUploadHandler = initialIpcHandlers.get('start-upload');
+    const initialStartQueueHandler = initialIpcHandlers.get('save-pending-queue');
+    const runFreshStartPersistenceBarrier = async mode => {
+      await wc.executeJavaScript('queuePersistThrottle.cancel(); flushConfigWrites()');
+      const order = [];
+      const snapshots = [];
+      const payloads = [];
+      ipcMain.removeHandler('save-pending-queue');
+      ipcMain.handle('save-pending-queue', (_event, pendingQueue) => {
+        order.push('save');
+        snapshots.push(structuredClone(pendingQueue));
+        return true;
+      });
+      ipcMain.removeHandler('start-upload');
+      ipcMain.handle('start-upload', (_event, payload) => {
+        order.push('start');
+        payloads.push(structuredClone(payload));
+        return { skippedJobs: [], sourceCleanupFingerprints: {} };
+      });
+      const invocation = mode === 'all' ? 'startUpload()' : 'startSelectedUpload([queueJobs[0]])';
+      const outcome = await wc.executeJavaScript('(async () => { queuePersistThrottle.cancel(); uploading = false; selectedUploadHosters = ["voe.sx"]; selectedFiles = []; config.globalSettings = { ...(config.globalSettings || {}), deleteSourceAfterSuccessfulUpload: false }; queueJobs = [{ id: "ui-fresh-' + mode + '-start", file: "C:/ui/fresh-' + mode + '-start.bin", fileName: "fresh-' + mode + '-start.bin", hoster: "voe.sx", status: "preview", bytesTotal: 42 }]; rebuildJobIndex(); const startedAt = performance.now(); await ' + invocation + '; return { elapsed: performance.now() - startedAt, uploading }; })()');
+      await wc.executeJavaScript('queuePersistThrottle.cancel(); uploading = false; selectedFiles = []; queueJobs = []; rebuildJobIndex(); updateQueueActionButtons(); updateStatusBar()');
+      ipcMain.removeHandler('save-pending-queue');
+      if (initialStartQueueHandler) registerIpcHandler('save-pending-queue', initialStartQueueHandler);
+      ipcMain.removeHandler('start-upload');
+      if (initialStartUploadHandler) registerIpcHandler('start-upload', initialStartUploadHandler);
+      return { order, snapshots, payloads, outcome };
+    };
+    const freshAllStartBarrier = await runFreshStartPersistenceBarrier('all');
+    const freshSelectedStartBarrier = await runFreshStartPersistenceBarrier('selected');
+    const hasCompleteStartDescriptor = (run, id) => {
+      const jobs = run.snapshots[0]?.queueJobs || [];
+      const job = jobs.find(candidate => candidate.id === id);
+      return Boolean(job && job.file === 'C:/ui/' + id.replace(/^ui-/, '') + '.bin' && job.fileName === id.replace(/^ui-/, '') + '.bin' && job.hoster === 'voe.sx');
+    };
+    check('Every fresh upload start durably saves complete job descriptors before invoking main', freshAllStartBarrier.order.join('|') === 'save|start' && freshSelectedStartBarrier.order.join('|') === 'save|start' && hasCompleteStartDescriptor(freshAllStartBarrier, 'ui-fresh-all-start') && hasCompleteStartDescriptor(freshSelectedStartBarrier, 'ui-fresh-selected-start'));
+    check('Fresh upload starts remain inside the previous 500 ms persistence window', freshAllStartBarrier.outcome.elapsed < 500 && freshSelectedStartBarrier.outcome.elapsed < 500 && freshAllStartBarrier.payloads.length === 1 && freshSelectedStartBarrier.payloads.length === 1);
+
+    await wc.executeJavaScript('flushConfigWrites()');
+    let failedFreshStartCalls = 0;
+    let failedFreshSaveCalls = 0;
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', () => {
+      failedFreshSaveCalls++;
+      throw new Error('injected fresh start persistence failure');
+    });
+    ipcMain.removeHandler('start-upload');
+    ipcMain.handle('start-upload', () => {
+      failedFreshStartCalls++;
+      return { skippedJobs: [], sourceCleanupFingerprints: {} };
+    });
+    await wc.executeJavaScript('(() => { queuePersistThrottle.cancel(); uploading = false; selectedUploadHosters = ["voe.sx"]; selectedFiles = []; config.globalSettings = { ...(config.globalSettings || {}), deleteSourceAfterSuccessfulUpload: false }; queueJobs = [{ id: "ui-fresh-start-rejected", file: "C:/ui/fresh-start-rejected.bin", fileName: "fresh-start-rejected.bin", hoster: "voe.sx", status: "preview", bytesTotal: 42 }]; rebuildJobIndex(); window.__uiFreshStartFailure = startUpload(); })()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal")?.style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click(); window.__uiFreshStartFailure.then(() => { delete window.__uiFreshStartFailure; })');
+    check('A rejected fresh queue save prevents main from starting any upload', failedFreshSaveCalls > 0 && failedFreshStartCalls === 0);
+    ipcMain.removeHandler('save-pending-queue');
+    if (initialStartQueueHandler) registerIpcHandler('save-pending-queue', initialStartQueueHandler);
+    ipcMain.removeHandler('start-upload');
+    if (initialStartUploadHandler) registerIpcHandler('start-upload', initialStartUploadHandler);
+    await wc.executeJavaScript('queuePersistThrottle.cancel(); uploading = false; selectedFiles = []; queueJobs = []; rebuildJobIndex(); flushConfigWrites()');
+
+    const activeDescriptorOrder = [];
+    const activeDescriptorSnapshots = [];
+    let activeDescriptorAddCalls = 0;
+    ipcMain.removeHandler('save-pending-queue');
+    ipcMain.handle('save-pending-queue', (_event, pendingQueue) => {
+      activeDescriptorOrder.push('save');
+      activeDescriptorSnapshots.push(structuredClone(pendingQueue));
+      return true;
+    });
+    ipcMain.removeHandler('add-jobs-to-batch');
+    ipcMain.handle('add-jobs-to-batch', () => {
+      activeDescriptorOrder.push('add');
+      activeDescriptorAddCalls++;
+      return { added: 1, skippedJobs: [], sourceCleanupFingerprints: {} };
+    });
+    const activeDescriptorStart = await wc.executeJavaScript('(async () => { queuePersistThrottle.cancel(); setUiLanguage("en"); uploading = true; selectedFiles = []; config.globalSettings = { ...(config.globalSettings || {}), deleteSourceAfterSuccessfulUpload: false }; queueJobs = [{ id: "ui-active-descriptor", file: "C:/ui/active-descriptor.bin", fileName: "active-descriptor.bin", hoster: "byse.sx", status: "preview", bytesTotal: 77 }]; rebuildJobIndex(); const startedAt = performance.now(); await startSelectedUpload([queueJobs[0]]); return { elapsed: performance.now() - startedAt, toast: document.getElementById("copyToast")?.textContent }; })()');
+    const activePersistedDescriptor = activeDescriptorSnapshots[0]?.queueJobs?.find(job => job.id === 'ui-active-descriptor');
+    check('Active-batch additions save the complete new descriptor before main receives it', activeDescriptorOrder.join('|') === 'save|add' && activeDescriptorAddCalls === 1 && activeDescriptorStart.elapsed < 500 && activePersistedDescriptor?.file === 'C:/ui/active-descriptor.bin' && activePersistedDescriptor?.fileName === 'active-descriptor.bin' && activePersistedDescriptor?.hoster === 'byse.sx');
+    check('Active-batch addition feedback is localized dynamically', activeDescriptorStart.toast === 'Jobs: 1 added');
+    restoreInitialIpcHandler('save-pending-queue');
+    restoreInitialIpcHandler('add-jobs-to-batch');
+    await wc.executeJavaScript('queuePersistThrottle.cancel(); uploading = false; selectedFiles = []; queueJobs = []; rebuildJobIndex(); flushConfigWrites()');
+    const localizedResumeAndInvalidSelection = await wc.executeJavaScript('(async () => { setUiLanguage("en"); uploading = true; queueJobs = [{ id: "ui-invalid-selection", file: "C:/ui/invalid-selection.bin", fileName: "invalid-selection.bin", hoster: "voe.sx", status: "done", bytesTotal: 1 }]; rebuildJobIndex(); selectedJobIds.clear(); selectedJobIds.add("ui-invalid-selection"); await startSelectedUpload(); const invalid = document.getElementById("copyToast")?.textContent; showCopyToast("3 unterbrochene Uploads können fortgesetzt werden."); const resume = document.getElementById("copyToast")?.textContent; setUiLanguage("de"); uploading = false; queueJobs = []; selectedJobIds.clear(); rebuildJobIndex(); return { invalid, resume }; })()');
+    check('Resume and invalid queue selection feedback render in the active language', localizedResumeAndInvalidSelection.invalid === 'No startable jobs selected because all are already running or completed.' && localizedResumeAndInvalidSelection.resume === '3 interrupted uploads can be resumed.');
     const activeBatchSeed = async (file, token, mode) => {
       const seed = JSON.stringify({ file, token, mode });
       const result = await wc.executeJavaScript('(() => { try { const seed = ' + seed + '; queuePersistThrottle.cancel(); selectedFiles = []; _pendingFiles = []; selectedUploadHosters = ["voe.sx"]; uploading = true; config.globalSettings = { ...(config.globalSettings || {}), deleteSourceAfterSuccessfulUpload: true, folderMonitor: { ...(config.globalSettings?.folderMonitor || {}), hosters: ["voe.sx"], autoStart: false } }; queueJobs = [{ id: "ui-active-existing-" + seed.mode, file: seed.file, fileName: "active-existing.bin", hoster: "byse.sx", status: "error", bytesTotal: 10, sourceCleanupMetadataVersion: 2, sourceCleanupToken: seed.token, sourceCleanupRequiredHosters: ["voe.sx", "byse.sx"], sourceCleanupConfirmedHosters: ["voe.sx"] }]; rebuildJobIndex(); if (seed.mode === "selection") { const list = document.getElementById("hosterModalList"); const input = document.createElement("input"); input.type = "checkbox"; input.dataset.hosterModal = "voe.sx"; input.checked = true; list.replaceChildren(input); _pendingFiles = [{ path: seed.file, name: "active-selection.bin", size: 10 }]; } return { ok: true }; } catch (error) { return { ok: false, error: String(error && (error.stack || error.message) || error) }; } })()');
@@ -1947,6 +2033,42 @@ setTimeout(async () => {
     check('History failure keeps terminal queue results and links restart-recoverable', terminalRecoveryState.normal === null && terminalRecoveryState.recovery !== null && terminalRecoveryState.recovery.selectedFiles.length === 2 && terminalRecoveryJobs.length === 2 && terminalRecoveryJobs[0].id === 'ui-terminal-done' && terminalRecoveryJobs[0].status === 'done' && terminalRecoveryJobs[0].result?.download_url === 'https://example.invalid/terminal-done' && terminalRecoveryJobs[0].result?.embed_url === 'https://example.invalid/embed-terminal-done' && terminalRecoveryJobs[0].result?.file_code === 'terminal-code' && terminalRecoveryJobs[1].status === 'skipped' && terminalRecoveryJobs[1].error === 'Size limit');
     const finalSummaryCorrelation = await wc.executeJavaScript('(() => { queueJobs = [{ id: "summary-exact-a", file: "C:/ui/shared-a.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 10 }, { id: "summary-exact-b", file: "C:/ui/shared-b.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 11 }, { id: "summary-ambiguous", file: "C:/ui/shared-c.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 12 }, { id: "summary-legacy-unique", file: "C:/ui/unique.bin", fileName: "unique.bin", hoster: "byse.sx", status: "preview", bytesTotal: 13 }]; rebuildJobIndex(); applySummaryResults({ files: [{ name: "shared.bin", size: 10, results: [{ jobId: "summary-exact-a", hoster: "voe.sx", status: "done", download_url: "https://example.invalid/exact-a" }, { jobId: "missing-summary-id", hoster: "voe.sx", status: "error", error: "Must not use legacy fallback" }, { hoster: "voe.sx", status: "error", error: "Ambiguous legacy result" }] }, { name: "different-name.bin", size: 11, results: [{ jobId: "summary-exact-b", hoster: "different.invalid", status: "done", download_url: "https://example.invalid/exact-b" }] }, { name: "unique.bin", size: 13, results: [{ hoster: "byse.sx", status: "done", download_url: "https://example.invalid/legacy-unique" }] }] }); const result = queueJobs.map(job => ({ id: job.id, status: job.status, error: job.error || null, link: job.result?.download_url || null })); queueJobs = []; selectedFiles = []; rebuildJobIndex(); renderQueueTable(); return result; })()');
     check('Final summary correlates by exact jobId and uses legacy identity only for one unique candidate', finalSummaryCorrelation[0].status === 'done' && finalSummaryCorrelation[0].link === 'https://example.invalid/exact-a' && finalSummaryCorrelation[1].status === 'done' && finalSummaryCorrelation[1].link === 'https://example.invalid/exact-b' && finalSummaryCorrelation[2].status === 'preview' && finalSummaryCorrelation[2].error === null && finalSummaryCorrelation[3].status === 'done' && finalSummaryCorrelation[3].link === 'https://example.invalid/legacy-unique');
+    const completionIdentityRaces = await wc.executeJavaScript(\`(() => {
+      const run = (jobs, event, deletedJobId = '') => {
+        queueJobs = jobs;
+        rebuildJobIndex();
+        _deletedJobIds.clear();
+        if (deletedJobId) _deletedJobIds.add(deletedJobId);
+        _handleProgressImpl(event);
+        return queueJobs.map(job => ({ id: job.id, status: job.status, link: job.result?.download_url || null }));
+      };
+      const exact = run([
+        { id: 'completion-exact-a', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 },
+        { id: 'completion-exact-b', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
+      ], { jobId: 'completion-exact-b', fileName: 'same.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/exact-b' } });
+      const missingExact = run([
+        { id: 'completion-live', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
+      ], { jobId: 'completion-missing', fileName: 'same.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/missing' } });
+      const deletedExact = run([
+        { id: 'completion-survivor', fileName: 'same.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
+      ], { jobId: 'completion-deleted', fileName: 'same.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/deleted' } }, 'completion-deleted');
+      const ambiguousLegacy = run([
+        { id: 'completion-legacy-a', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'queued', bytesTotal: 10 },
+        { id: 'completion-legacy-b', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'preview', bytesTotal: 10 }
+      ], { fileName: 'legacy.bin', hoster: 'byse.sx', status: 'done', result: { download_url: 'https://example.invalid/ambiguous' } });
+      const uniqueLegacy = run([
+        { id: 'completion-legacy-unique', fileName: 'unique.bin', hoster: 'byse.sx', status: 'queued', bytesTotal: 10 }
+      ], { fileName: 'unique.bin', hoster: 'byse.sx', status: 'done', result: { download_url: 'https://example.invalid/unique' } });
+      queuePersistThrottle.cancel();
+      queueJobs = [];
+      selectedFiles = [];
+      _deletedJobIds.clear();
+      rebuildJobIndex();
+      return { exact, missingExact, deletedExact, ambiguousLegacy, uniqueLegacy };
+    })()\`);
+    check('Completion events with jobId update only their exact live job', completionIdentityRaces.exact[0].status === 'queued' && completionIdentityRaces.exact[1].status === 'done' && completionIdentityRaces.exact[1].link === 'https://example.invalid/exact-b');
+    check('Missing or deleted exact completion IDs never fall back to another job', completionIdentityRaces.missingExact.length === 1 && completionIdentityRaces.missingExact[0].status === 'queued' && completionIdentityRaces.deletedExact.length === 1 && completionIdentityRaces.deletedExact[0].status === 'queued');
+    check('Legacy completion identity applies only to one unambiguous candidate', completionIdentityRaces.ambiguousLegacy.every(job => job.status !== 'done') && completionIdentityRaces.uniqueLegacy.length === 1 && completionIdentityRaces.uniqueLegacy[0].status === 'done' && completionIdentityRaces.uniqueLegacy[0].link === 'https://example.invalid/unique');
     restoreInitialIpcHandler('complete-upload-finalization');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
 
@@ -2106,6 +2228,25 @@ setTimeout(async () => {
     restoreInitialIpcHandler('save-text-file');
     check('Dynamic export errors never mix German and English interface text', englishExportError === 'Export failed: Unknown error' && germanExportError === 'Export fehlgeschlagen: Unbekannter Fehler');
 
+    const initialSessionReportHandler = initialIpcHandlers.get('export-session-report');
+    let sessionReportResult = { ok: true, totalRows: 2 };
+    ipcMain.removeHandler('export-session-report');
+    ipcMain.handle('export-session-report', () => sessionReportResult);
+    await wc.executeJavaScript('setUiLanguage("en"); document.getElementById("exportSessionReportBtn")?.click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal")?.style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click()');
+    const sessionReportSuccess = await waitUntil(() => wc.executeJavaScript('document.getElementById("copyToast")?.textContent === "Session report with 2 uploads exported" ? document.getElementById("copyToast").textContent : null'));
+    sessionReportResult = { ok: false };
+    await wc.executeJavaScript('document.getElementById("exportSessionReportBtn")?.click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal")?.style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal")?.style.display === "flex"'));
+    const sessionReportFailure = await wc.executeJavaScript('document.getElementById("appAlertMessage")?.textContent');
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click(); setUiLanguage("de")');
+    ipcMain.removeHandler('export-session-report');
+    if (initialSessionReportHandler) registerIpcHandler('export-session-report', initialSessionReportHandler);
+    check('Session report success and failure feedback follows the active language', sessionReportSuccess === 'Session report with 2 uploads exported' && sessionReportFailure === 'The session report could not be exported.');
+
     const historySidebarInformation = await wc.executeJavaScript('(() => { const sidebar = document.querySelector("#history-view > .view-sidebar")?.getBoundingClientRect(); const section = document.querySelector("#history-view .view-sidebar-section")?.getBoundingClientRect(); const retention = document.getElementById("historySidebarRetention")?.textContent?.trim(); return Boolean(sidebar && section && section.top >= sidebar.top + sidebar.height * 0.55 && retention === "Alles behalten"); })()');
     check('History sidebar shows the active retention in its lower area', historySidebarInformation === true);
 
@@ -2258,7 +2399,8 @@ setTimeout(async () => {
       const titles = [...document.querySelectorAll('#queueBody .col-status')].map(cell => cell.title);
       const result = { values, titles, toast: document.getElementById('copyToast').textContent.trim(), shutdown: document.getElementById('shutdownMessage').textContent.trim() };
       clearInterval(shutdownCountdownInterval);
-      document.getElementById('shutdownOverlay').style.display = 'none';
+      shutdownCountdownInterval = null;
+      modalController.close('shutdownOverlay', { restoreFocus: false });
       document.getElementById('copyToast').classList.remove('show');
       return result;
     })()\`);
@@ -2425,13 +2567,107 @@ setTimeout(async () => {
     check('Styled app dialog focuses the safe action and makes background inert', dialogContract === 'flex|true|appAlertCancelBtn|true');
     await wc.executeJavaScript('document.getElementById("appAlertCancelBtn")?.click()');
 
+    const initialJobLogHandler = initialIpcHandlers.get('get-job-log');
+    const jobLogRequests = [];
+    ipcMain.removeHandler('get-job-log');
+    ipcMain.handle('get-job-log', (_event, jobId) => new Promise(resolve => jobLogRequests.push({ jobId, resolve })));
+    await wc.executeJavaScript(\`(() => {
+      setUiLanguage('en');
+      queueJobs = [
+        { id: 'ui-job-log-a', file: 'C:/ui/job-log-a.bin', fileName: 'job-log-a.bin', hoster: 'voe.sx', status: 'error', error: 'stale-job-error', failureDetails: { status: 500 }, attempt: 1, maxAttempts: 3 },
+        { id: 'ui-job-log-b', file: 'C:/ui/job-log-b.bin', fileName: 'job-log-b.bin', hoster: 'byse.sx', status: 'error', error: 'current-job-error', failureDetails: { status: 503 }, attempt: 2, maxAttempts: 3 }
+      ];
+      rebuildJobIndex();
+      selectedJobIds.clear();
+      selectedJobIds.add('ui-job-log-a');
+      document.getElementById('addFilesBtn')?.focus();
+      void showJobLogModal();
+    })()\`);
+    await waitUntil(() => jobLogRequests.length === 1);
+    await wc.executeJavaScript('selectedJobIds.clear(); selectedJobIds.add("ui-job-log-b"); void showJobLogModal()');
+    await waitUntil(() => jobLogRequests.length === 2);
+    jobLogRequests[0].resolve([{ ts: Date.now(), kind: 'progress', status: 'error', error: 'stale-only' }]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const staleJobLogResponse = await wc.executeJavaScript('({ title: document.getElementById("jobLogTitle")?.textContent, body: document.getElementById("jobLogBody")?.textContent })');
+    jobLogRequests[1].resolve([{ ts: Date.now(), kind: 'progress', status: 'error', error: 'current-only' }]);
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("jobLogBody")?.textContent.includes("current-only")'));
+    const currentJobLogResponse = await wc.executeJavaScript('({ title: document.getElementById("jobLogTitle")?.textContent, body: document.getElementById("jobLogBody")?.textContent, focusInside: document.getElementById("jobLogModal")?.contains(document.activeElement), ariaHidden: document.getElementById("jobLogModal")?.getAttribute("aria-hidden") })');
+    check('Late job-log responses cannot overwrite the newer selected job', staleJobLogResponse.title === 'Log · job-log-b.bin' && !staleJobLogResponse.body.includes('stale-only') && currentJobLogResponse.title === 'Log · job-log-b.bin' && currentJobLogResponse.body.includes('current-only'));
+    check('English multiline job logs localize every user-facing label', currentJobLogResponse.body.includes('Host: byse.sx') && currentJobLogResponse.body.includes('Account:') && currentJobLogResponse.body.includes('Attempt: 2 / 3') && currentJobLogResponse.body.includes('Failed: current-job-error') && currentJobLogResponse.body.includes('Diagnostics:\\nstatus: 503'));
+    check('Job-log dialog opens accessibly with focus inside', currentJobLogResponse.focusInside === true && currentJobLogResponse.ariaHidden === 'false');
+    await wc.executeJavaScript('selectedJobIds.clear(); selectedJobIds.add("ui-job-log-a"); void showJobLogModal()');
+    await waitUntil(() => jobLogRequests.length === 3);
+    const jobLogBodyBeforeClose = await wc.executeJavaScript('document.getElementById("jobLogBody")?.textContent');
+    await wc.executeJavaScript('hideJobLogModal()');
+    jobLogRequests[2].resolve([{ ts: Date.now(), kind: 'progress', status: 'done', error: 'closed-only' }]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const closedJobLogResponse = await wc.executeJavaScript('({ display: document.getElementById("jobLogModal")?.style.display, ariaHidden: document.getElementById("jobLogModal")?.getAttribute("aria-hidden"), body: document.getElementById("jobLogBody")?.textContent, restoredFocus: document.activeElement?.id })');
+    check('Closing the job log invalidates pending responses and restores focus', closedJobLogResponse.display === 'none' && closedJobLogResponse.ariaHidden === 'true' && closedJobLogResponse.body === jobLogBodyBeforeClose && closedJobLogResponse.restoredFocus === 'addFilesBtn');
+    ipcMain.removeHandler('get-job-log');
+    if (initialJobLogHandler) registerIpcHandler('get-job-log', initialJobLogHandler);
+
+    const sharedModalLifecycle = await wc.executeJavaScript(\`(async () => {
+      const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const opener = document.getElementById('addFilesBtn');
+      const focusable = overlay => [...overlay.querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')].filter(element => !element.hidden && getComputedStyle(element).display !== 'none' && getComputedStyle(element).visibility !== 'hidden');
+      setUiLanguage('de');
+      opener.focus();
+      openHosterModal();
+      await settle();
+      const hoster = document.getElementById('hosterModal');
+      const hosterFocusable = focusable(hoster);
+      const hosterOpened = { ariaHidden: hoster.getAttribute('aria-hidden'), focusInside: hoster.contains(document.activeElement), backgroundInert: document.querySelector('.app-header')?.inert === true && document.querySelector('.view.active')?.inert === true };
+      hosterFocusable.at(-1)?.focus();
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      const hosterTrap = document.activeElement === hosterFocusable[0];
+      void showAppAlert('Obere Ebene');
+      await settle();
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const topmost = document.getElementById('appAlertModal').style.display === 'none' && hoster.style.display === 'flex';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await settle();
+      const hosterClosed = hoster.style.display === 'none' && hoster.getAttribute('aria-hidden') === 'true' && document.activeElement === opener;
+
+      const previousAccounts = config.hosters['byse.sx'];
+      config.hosters['byse.sx'] = [{ id: 'ui-modal-delete-account', enabled: true, authType: 'api', apiKey: 'ui-modal-key' }];
+      opener.focus();
+      openDeleteAccountModal('ui-modal-delete-account');
+      await settle();
+      const deleteModal = document.getElementById('deleteAccountModal');
+      const deleteOpened = { ariaHidden: deleteModal.getAttribute('aria-hidden'), focus: document.activeElement?.id, backgroundInert: document.querySelector('.app-header')?.inert === true };
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await settle();
+      const deleteClosed = deleteModal.style.display === 'none' && deleteModal.getAttribute('aria-hidden') === 'true' && document.activeElement === opener;
+      if (deleteModal.style.display !== 'none') closeDeleteModal();
+      config.hosters['byse.sx'] = previousAccounts;
+
+      opener.focus();
+      document.getElementById('shutdownMessage').innerHTML = 'System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...';
+      handleShutdownCountdown({ mode: 'shutdown', seconds: 30 });
+      await settle();
+      const shutdown = document.getElementById('shutdownOverlay');
+      const shutdownOpened = { ariaHidden: shutdown.getAttribute('aria-hidden'), focus: document.activeElement?.id, backgroundInert: document.querySelector('.app-header')?.inert === true };
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const shutdownClosed = shutdown.style.display === 'none' && shutdown.getAttribute('aria-hidden') === 'true' && document.activeElement === opener;
+      if (shutdown.style.display !== 'none') document.getElementById('cancelShutdownBtn')?.click();
+
+      queueJobs = [];
+      selectedFiles = [];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      return { hosterOpened, hosterTrap, topmost, hosterClosed, deleteOpened, deleteClosed, shutdownOpened, shutdownClosed };
+    })()\`);
+    check('Shared modal behavior isolates and traps the hoster dialog with topmost Escape semantics', sharedModalLifecycle.hosterOpened.ariaHidden === 'false' && sharedModalLifecycle.hosterOpened.focusInside === true && sharedModalLifecycle.hosterOpened.backgroundInert === true && sharedModalLifecycle.hosterTrap === true && sharedModalLifecycle.topmost === true && sharedModalLifecycle.hosterClosed === true);
+    check('Delete-account modal uses safe focus, background isolation, Escape, and focus restoration', sharedModalLifecycle.deleteOpened.ariaHidden === 'false' && sharedModalLifecycle.deleteOpened.focus === 'cancelDeleteBtn' && sharedModalLifecycle.deleteOpened.backgroundInert === true && sharedModalLifecycle.deleteClosed === true);
+    check('Shutdown modal uses safe focus, background isolation, Escape, and focus restoration', sharedModalLifecycle.shutdownOpened.ariaHidden === 'false' && sharedModalLifecycle.shutdownOpened.focus === 'cancelShutdownBtn' && sharedModalLifecycle.shutdownOpened.backgroundInert === true && sharedModalLifecycle.shutdownClosed === true);
+
     const modalSemantics = await wc.executeJavaScript(\`(() => [
-      document.querySelector('#hosterModal .modal-card')?.getAttribute('role'),
-      document.querySelector('#jobLogModal .modal-card')?.getAttribute('role'),
-      document.querySelector('#deleteAccountModal .modal-card')?.getAttribute('role'),
-      document.querySelector('#shutdownOverlay .shutdown-box')?.getAttribute('role')
+      [...document.querySelectorAll('[role="dialog"]')].length,
+      [...document.querySelectorAll('[role="dialog"]')].every(dialog => dialog.getAttribute('aria-modal') === 'true' && dialog.tabIndex === -1),
+      [...document.querySelectorAll('[role="dialog"]')].every(dialog => dialog.parentElement?.getAttribute('aria-hidden') === 'true')
     ].join('|'))()\`);
-    check('Hoster, job log, delete-account, and shutdown surfaces expose dialog semantics', modalSemantics === 'dialog|dialog|dialog|dialog');
+    check('Every renderer dialog has complete hidden modal semantics', modalSemantics === '8|true|true');
 
     const rapidViewStability = await wc.executeJavaScript(\`(async () => {
       const sequence = ['upload', 'accounts', 'settings', 'history', 'settings', 'accounts', 'upload', 'history', 'upload', 'accounts', 'history', 'settings'];
@@ -2524,6 +2760,32 @@ setTimeout(async () => {
     })()\`);
     const invalidRollingFrames = rollingMetricStability.frames.filter(frame => !frame.text || !frame.label || frame.childCount < 1 || frame.childCount > 2 || Math.abs(frame.width - rollingMetricStability.initialRect.width) > 0.5 || Math.abs(frame.height - rollingMetricStability.initialRect.height) > 0.5);
     check('Rapid telemetry updates never expose an empty value or shift the metric layout', rollingMetricStability.frames.length === 21 && invalidRollingFrames.length === 0 && rollingMetricStability.settled.text === '1.020' && rollingMetricStability.settled.label === '1.020' && rollingMetricStability.settled.direction === 'none');
+
+    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const reducedMotionTelemetry = await wc.executeJavaScript(\`(() => {
+      const metric = document.getElementById('uploadTelemetryCompleted');
+      const originalAnimate = Element.prototype.animate;
+      let animationCalls = 0;
+      Element.prototype.animate = function (...args) {
+        animationCalls++;
+        return originalAnimate.apply(this, args);
+      };
+      metric.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
+      metric.dataset.numericValue = '40';
+      metric.setAttribute('aria-label', '40');
+      metric.replaceChildren(Object.assign(document.createElement('span'), { textContent: '40' }));
+      _setRollingUploadMetric('uploadTelemetryCompleted', 41);
+      Element.prototype.animate = originalAnimate;
+      return {
+        animationCalls,
+        text: metric.textContent.trim(),
+        label: metric.getAttribute('aria-label'),
+        direction: metric.dataset.direction,
+        animations: metric.getAnimations({ subtree: true }).length
+      };
+    })()\`);
+    check('Reduced motion renders telemetry numbers without Web Animations rolling', reducedMotionTelemetry.animationCalls === 0 && reducedMotionTelemetry.text === '41' && reducedMotionTelemetry.label === '41' && reducedMotionTelemetry.direction === 'none' && reducedMotionTelemetry.animations === 0);
+    await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
 
     const virtualQueueStability = await wc.executeJavaScript(\`(async () => {
       const total = 1200;
@@ -2870,6 +3132,9 @@ setTimeout(async () => {
     })()\`);
     check('Every update phase has exactly one visible progress status surface', updateProgressSurfaces.every(state => state.visibleMatches === 1 && state.button === 'Jetzt installieren'));
 
+    const updateErrorSurface = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); (() => { const surfaces = [document.getElementById("updateProgressText"), document.getElementById("updateMessage")]; const visible = surfaces.filter(element => element && !element.hidden && getComputedStyle(element).display !== "none" && element.textContent.includes("Update fehlgeschlagen")); return { count: visible.length, current: visible[0]?.textContent.trim(), messageLive: document.getElementById("updateMessage")?.getAttribute("aria-live") }; })()');
+    check('A failed update preparation exposes one current error status', updateErrorSurface.count === 1 && updateErrorSurface.current === 'Update fehlgeschlagen: Netzwerkfehler' && updateErrorSurface.messageLive === 'polite');
+
     const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden');
     check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false|false');
 
@@ -2956,13 +3221,13 @@ setTimeout(async () => {
     await wc.executeJavaScript('(() => { queuePersistThrottle.cancel(); selectedFiles = []; queueJobs = [{ id: "ui-close-timeout-job", file: "C:/ui/close-timeout.bin", fileName: "close-timeout.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 1, speedKbs: 0, elapsed: 0, remaining: 0, progress: 0 }]; rebuildJobIndex(); return true; })()');
     await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate()');
     await waitUntil(() => restoreAckRequested, 4000);
-    const recoveryBeforeAck = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayVisible: document.getElementById("shutdownOverlay")?.style.display === "flex", inertRetained: closePreparationInertState.length > 0 && closePreparationInertState.every(({ element }) => element.inert === true) })');
+    const recoveryBeforeAck = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayVisible: document.getElementById("shutdownOverlay")?.style.display === "flex", inertRetained: document.querySelector(".app-header")?.inert === true && document.querySelector(".view.active")?.inert === true })');
     const windowStayedOpenAfterCloseFailure = !win.isDestroyed();
     rejectHungFinalQueueWrite?.(new Error('final queue write timeout'));
     releaseRestoreAck?.();
     const boundedCloseRecovery = await waitUntil(async () => {
       if (win.isDestroyed()) return null;
-      const state = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayHidden: document.getElementById("shutdownOverlay")?.style.display === "none", inertRestored: closePreparationInertState.length === 0, failedWrites: failedConfigWriteOperations.length })');
+      const state = await wc.executeJavaScript('({ state: closePreparationState, promiseCleared: closePreparationPromise === null, overlayHidden: document.getElementById("shutdownOverlay")?.style.display === "none", modalIsolationRestored: document.querySelector(".app-header")?.inert === true && document.querySelector(".view.active")?.inert === true && document.getElementById("updateBanner")?.inert === false, failedWrites: failedConfigWriteOperations.length })');
       return state.state === 'open' && state.promiseCleared ? state : null;
     }, 4000);
     activeConfigStore.savePendingQueue = originalSavePendingQueue;
@@ -2973,7 +3238,7 @@ setTimeout(async () => {
     const recoveredQueue = configAfterCloseRecovery.globalSettings.pendingQueue?.queueJobs || [];
     const failedUpdateUi = await wc.executeJavaScript('({ busy: _updateInstallBusy, message: document.getElementById("updateMessage")?.textContent || "" })');
     const closeRecoveryEvidence = { windowStayedOpenAfterCloseFailure, recoveryBeforeAck, boundedCloseRecovery, closeReadyAttempt, closeRestoreAttempt, writesQuiesced: activeConfigStore._writesQuiesced, writeAfterCloseRecovery, historyAfterCloseRecovery, persistedWebhookUrl: configAfterCloseRecovery.globalSettings.webhookUrl, recoveredQueue: recoveredQueue.map(job => job.id), preparedUpdateMockCalls, launchedUpdateMockCalls, failedUpdateUi };
-    const closeRecoveryOk = windowStayedOpenAfterCloseFailure === true && recoveryBeforeAck.state === 'recovering' && recoveryBeforeAck.promiseCleared === false && recoveryBeforeAck.overlayVisible === true && recoveryBeforeAck.inertRetained === true && boundedCloseRecovery?.state === 'open' && boundedCloseRecovery.promiseCleared === true && boundedCloseRecovery.overlayHidden === true && boundedCloseRecovery.inertRestored === true && boundedCloseRecovery.failedWrites === 0 && activeConfigStore._writesQuiesced === false && Number.isInteger(closeReadyAttempt) && closeRestoreAttempt === closeReadyAttempt && writeAfterCloseRecovery.ok === true && historyAfterCloseRecovery.ok === true && configAfterCloseRecovery.globalSettings.webhookUrl === closeRecoveryMarker && recoveredQueue.some(job => job.id === 'ui-close-timeout-job') && preparedUpdateMockCalls === 1 && launchedUpdateMockCalls === 0 && failedUpdateUi.busy === false && failedUpdateUi.message.includes('nicht gestartet');
+    const closeRecoveryOk = windowStayedOpenAfterCloseFailure === true && recoveryBeforeAck.state === 'recovering' && recoveryBeforeAck.promiseCleared === false && recoveryBeforeAck.overlayVisible === true && recoveryBeforeAck.inertRetained === true && boundedCloseRecovery?.state === 'open' && boundedCloseRecovery.promiseCleared === true && boundedCloseRecovery.overlayHidden === true && boundedCloseRecovery.modalIsolationRestored === true && boundedCloseRecovery.failedWrites === 0 && activeConfigStore._writesQuiesced === false && Number.isInteger(closeReadyAttempt) && closeRestoreAttempt === closeReadyAttempt && writeAfterCloseRecovery.ok === true && historyAfterCloseRecovery.ok === true && configAfterCloseRecovery.globalSettings.webhookUrl === closeRecoveryMarker && recoveredQueue.some(job => job.id === 'ui-close-timeout-job') && preparedUpdateMockCalls === 1 && launchedUpdateMockCalls === 0 && failedUpdateUi.busy === false && failedUpdateUi.message.includes('nicht gestartet');
     if (!closeRecoveryOk) console.log('Close recovery evidence: ' + JSON.stringify(closeRecoveryEvidence));
     check('Close recovery waits for its correlated restore ACK and drains retained writes before reopening', closeRecoveryOk);
     restoreInitialIpcHandler('app:finish-close');
@@ -2992,7 +3257,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('showUpdateBanner({ remoteVersion: "9.9.9" }); installKnownUpdate()');
     const rendererCloseSealed = await waitUntil(async () => !win.isDestroyed() && await wc.executeJavaScript('closePreparationState === "sealed"'));
     const windowStayedOpenForClosePersistence = blockedHistoryWriteStarted === true && !win.isDestroyed();
-    const closeUiQuiesced = await wc.executeJavaScript('document.getElementById("shutdownOverlay")?.style.display === "flex" && closePreparationInertState.length > 0 && closePreparationInertState.every(({ element }) => element.inert === true)');
+    const closeUiQuiesced = await wc.executeJavaScript('document.getElementById("shutdownOverlay")?.style.display === "flex" && document.querySelector(".app-header")?.inert === true && document.querySelector(".view.active")?.inert === true');
     const postSealMainWrite = await wc.executeJavaScript('window.api.saveGlobalSettings({ ...(config.globalSettings || {}), webhookUrl: "https://close-persist.invalid/post-seal" }).then(() => ({ ok: true }), error => ({ ok: false, error: error.message }))');
     await wc.executeJavaScript('(() => { queueJobs.push({ id: "ui-post-seal-job", file: "C:/ui/post-seal.bin", fileName: "post-seal.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 1 }); rebuildJobIndex(); persistQueueStateSoon(false); scheduleSettingsSave(); return true; })()');
     await new Promise(resolve => setTimeout(resolve, 650));
