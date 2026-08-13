@@ -494,7 +494,7 @@ async function init() {
   });
 
   // Folder monitor: auto-queue new files
-  window.api.onFolderMonitorNewFiles((files) => {
+  window.api.onFolderMonitorNewFiles(async (files) => {
     window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
     const fm = config.globalSettings && config.globalSettings.folderMonitor;
     const fmHosters = fm && Array.isArray(fm.hosters) && fm.hosters.length > 0 ? fm.hosters : [];
@@ -524,17 +524,7 @@ async function init() {
           // Inject new preview jobs into the running batch
           const newJobs = queueJobs.filter(j => j.status === 'preview' && newPaths.has(j.file));
           if (newJobs.length > 0) {
-            const cleanupPreparation = prepareSourceCleanup(newJobs);
-            newJobs.forEach(j => { j.status = 'queued'; });
-            renderQueueTable();
-            window.api.addJobsToBatch({
-              jobs: newJobs.map(serializeUploadJob),
-              sourceCleanupGroups: cleanupPreparation.groups
-            }).then(result => {
-              _markSkippedJobs(result);
-              if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-            }).catch(() => {});
-            persistQueueStateSoon(true);
+            await startSelectedUpload(newJobs);
           }
         }
       }
@@ -1139,7 +1129,7 @@ function closeHosterModal() {
   if (modal) modal.style.display = 'none';
 }
 
-function applyHosterSelection() {
+async function applyHosterSelection() {
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
   // Move pending files to selectedFiles on confirm
@@ -1158,17 +1148,7 @@ function applyHosterSelection() {
     buildQueuePreview(); // creates 'preview' jobs for new files
     const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
     if (newJobs.length > 0) {
-      const cleanupPreparation = prepareSourceCleanup(newJobs);
-      newJobs.forEach(j => { j.status = 'queued'; });
-      renderQueueTable();
-      window.api.addJobsToBatch({
-        jobs: newJobs.map(serializeUploadJob),
-        sourceCleanupGroups: cleanupPreparation.groups
-      }).then(result => {
-        _markSkippedJobs(result);
-        if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-      }).catch(() => {});
-      persistQueueStateSoon(true);
+      await startSelectedUpload(newJobs);
     }
   }
 

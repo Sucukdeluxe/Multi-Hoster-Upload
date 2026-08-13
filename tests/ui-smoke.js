@@ -1725,6 +1725,91 @@ setTimeout(async () => {
     restoreInitialIpcHandler('save-pending-queue');
     await wc.executeJavaScript('flushConfigWrites()');
     check('A failed cleanup revocation save stays mandatory for the next start attempt', sourceCleanupRevocationRetry.firstFailed === true && sourceCleanupRevocationRetry.secondSucceeded === true && sourceCleanupRevocationRetry.secondRevocations.length === 0 && sourceCleanupRevocationCallsBeforeRecovery >= 2);
+    const activeBatchSeed = async (file, token, mode) => {
+      const seed = JSON.stringify({ file, token, mode });
+      const result = await wc.executeJavaScript('(() => { try { const seed = ' + seed + '; queuePersistThrottle.cancel(); selectedFiles = []; _pendingFiles = []; selectedUploadHosters = ["voe.sx"]; uploading = true; config.globalSettings = { ...(config.globalSettings || {}), deleteSourceAfterSuccessfulUpload: true, folderMonitor: { ...(config.globalSettings?.folderMonitor || {}), hosters: ["voe.sx"], autoStart: false } }; queueJobs = [{ id: "ui-active-existing-" + seed.mode, file: seed.file, fileName: "active-existing.bin", hoster: "byse.sx", status: "error", bytesTotal: 10, sourceCleanupMetadataVersion: 2, sourceCleanupToken: seed.token, sourceCleanupRequiredHosters: ["voe.sx", "byse.sx"], sourceCleanupConfirmedHosters: ["voe.sx"] }]; rebuildJobIndex(); if (seed.mode === "selection") { const list = document.getElementById("hosterModalList"); const input = document.createElement("input"); input.type = "checkbox"; input.dataset.hosterModal = "voe.sx"; input.checked = true; list.replaceChildren(input); _pendingFiles = [{ path: seed.file, name: "active-selection.bin", size: 10 }]; } return { ok: true }; } catch (error) { return { ok: false, error: String(error && (error.stack || error.message) || error) }; } })()');
+      if (!result?.ok) throw new Error('Active-batch seed failed: ' + result?.error);
+    };
+    const runActiveBatchBarrierSuccess = async (mode) => {
+      const file = 'C:/ui/active-' + mode + '-barrier.bin';
+      await wc.executeJavaScript('flushConfigWrites()');
+      await activeBatchSeed(file, 'ui-active-' + mode + '-barrier-token', mode);
+      const order = [];
+      let addCalls = 0;
+      let saveCalls = 0;
+      let releaseSave = null;
+      ipcMain.removeHandler('save-pending-queue');
+      ipcMain.handle('save-pending-queue', () => {
+        saveCalls++;
+        order.push('save-start-' + saveCalls);
+        if (saveCalls !== 1) {
+          order.push('save-done-' + saveCalls);
+          return true;
+        }
+        return new Promise(resolve => {
+          releaseSave = () => {
+            order.push('save-done-1');
+            resolve(true);
+          };
+        });
+      });
+      ipcMain.removeHandler('add-jobs-to-batch');
+      ipcMain.handle('add-jobs-to-batch', () => {
+        addCalls++;
+        order.push('add');
+        return { added: 1, skippedJobs: [], sourceCleanupFingerprints: {} };
+      });
+      if (mode === 'folder') wc.send('folder-monitor:new-files', [file]);
+      else await wc.executeJavaScript('void applyHosterSelection()');
+      await waitUntil(() => releaseSave !== null);
+      const blockedBeforeSave = addCalls === 0;
+      releaseSave?.();
+      await waitUntil(() => addCalls === 1);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return { blockedBeforeSave, addCalls, order };
+    };
+    const folderBarrierSuccess = await runActiveBatchBarrierSuccess('folder');
+    check('Folder monitor active-batch add waits for cleanup revocation persistence', folderBarrierSuccess.blockedBeforeSave === true && folderBarrierSuccess.addCalls === 1 && folderBarrierSuccess.order.indexOf('save-done-1') < folderBarrierSuccess.order.indexOf('add'));
+    restoreInitialIpcHandler('save-pending-queue');
+    restoreInitialIpcHandler('add-jobs-to-batch');
+    await wc.executeJavaScript('persistSourceCleanupRevocations({ revokedHosters: [] })');
+    const selectionBarrierSuccess = await runActiveBatchBarrierSuccess('selection');
+    check('Hoster selection active-batch add waits for cleanup revocation persistence', selectionBarrierSuccess.blockedBeforeSave === true && selectionBarrierSuccess.addCalls === 1 && selectionBarrierSuccess.order.indexOf('save-done-1') < selectionBarrierSuccess.order.indexOf('add'));
+    restoreInitialIpcHandler('save-pending-queue');
+    restoreInitialIpcHandler('add-jobs-to-batch');
+    await wc.executeJavaScript('persistSourceCleanupRevocations({ revokedHosters: [] })');
+    const runActiveBatchBarrierFailure = async (mode) => {
+      const file = 'C:/ui/active-' + mode + '-rejected.bin';
+      await wc.executeJavaScript('flushConfigWrites()');
+      await activeBatchSeed(file, 'ui-active-' + mode + '-rejected-token', mode);
+      let addCalls = 0;
+      let saveCalls = 0;
+      ipcMain.removeHandler('save-pending-queue');
+      ipcMain.handle('save-pending-queue', () => {
+        saveCalls++;
+        throw new Error('injected active-batch revocation save failure');
+      });
+      ipcMain.removeHandler('add-jobs-to-batch');
+      ipcMain.handle('add-jobs-to-batch', () => {
+        addCalls++;
+        return { added: 1, skippedJobs: [], sourceCleanupFingerprints: {} };
+      });
+      if (mode === 'folder') wc.send('folder-monitor:new-files', [file]);
+      else await wc.executeJavaScript('void applyHosterSelection()');
+      await waitUntil(() => saveCalls > 0);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return { addCalls, saveCalls };
+    };
+    const folderBarrierFailure = await runActiveBatchBarrierFailure('folder');
+    check('Rejected folder monitor cleanup revocation save prevents the active-batch add', folderBarrierFailure.saveCalls > 0 && folderBarrierFailure.addCalls === 0);
+    restoreInitialIpcHandler('save-pending-queue');
+    restoreInitialIpcHandler('add-jobs-to-batch');
+    await wc.executeJavaScript('persistSourceCleanupRevocations({ revokedHosters: [] })');
+    const selectionBarrierFailure = await runActiveBatchBarrierFailure('selection');
+    check('Rejected hoster selection cleanup revocation save prevents the active-batch add', selectionBarrierFailure.saveCalls > 0 && selectionBarrierFailure.addCalls === 0);
+    restoreInitialIpcHandler('save-pending-queue');
+    restoreInitialIpcHandler('add-jobs-to-batch');
+    await wc.executeJavaScript('persistSourceCleanupRevocations({ revokedHosters: [] }); uploading = false; selectedFiles = []; _pendingFiles = []; queueJobs = []; rebuildJobIndex()');
     const sourceCleanupFinalizationGate = await wc.executeJavaScript('(async () => { if (typeof sourceCleanupFinalizationPending === "undefined") return { available: false }; queueJobs = [{ id: "ui-cleanup-finalizing", file: "C:/ui/cleanup-finalizing.bin", fileName: "cleanup-finalizing.bin", hoster: "voe.sx", status: "done", bytesTotal: 10, result: { download_url: "https://example.invalid/finalizing" } }]; rebuildJobIndex(); selectedJobIds.clear(); selectedJobIds.add(queueJobs[0].id); sourceCleanupFinalizationPending = true; updateQueueActionButtons(); const disabled = document.getElementById("reuploadSelectedBtn")?.disabled === true; await retrySelectedJobs(); const status = queueJobs[0].status; sourceCleanupFinalizationPending = false; selectedJobIds.clear(); updateQueueActionButtons(); return { available: true, disabled, status }; })()');
     check('Final cleanup persistence blocks a new retry until the handshake settles', sourceCleanupFinalizationGate.available === true && sourceCleanupFinalizationGate.disabled === true && sourceCleanupFinalizationGate.status === 'done');
     let sourceCleanupFinalizationPayload = null;
