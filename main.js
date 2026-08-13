@@ -7,9 +7,12 @@ app.setName('Multi Hoster Uploader');
 app.setAppUserModelId('com.multihoster.uploader');
 const {
   configureStartupRenderer,
+  createStartupCloseHandler,
+  createStartupExternalRevealBindings,
   createStartupFailureDocument,
   createStartupNavigationLoader,
   createStartupRecoveryCoordinator,
+  createStartupRevealGate,
   createStartupRendererHandlers,
   createStartupWindow,
   resolveStartupLanguage
@@ -137,9 +140,15 @@ const uploadBatchMutationGates = new WeakMap();
 const uploadRecoveryStates = new WeakMap();
 let lastSessionSummary = null;
 let startupRecoveryCoordinator = null;
+let startupRevealGate = null;
 let startupRendererHandlers = null;
 let sourceDeleteJournal = null;
 const RENDERER_READY_TIMEOUT_MS = 15000;
+const startupExternalRevealBindings = createStartupExternalRevealBindings({
+  getWindow: () => mainWindow,
+  getRevealGate: () => startupRevealGate,
+  sendDroppedFiles: paths => safeSend('drop-target:files', paths)
+});
 const pendingUploadFinalizations = new Map();
 
 function requestUploadFinalization(summary, historyPersisted) {
@@ -284,13 +293,7 @@ const _hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!_hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      if (!mainWindow.isVisible()) mainWindow.show();
-      mainWindow.focus();
-    }
-  });
+  startupExternalRevealBindings.bindSecondInstance(app);
 }
 // Rotation memory that survives batch-done → new UploadManager within the
 // same app session. Without this, clicking "Retry failed" after a batch
@@ -1453,12 +1456,19 @@ function createWindow() {
   lastRestoredCloseAttempt = null;
   configStore.setWritesQuiesced(false);
   clearCloseFlushTimer();
-
-  mainWindow.on('close', (event) => {
-    if (closeFlushApproved || !closeHandshakeReady || mainWindow.webContents.isDestroyed()) return;
-    event.preventDefault();
-    requestClosePreparation();
+  const currentStartupRevealGate = createStartupRevealGate(mainWindow, {
+    onBlock: () => {
+      closeHandshakeReady = false;
+      restoreClosePreparation(closePreparationAttempt);
+    }
   });
+  startupRevealGate = currentStartupRevealGate;
+
+  mainWindow.on('close', createStartupCloseHandler({
+    window: mainWindow,
+    shouldPrepareClose: () => !closeFlushApproved && closeHandshakeReady,
+    requestClosePreparation
+  }));
 
   mainWindow.webContents.setBackgroundThrottling(false);
 
@@ -1488,7 +1498,7 @@ function createWindow() {
   const loadStartupDocument = createStartupNavigationLoader(mainWindow, rendererTarget, rendererOptions);
   const loadRendererSurface = async () => {
     try {
-      return await loadStartupDocument();
+      return await currentStartupRevealGate.navigate(loadStartupDocument);
     } catch (error) {
       _writeCrashLog('LOAD FILE FAILED', error);
       debugLog(`LOAD FILE FAILED: ${error && error.stack ? error.stack : error}`);
@@ -1498,10 +1508,10 @@ function createWindow() {
   startupRecoveryCoordinator = createStartupRecoveryCoordinator({
     load: loadRendererSurface,
     reload: loadRendererSurface,
-    reveal: () => {
-      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show();
-    },
-    showFailure: () => mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupFailureDocument(startupLanguage))}`),
+    reveal: currentStartupRevealGate.reveal,
+    showFailure: () => currentStartupRevealGate.navigate(
+      () => mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupFailureDocument(startupLanguage))}`)
+    ),
     close: () => app.exit(1),
     readyTimeoutMs: RENDERER_READY_TIMEOUT_MS
   });
@@ -1509,10 +1519,7 @@ function createWindow() {
     window: mainWindow,
     ipcMain,
     coordinator: startupRecoveryCoordinator,
-    onDocumentLoadStarted: () => {
-      closeHandshakeReady = false;
-      restoreClosePreparation(closePreparationAttempt);
-    },
+    onDocumentLoadStarted: currentStartupRevealGate.block,
     onRendererCrashed: (details) => {
       _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
       debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
@@ -1530,6 +1537,7 @@ function createWindow() {
   const currentStartupRecoveryCoordinator = startupRecoveryCoordinator;
   mainWindow.once('closed', () => {
     currentStartupRendererHandlers.dispose();
+    if (startupRevealGate === currentStartupRevealGate) startupRevealGate = null;
     if (startupRendererHandlers === currentStartupRendererHandlers) startupRendererHandlers = null;
     if (startupRecoveryCoordinator === currentStartupRecoveryCoordinator) startupRecoveryCoordinator = null;
   });
@@ -1553,9 +1561,7 @@ function createTray() {
     tray = new Tray(icon || nativeImage.createEmpty());
     refreshTrayLanguage();
 
-    tray.on('click', () => {
-      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
-    });
+    startupExternalRevealBindings.bindTrayClick(tray);
   } catch (err) {
     tray = null;
     debugLog(`createTray failed (non-fatal): ${err && err.message ? err.message : err}`);
@@ -1925,7 +1931,7 @@ function refreshTrayLanguage() {
   if (!tray || tray.isDestroyed()) return;
   tray.setToolTip('Multi Hoster Uploader');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: shellText('Öffnen', 'Open'), click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    startupExternalRevealBindings.createTrayMenuItem(shellText('Öffnen', 'Open')),
     { type: 'separator' },
     { label: shellText('Beenden', 'Quit'), click: () => { app.quit(); } }
   ]));
@@ -3701,15 +3707,7 @@ ipcMain.handle('hide-drop-target', () => {
   return true;
 });
 
-ipcMain.on('drop-target:files', (_event, paths) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    if (!mainWindow.isVisible() || mainWindow.isMinimized()) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-    safeSend('drop-target:files', paths);
-  }
-});
+startupExternalRevealBindings.bindDropTargetFiles(ipcMain);
 
 // --- Shutdown after finish ---
 let shutdownMode = 'nothing';

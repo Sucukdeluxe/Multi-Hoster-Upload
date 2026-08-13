@@ -5,9 +5,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   configureStartupRenderer,
+  createStartupCloseHandler,
+  createStartupExternalRevealBindings,
   createStartupFailureDocument,
   createStartupNavigationLoader,
   createStartupRecoveryCoordinator,
+  createStartupRevealGate,
   createStartupRendererHandlers,
   createStartupWindow,
   resolveStartupLanguage
@@ -92,6 +95,38 @@ function createRendererFrame(frameToken, url = `file:///renderer/index.html?star
   };
 }
 
+function createRevealWindow({ minimized = true, visible = false } = {}) {
+  const events = [];
+  return {
+    events,
+    webContents: {
+      isDestroyed() {
+        return false;
+      }
+    },
+    isDestroyed() {
+      return false;
+    },
+    isMinimized() {
+      return minimized;
+    },
+    isVisible() {
+      return visible;
+    },
+    restore() {
+      events.push('restore');
+      minimized = false;
+    },
+    show() {
+      events.push('show');
+      visible = true;
+    },
+    focus() {
+      events.push('focus');
+    }
+  };
+}
+
 test('configureStartupRenderer leaves hardware acceleration enabled for a local Windows session', () => {
   let calls = 0;
   configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'Console' }, 'win32');
@@ -142,6 +177,136 @@ test('ready-to-show cannot reveal the main window before renderer Ready', async 
   await loading;
 
   assert.equal(startup.window.showCalls, 0);
+});
+
+test('all production external reveal paths wait for an authorized startup surface', () => {
+  const paths = [
+    ['second-instance', bindings => {
+      const app = new EventEmitter();
+      bindings.bindSecondInstance(app);
+      app.emit('second-instance');
+    }],
+    ['tray click', bindings => {
+      const tray = new EventEmitter();
+      bindings.bindTrayClick(tray);
+      tray.emit('click');
+    }],
+    ['tray menu', bindings => {
+      bindings.createTrayMenuItem('Open').click();
+    }],
+    ['drop target files', bindings => {
+      const ipcMain = new EventEmitter();
+      bindings.bindDropTargetFiles(ipcMain);
+      ipcMain.emit('drop-target:files', {}, ['queued.mkv']);
+    }]
+  ];
+
+  for (const [name, invoke] of paths) {
+    const window = createRevealWindow();
+    const revealGate = createStartupRevealGate(window);
+    const droppedFiles = [];
+    const bindings = createStartupExternalRevealBindings({
+      getWindow: () => window,
+      getRevealGate: () => revealGate,
+      sendDroppedFiles: paths => droppedFiles.push(paths)
+    });
+
+    invoke(bindings);
+
+    assert.deepEqual(window.events, [], name);
+    assert.deepEqual(droppedFiles, name === 'drop target files' ? [['queued.mkv']] : [], name);
+
+    revealGate.reveal();
+
+    assert.deepEqual(window.events, ['restore', 'show', 'focus'], name);
+  }
+});
+
+test('renderer Ready and the safe failure surface can authorize the gated window', async () => {
+  const readyWindow = createRevealWindow({ minimized: false });
+  const readyGate = createStartupRevealGate(readyWindow);
+  const readyCoordinator = createStartupRecoveryCoordinator({
+    load() {},
+    reload() {},
+    reveal: readyGate.reveal,
+    close() {}
+  });
+  const generation = readyCoordinator.rendererLoadStarted();
+  readyCoordinator.rendererLoaded(generation);
+
+  readyCoordinator.rendererReady(generation);
+
+  assert.deepEqual(readyWindow.events, ['show']);
+
+  const failureWindow = createRevealWindow({ minimized: false });
+  const failureGate = createStartupRevealGate(failureWindow);
+  let failureSurfaceLoads = 0;
+  const failureCoordinator = createStartupRecoveryCoordinator({
+    async load() {
+      throw new Error('navigation failed');
+    },
+    reload() {},
+    reveal: failureGate.reveal,
+    async showFailure() {
+      failureSurfaceLoads++;
+    },
+    close() {}
+  });
+
+  await failureCoordinator.loadInitial();
+
+  assert.equal(failureSurfaceLoads, 1);
+  assert.deepEqual(failureWindow.events, ['show']);
+});
+
+test('failed recovery navigation leaves the safe failure surface directly closable', async () => {
+  const window = createRevealWindow({ minimized: false });
+  let closeHandshakeReady = true;
+  const readinessDuringNavigation = [];
+  const revealGate = createStartupRevealGate(window, {
+    onBlock() {
+      closeHandshakeReady = false;
+    }
+  });
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    reload() {
+      return revealGate.navigate(() => {
+        readinessDuringNavigation.push(closeHandshakeReady);
+        throw new Error('recovery load rejected before navigation');
+      });
+    },
+    reveal: revealGate.reveal,
+    showFailure() {
+      return revealGate.navigate(() => {
+        readinessDuringNavigation.push(closeHandshakeReady);
+      });
+    },
+    close() {}
+  });
+
+  await coordinator.rendererCrashed({ reason: 'crashed' });
+
+  let closePreparationCalls = 0;
+  let preventDefaultCalls = 0;
+  const closeHandler = createStartupCloseHandler({
+    window,
+    shouldPrepareClose: () => closeHandshakeReady,
+    requestClosePreparation() {
+      closePreparationCalls++;
+    }
+  });
+  const intercepted = closeHandler({
+    preventDefault() {
+      preventDefaultCalls++;
+    }
+  });
+
+  assert.deepEqual(readinessDuringNavigation, [false, false]);
+  assert.deepEqual(window.events, ['show']);
+  assert.equal(intercepted, false);
+  assert.equal(preventDefaultCalls, 0);
+  assert.equal(closePreparationCalls, 0);
 });
 
 test('startup load forwards a rejected navigation to the error handler', async () => {
