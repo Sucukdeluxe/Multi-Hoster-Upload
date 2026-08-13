@@ -1,6 +1,14 @@
 const PRODUCT_NAME = 'Multi Hoster Uploader';
 const ARTIFACT_NAME = 'Multi-Hoster-Upload';
 
+function requireEnglishReleaseNotes(value) {
+  const notes = typeof value === 'string' ? value.trim() : '';
+  if (!/[A-Za-z]/.test(notes)) {
+    throw new Error('English release notes are required');
+  }
+  return notes;
+}
+
 export function parseReleaseArgs(args) {
   const version = Array.isArray(args) ? args[0] : '';
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) {
@@ -14,11 +22,12 @@ export function parseReleaseArgs(args) {
   }
 
   const excludedIndexes = new Set([0, transportTagIndex, transportTagIndex + 1]);
-  const notes = args.filter((arg, index) => !excludedIndexes.has(index) && arg !== '--dry-run').join(' ');
+  const notes = requireEnglishReleaseNotes(args.filter((arg, index) => !excludedIndexes.has(index) && arg !== '--dry-run').join(' '));
   return { version, transportTag, notes, dryRun: args.includes('--dry-run') };
 }
 
 export function createReleasePlan(options) {
+  const releaseBody = requireEnglishReleaseNotes(options.notes);
   const releaseTitle = `${PRODUCT_NAME} v${options.version}`;
   const setupName = `${ARTIFACT_NAME} Setup ${options.version}.exe`;
   const portableName = `${ARTIFACT_NAME} ${options.version}.exe`;
@@ -30,7 +39,7 @@ export function createReleasePlan(options) {
     ...options,
     tag: options.transportTag,
     releaseTitle,
-    releaseBody: options.notes || releaseTitle,
+    releaseBody,
     setupName,
     portableName,
     blockmapName,

@@ -1,11 +1,14 @@
+import { execFile } from 'node:child_process';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const failures = new Map();
+const execFileAsync = promisify(execFile);
 const publicActionsDir = `.${['git', 'hub'].join('')}`;
 const privateActionsDir = `.${['gi', 'tea'].join('')}`;
 const sourceFiles = [
@@ -128,6 +131,7 @@ const sourceFiles = [
   'tests/orphan-tmp.test.js',
   'tests/package-build-files.test.js',
   'tests/public-release-verifier.test.js',
+  'tests/release-plan.test.js',
   'tests/queue-dedup-property.test.js',
   'tests/queue-dedup.test.js',
   'tests/queue-persistence-scenario.test.js',
@@ -184,6 +188,7 @@ const expectedScripts = {
   'test:unit': 'node --test tests/*.test.js',
   'test:ui': 'node --test tests/ui-smoke.js',
   'test:backup-api': 'npm --prefix services/backup-api test',
+  'verify:public-source': 'node scripts/verify-public-release.mjs --source-only --tracked --package-version',
   verify: 'npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev',
   lint: 'eslint .',
   dist: 'electron-builder --publish never --win',
@@ -267,18 +272,26 @@ function isDeniedBasename(basename) {
     || /\.(?:bak|db|log|sqlite|sqlite3|tmp)$/i.test(basename);
 }
 
-function parseArguments() {
+function parseArguments(packageVersion) {
   const sourceOnlyCount = args.filter((arg) => arg === '--source-only').length;
+  const trackedCount = args.filter((arg) => arg === '--tracked').length;
+  const packageVersionCount = args.filter((arg) => arg === '--package-version').length;
   const versionFlagIndexes = args.map((arg, index) => arg === '--version' ? index : -1).filter((index) => index >= 0);
   const versionIndex = versionFlagIndexes[0] ?? -1;
-  const expectedVersion = versionIndex >= 0 ? args[versionIndex + 1] : '';
+  const explicitVersion = versionIndex >= 0 ? args[versionIndex + 1] : '';
+  const expectedVersion = packageVersionCount === 1 ? packageVersion : explicitVersion;
   const consumed = new Set();
 
   if (sourceOnlyCount === 1) consumed.add(args.indexOf('--source-only'));
   if (sourceOnlyCount > 1) addFailure('scripts/verify-public-release.mjs', 'duplicate-source-only');
-  if (versionFlagIndexes.length !== 1 || !/^\d+\.\d+\.\d+$/.test(expectedVersion || '')) {
+  if (trackedCount === 1) consumed.add(args.indexOf('--tracked'));
+  if (trackedCount > 1 || (trackedCount === 1 && sourceOnlyCount !== 1)) {
+    addFailure('scripts/verify-public-release.mjs', 'tracked-source-argument');
+  }
+  if (packageVersionCount === 1) consumed.add(args.indexOf('--package-version'));
+  if (packageVersionCount > 1 || packageVersionCount + versionFlagIndexes.length !== 1 || !/^\d+\.\d+\.\d+$/.test(expectedVersion || '')) {
     addFailure('scripts/verify-public-release.mjs', 'expected-version-argument');
-  } else {
+  } else if (versionFlagIndexes.length === 1) {
     consumed.add(versionIndex);
     consumed.add(versionIndex + 1);
   }
@@ -287,7 +300,7 @@ function parseArguments() {
     if (!consumed.has(index)) addFailure('scripts/verify-public-release.mjs', 'argument-allowlist');
   }
 
-  return { sourceOnly: sourceOnlyCount === 1, expectedVersion };
+  return { sourceOnly: sourceOnlyCount === 1, tracked: trackedCount === 1, expectedVersion };
 }
 
 async function enumerate(directory = root, relativeDirectory = '') {
@@ -324,6 +337,35 @@ async function enumerate(directory = root, relativeDirectory = '') {
     files.push(relativePath);
   }
 
+  return files;
+}
+
+async function enumerateTracked() {
+  let stdout = '';
+  try {
+    ({ stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024
+    }));
+  } catch {
+    addFailure('.git', 'tracked-source-enumeration');
+    return [];
+  }
+
+  const files = stdout.split('\0').filter(Boolean).map(normalizeRelative);
+  for (const relativePath of files) {
+    let stats;
+    try {
+      stats = await lstat(path.join(root, relativePath));
+    } catch {
+      addFailure(relativePath, 'required-source-file');
+      continue;
+    }
+    if (!stats.isFile() || stats.isSymbolicLink()) addFailure(relativePath, 'unsupported-file-type');
+    if (isDeniedBasename(path.basename(relativePath))) addFailure(relativePath, 'denied-basename');
+    if (!allowedFiles.has(relativePath)) addFailure(relativePath, 'source-layout-allowlist');
+  }
   return files;
 }
 
@@ -432,15 +474,15 @@ function printFailures() {
 }
 
 async function main() {
-  const { sourceOnly, expectedVersion } = parseArguments();
-  const files = await enumerate();
+  const packageJson = await readJson('package.json', 'package-json');
+  const { sourceOnly, tracked, expectedVersion } = parseArguments(packageJson?.version);
+  const files = tracked ? await enumerateTracked() : await enumerate();
   const requiredFiles = sourceOnly ? sourceFiles : [...sourceFiles, ...screenshotFiles];
   for (const requiredFile of requiredFiles) {
     if (!files.includes(requiredFile)) addFailure(requiredFile, 'required-source-file');
   }
 
   await validateTextFiles(files);
-  const packageJson = await readJson('package.json', 'package-json');
   const packageLock = await readJson('package-lock.json', 'package-lock-json');
   const servicePackage = await readJson('services/backup-api/package.json', 'service-package-json');
   const serviceLock = await readJson('services/backup-api/package-lock.json', 'service-package-lock-json');

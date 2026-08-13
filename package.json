@@ -10,6 +10,7 @@
     "test:unit": "node --test tests/*.test.js",
     "test:ui": "node --test tests/ui-smoke.js",
     "test:backup-api": "npm --prefix services/backup-api test",
+    "verify:public-source": "node scripts/verify-public-release.mjs --source-only --tracked --package-version",
     "verify": "npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev",
     "lint": "eslint .",
     "dist": "electron-builder --publish never --win",
