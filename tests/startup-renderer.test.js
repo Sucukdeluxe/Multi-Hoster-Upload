@@ -6,6 +6,7 @@ const path = require('node:path');
 const {
   configureStartupRenderer,
   createStartupFailureDocument,
+  createStartupNavigationLoader,
   createStartupRecoveryCoordinator,
   createStartupRendererHandlers,
   createStartupWindow,
@@ -22,19 +23,6 @@ test('startup failure document is a localized visible application surface', () =
   assert.match(german, /konnte nicht geladen werden/);
   assert.match(german, /Schließen/);
   assert.doesNotMatch(english, /Electron/);
-});
-
-test('main process wires bounded startup recovery into real load and crash paths', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
-  assert.match(source, /createStartupRecoveryCoordinator/);
-  assert.match(source, /startupRecoveryCoordinator\.loadInitial/);
-  assert.match(source, /startupRecoveryCoordinator\.rendererCrashed/);
-  assert.match(source, /createStartupRendererHandlers/);
-  assert.match(source, /startupRendererHandlers\.documentLoadStarted/);
-  assert.match(source, /startupRendererHandlers\.documentLoaded/);
-  assert.match(source, /startupRendererHandlers\.rendererInitializationFailed/);
-  assert.match(source, /startupRendererHandlers\.rendererReady/);
-  assert.match(source, /createStartupFailureDocument/);
 });
 
 class TestBrowserWindow extends EventEmitter {
@@ -92,6 +80,18 @@ function createManualScheduler() {
   };
 }
 
+function createRendererFrame(frameToken, url = `file:///renderer/index.html?startupDocument=${frameToken}`) {
+  return {
+    detached: false,
+    frameToken,
+    processId: 1,
+    url,
+    isDestroyed() {
+      return false;
+    }
+  };
+}
+
 test('configureStartupRenderer leaves hardware acceleration enabled for a local Windows session', () => {
   let calls = 0;
   configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'Console' }, 'win32');
@@ -129,21 +129,19 @@ test('main window uses the branded application icon', () => {
   assert.match(createWindowSource, /icon:\s*path\.join\(__dirname, ['"]assets['"], ['"]app_icon\.ico['"]\)/u);
 });
 
-test('startup load registers visibility before navigation and shows only once', async () => {
+test('ready-to-show cannot reveal the main window before renderer Ready', async () => {
   const startup = createStartupWindow(TestBrowserWindow, {});
   startup.window.loadError = null;
   const loading = startup.load('renderer/index.html', () => {});
 
   assert.deepEqual(startup.window.startupEvents, [
-    'listen:ready-to-show',
     'load:renderer/index.html'
   ]);
 
   startup.window.emit('ready-to-show');
-  startup.window.emit('ready-to-show');
   await loading;
 
-  assert.equal(startup.window.showCalls, 1);
+  assert.equal(startup.window.showCalls, 0);
 });
 
 test('startup load forwards a rejected navigation to the error handler', async () => {
@@ -164,6 +162,34 @@ test('startup load forwards navigation options before the renderer becomes visib
   await startup.load('renderer/index.html', () => {}, options);
 
   assert.deepEqual(startup.window.loadOptions, options);
+});
+
+test('startup navigation gives every main document a distinct generation URL', async () => {
+  const calls = [];
+  const window = {
+    loadFile(target, options) {
+      calls.push([target, options]);
+      return Promise.resolve('loaded');
+    }
+  };
+  const loadDocument = createStartupNavigationLoader(window, 'renderer/index.html', {
+    hash: 'uploads',
+    query: { language: 'de' }
+  });
+
+  await loadDocument();
+  await loadDocument();
+
+  assert.deepEqual(calls, [
+    ['renderer/index.html', {
+      hash: 'uploads',
+      query: { language: 'de', startupDocument: '1' }
+    }],
+    ['renderer/index.html', {
+      hash: 'uploads',
+      query: { language: 'de', startupDocument: '2' }
+    }]
+  ]);
 });
 
 test('startup recovery retries the initial load exactly once before succeeding', async () => {
@@ -187,6 +213,86 @@ test('startup recovery retries the initial load exactly once before succeeding',
     ['renderer/index.html', options],
     ['renderer/index.html', options]
   ]);
+});
+
+test('a crash during initial load joins the serialized initial retry without a third navigation', async () => {
+  let rejectFirstLoad;
+  const firstLoad = new Promise((_, reject) => {
+    rejectFirstLoad = reject;
+  });
+  let activeNavigations = 0;
+  let maxConcurrentNavigations = 0;
+  let loadCalls = 0;
+  let reloadCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    async load() {
+      loadCalls++;
+      activeNavigations++;
+      maxConcurrentNavigations = Math.max(maxConcurrentNavigations, activeNavigations);
+      try {
+        if (loadCalls === 1) return await firstLoad;
+        return 'loaded';
+      } finally {
+        activeNavigations--;
+      }
+    },
+    async reload() {
+      reloadCalls++;
+      activeNavigations++;
+      maxConcurrentNavigations = Math.max(maxConcurrentNavigations, activeNavigations);
+      activeNavigations--;
+      return 'reloaded';
+    },
+    reveal() {},
+    close() {}
+  });
+
+  const initialLoading = coordinator.loadInitial('renderer/index.html');
+  const crashRecovery = coordinator.rendererCrashed({ reason: 'crashed', exitCode: 17 });
+  rejectFirstLoad(new Error('first navigation crashed'));
+
+  await Promise.all([initialLoading, crashRecovery]);
+
+  assert.equal(loadCalls, 2);
+  assert.equal(reloadCalls, 0);
+  assert.equal(maxConcurrentNavigations, 1);
+});
+
+test('the initial navigation retry consumes the single recovery navigation budget', async () => {
+  const scheduler = createManualScheduler();
+  const failures = [];
+  let loadCalls = 0;
+  let reloadCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    async load() {
+      loadCalls++;
+      if (loadCalls === 1) throw new Error('first navigation failed');
+    },
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+
+  await coordinator.loadInitial('renderer/index.html');
+  const generation = coordinator.rendererLoadStarted();
+  coordinator.rendererLoaded(generation);
+  await scheduler.fireNext();
+
+  assert.equal(loadCalls, 2);
+  assert.equal(reloadCalls, 0);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-ready-timeout',
+    attempt: 2,
+    details: { timeoutMs: 25 }
+  }]);
 });
 
 test('startup recovery reveals a safe failure surface after both initial loads fail', async () => {
@@ -347,14 +453,28 @@ test('renderer initialization failures share the bounded recovery path', async (
 test('production startup handlers route renderer initialization failure through bounded recovery', async () => {
   const failures = [];
   let reloadCalls = 0;
-  let reportedFailure;
-  const webContents = {};
+  let revealCalls = 0;
+  const reportedFailures = [];
+  const ipcMain = new EventEmitter();
+  const webContents = new EventEmitter();
+  const firstFrame = createRendererFrame('initialization-1');
+  const secondFrame = createRendererFrame('initialization-2');
   const coordinator = createStartupRecoveryCoordinator({
     load() {},
     async reload() {
       reloadCalls++;
+      webContents.mainFrame = secondFrame;
+      webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        isSameDocument: false,
+        url: secondFrame.url,
+        frame: secondFrame
+      });
+      webContents.emit('did-finish-load');
     },
-    reveal() {},
+    reveal() {
+      revealCalls++;
+    },
     async showFailure(failure) {
       failures.push(failure);
     },
@@ -362,28 +482,50 @@ test('production startup handlers route renderer initialization failure through 
   });
   const handlers = createStartupRendererHandlers({
     window: { isDestroyed: () => false, webContents },
+    ipcMain,
     coordinator,
     onReady() {},
     onInitializationFailed(details) {
-      reportedFailure = details;
+      reportedFailures.push(details);
     }
   });
-  const details = { message: 'top-level initialization failed' };
+  const firstDetails = { message: 'first top-level initialization failed' };
+  const secondDetails = { message: 'second top-level initialization failed' };
 
-  await handlers.rendererInitializationFailed({ sender: webContents }, details);
-  await handlers.rendererInitializationFailed({ sender: webContents }, details);
+  webContents.mainFrame = firstFrame;
+  webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+    url: firstFrame.url,
+    frame: firstFrame
+  });
+  ipcMain.emit('app:renderer-initialization-failed', {
+    sender: webContents,
+    senderFrame: firstFrame
+  }, firstDetails);
+  await new Promise(resolve => setImmediate(resolve));
+  ipcMain.emit('app:renderer-initialization-failed', {
+    sender: webContents,
+    senderFrame: secondFrame
+  }, secondDetails);
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(reloadCalls, 1);
-  assert.equal(reportedFailure, details);
+  assert.equal(revealCalls, 1);
+  assert.deepEqual(reportedFailures, [firstDetails, secondDetails]);
   assert.deepEqual(failures, [{
     phase: 'renderer-initialization',
     attempt: 2,
-    details
+    details: secondDetails
   }]);
+  handlers.dispose();
 });
 
 test('production startup handlers enforce the Ready deadline after every main document load', async () => {
   const scheduler = createManualScheduler();
+  const webContents = new EventEmitter();
+  const firstFrame = createRendererFrame('timeout-1');
+  const secondFrame = createRendererFrame('timeout-2');
   const failures = [];
   let reloadCalls = 0;
   const coordinator = createStartupRecoveryCoordinator({
@@ -401,21 +543,74 @@ test('production startup handlers enforce the Ready deadline after every main do
     cancelReadyDeadline: scheduler.cancel
   });
   const handlers = createStartupRendererHandlers({
-    window: { isDestroyed: () => false, webContents: {} },
+    window: { isDestroyed: () => false, webContents },
     coordinator,
     onReady() {},
     onInitializationFailed() {}
   });
 
-  handlers.documentLoadStarted();
-  handlers.documentLoaded();
+  webContents.mainFrame = firstFrame;
+  webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+    url: firstFrame.url,
+    frame: firstFrame
+  });
+  webContents.emit('did-finish-load');
 
   assert.deepEqual(scheduler.delays(), [25]);
   await scheduler.fireNext();
   assert.equal(reloadCalls, 1);
 
-  handlers.documentLoadStarted();
-  handlers.documentLoaded();
+  webContents.mainFrame = secondFrame;
+  webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+    url: secondFrame.url,
+    frame: secondFrame
+  });
+  webContents.emit('did-finish-load');
+  await scheduler.fireNext();
+
+  assert.equal(reloadCalls, 1);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-ready-timeout',
+    attempt: 2,
+    details: { timeoutMs: 25 }
+  }]);
+  handlers.dispose();
+});
+
+test('late Ready from an old renderer generation cannot clear the current deadline or recovery budget', async () => {
+  const scheduler = createManualScheduler();
+  const failures = [];
+  let reloadCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+
+  const oldGeneration = coordinator.rendererLoadStarted();
+  coordinator.rendererLoaded(oldGeneration);
+  await scheduler.fireNext();
+
+  const currentGeneration = coordinator.rendererLoadStarted();
+  coordinator.rendererLoaded(currentGeneration);
+  const accepted = coordinator.rendererReady(oldGeneration);
+
+  assert.equal(accepted, false);
+  assert.equal(scheduler.count(), 1);
+
   await scheduler.fireNext();
 
   assert.equal(reloadCalls, 1);
@@ -426,11 +621,120 @@ test('production startup handlers enforce the Ready deadline after every main do
   }]);
 });
 
+test('Ready without a renderer generation cannot clear the active deadline', () => {
+  const scheduler = createManualScheduler();
+  let revealCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    reload() {},
+    reveal() {
+      revealCalls++;
+    },
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+
+  const generation = coordinator.rendererLoadStarted();
+  coordinator.rendererLoaded(generation);
+  const accepted = coordinator.rendererReady();
+
+  assert.equal(accepted, false);
+  assert.equal(revealCalls, 0);
+  assert.equal(scheduler.count(), 1);
+});
+
+test('production event wiring rejects an old document Ready and exposes the failsafe', async () => {
+  const scheduler = createManualScheduler();
+  const ipcMain = new EventEmitter();
+  const webContents = new EventEmitter();
+  const oldFrame = createRendererFrame('main-frame', 'file:///renderer/index.html?startupDocument=1');
+  const currentFrame = createRendererFrame('main-frame', 'file:///renderer/index.html?startupDocument=2');
+  const window = {
+    webContents,
+    isDestroyed() {
+      return false;
+    }
+  };
+  const failures = [];
+  let reloadCalls = 0;
+  let revealCalls = 0;
+  let readyCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+      webContents.mainFrame = currentFrame;
+      webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        isSameDocument: false,
+        url: currentFrame.url,
+        frame: currentFrame
+      });
+      webContents.emit('did-finish-load');
+    },
+    reveal() {
+      revealCalls++;
+    },
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+  const handlers = createStartupRendererHandlers({
+    window,
+    ipcMain,
+    coordinator,
+    onReady() {
+      readyCalls++;
+    },
+    onInitializationFailed() {}
+  });
+
+  webContents.mainFrame = oldFrame;
+  webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+    url: oldFrame.url,
+    frame: oldFrame
+  });
+  webContents.emit('did-finish-load');
+
+  assert.equal(scheduler.count(), 1);
+  await scheduler.fireNext();
+  assert.equal(reloadCalls, 1);
+  assert.equal(scheduler.count(), 1);
+
+  ipcMain.emit('app:close-handshake-ready', {
+    sender: webContents,
+    senderFrame: oldFrame
+  });
+
+  assert.equal(readyCalls, 0);
+  assert.equal(scheduler.count(), 1);
+
+  await scheduler.fireNext();
+
+  assert.equal(reloadCalls, 1);
+  assert.equal(revealCalls, 1);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-ready-timeout',
+    attempt: 2,
+    details: { timeoutMs: 25 }
+  }]);
+  handlers.dispose();
+});
+
 test('production startup handlers cancel the Ready deadline after a valid Ready signal', async () => {
   const scheduler = createManualScheduler();
   let reloadCalls = 0;
   let readyCalls = 0;
-  const webContents = {};
+  const frame = createRendererFrame('ready');
+  const webContents = { mainFrame: frame };
   const coordinator = createStartupRecoveryCoordinator({
     load() {},
     async reload() {
@@ -453,7 +757,7 @@ test('production startup handlers cancel the Ready deadline after a valid Ready 
 
   handlers.documentLoadStarted();
   handlers.documentLoaded();
-  const ready = handlers.rendererReady({ sender: webContents });
+  const ready = handlers.rendererReady({ sender: webContents, senderFrame: frame });
 
   assert.equal(ready, true);
   assert.equal(readyCalls, 1);
@@ -461,9 +765,10 @@ test('production startup handlers cancel the Ready deadline after a valid Ready 
   assert.equal(reloadCalls, 0);
 });
 
-test('Ready before did-finish-load prevents a stale deadline', () => {
+test('Ready before did-finish-load is rejected and cannot suppress the current deadline', () => {
   const scheduler = createManualScheduler();
-  const webContents = {};
+  const frame = createRendererFrame('not-finished');
+  const webContents = { mainFrame: frame };
   const coordinator = createStartupRecoveryCoordinator({
     load() {},
     reload() {},
@@ -481,10 +786,11 @@ test('Ready before did-finish-load prevents a stale deadline', () => {
   });
 
   handlers.documentLoadStarted();
-  handlers.rendererReady({ sender: webContents });
+  const ready = handlers.rendererReady({ sender: webContents, senderFrame: frame });
   handlers.documentLoaded();
 
-  assert.equal(scheduler.count(), 0);
+  assert.equal(ready, false);
+  assert.equal(scheduler.count(), 1);
 });
 
 test('disposing startup handlers cancels a pending Ready deadline', () => {
@@ -535,7 +841,9 @@ test('a successful renderer ready event reveals content and resets crash recover
   });
 
   await coordinator.rendererCrashed(crashes[0]);
-  coordinator.rendererReady();
+  const generation = coordinator.rendererLoadStarted();
+  coordinator.rendererLoaded(generation);
+  coordinator.rendererReady(generation);
   await coordinator.rendererCrashed(crashes[1]);
 
   assert.equal(reloadCalls, 2);

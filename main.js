@@ -8,6 +8,7 @@ app.setAppUserModelId('com.multihoster.uploader');
 const {
   configureStartupRenderer,
   createStartupFailureDocument,
+  createStartupNavigationLoader,
   createStartupRecoveryCoordinator,
   createStartupRendererHandlers,
   createStartupWindow,
@@ -1461,23 +1462,6 @@ function createWindow() {
 
   mainWindow.webContents.setBackgroundThrottling(false);
 
-  mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
-    if (isInPlace || !isMainFrame) return;
-    closeHandshakeReady = false;
-    restoreClosePreparation(closePreparationAttempt);
-    if (startupRendererHandlers) startupRendererHandlers.documentLoadStarted();
-  });
-
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (startupRendererHandlers) startupRendererHandlers.documentLoaded();
-  });
-
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
-    debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
-    if (startupRecoveryCoordinator) void startupRecoveryCoordinator.rendererCrashed(details);
-  });
-
   mainWindow.webContents.on('unresponsive', () => {
     _writeCrashLog('RENDERER UNRESPONSIVE', new Error('webContents unresponsive'));
     debugLog('RENDERER UNRESPONSIVE');
@@ -1501,9 +1485,10 @@ function createWindow() {
   try { startupLanguage = resolveStartupLanguage(configStore.load()); } catch {}
   const rendererTarget = path.join(__dirname, 'renderer', 'index.html');
   const rendererOptions = { query: { language: startupLanguage } };
+  const loadStartupDocument = createStartupNavigationLoader(mainWindow, rendererTarget, rendererOptions);
   const loadRendererSurface = async () => {
     try {
-      return await mainWindow.loadFile(rendererTarget, rendererOptions);
+      return await loadStartupDocument();
     } catch (error) {
       _writeCrashLog('LOAD FILE FAILED', error);
       debugLog(`LOAD FILE FAILED: ${error && error.stack ? error.stack : error}`);
@@ -1522,7 +1507,16 @@ function createWindow() {
   });
   startupRendererHandlers = createStartupRendererHandlers({
     window: mainWindow,
+    ipcMain,
     coordinator: startupRecoveryCoordinator,
+    onDocumentLoadStarted: () => {
+      closeHandshakeReady = false;
+      restoreClosePreparation(closePreparationAttempt);
+    },
+    onRendererCrashed: (details) => {
+      _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
+      debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
+    },
     onReady: () => {
       closeHandshakeReady = true;
     },
@@ -1539,7 +1533,7 @@ function createWindow() {
     if (startupRendererHandlers === currentStartupRendererHandlers) startupRendererHandlers = null;
     if (startupRecoveryCoordinator === currentStartupRecoveryCoordinator) startupRecoveryCoordinator = null;
   });
-  void startupRecoveryCoordinator.loadInitial(rendererTarget, rendererOptions);
+  void startupRecoveryCoordinator.loadInitial();
 }
 
 function createTray() {
@@ -3010,14 +3004,6 @@ ipcMain.handle('app:restart', () => {
 
 ipcMain.handle('app:quit', () => {
   app.quit();
-});
-
-ipcMain.on('app:close-handshake-ready', (event) => {
-  if (startupRendererHandlers) startupRendererHandlers.rendererReady(event);
-});
-
-ipcMain.on('app:renderer-initialization-failed', (event, details) => {
-  if (startupRendererHandlers) void startupRendererHandlers.rendererInitializationFailed(event, details);
 });
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {
