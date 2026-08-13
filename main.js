@@ -2093,17 +2093,6 @@ async function executeReservedUploadStart(payload, startLease) {
     startedAt: new Date().toISOString(),
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
-  try {
-    await configStore.saveUploadRecovery(recovery);
-  } catch (error) {
-    debugLog(`upload recovery state could not be saved: ${error.message}`);
-    if (uploadManager === _thisManager) {
-      uploadManager = null;
-      globalThis._mhuUploadManagerRef = null;
-    }
-    return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
-  }
-  uploadRecoveryStates.set(_thisManager, recovery);
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2148,6 +2137,17 @@ async function executeReservedUploadStart(payload, startLease) {
     }
     return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
   }
+  try {
+    await configStore.saveUploadRecovery(recovery);
+  } catch (error) {
+    debugLog(`upload recovery state could not be saved: ${error.message}`);
+    if (uploadManager === _thisManager) {
+      uploadManager = null;
+      globalThis._mhuUploadManagerRef = null;
+    }
+    return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
+  }
+  uploadRecoveryStates.set(_thisManager, recovery);
   for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
   _thisManager.sourceFileCleanup = sourceCleanup;
   const _producerTracker = trackUploadProducer(_thisManager);
@@ -2989,6 +2989,14 @@ ipcMain.on('app:close-handshake-ready', (event) => {
     closeHandshakeReady = true;
     if (startupRecoveryCoordinator) startupRecoveryCoordinator.rendererReady();
   }
+});
+
+ipcMain.on('app:renderer-initialization-failed', (event, details) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+  const message = details && typeof details.message === 'string' ? details.message : 'Renderer initialization failed';
+  _writeCrashLog('RENDERER INITIALIZATION FAILED', new Error(message), details);
+  debugLog(`RENDERER INITIALIZATION FAILED: ${message}`);
+  if (startupRecoveryCoordinator) void startupRecoveryCoordinator.rendererInitializationFailed(details);
 });
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {

@@ -150,8 +150,10 @@ test('close readiness is signaled only after the renderer explicitly finishes in
   assert.deepEqual(sent, [['app:close-preparation-started', 7]]);
 
   exposedApi.signalCloseHandshakeReady();
+  exposedApi.signalRendererInitializationFailed({ message: 'init failed' });
   assert.deepEqual(sent, [
     ['app:close-preparation-started', 7],
-    ['app:close-handshake-ready']
+    ['app:close-handshake-ready'],
+    ['app:renderer-initialization-failed', { message: 'init failed' }]
   ]);
 });

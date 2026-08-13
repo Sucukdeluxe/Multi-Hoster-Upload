@@ -28,6 +28,7 @@ test('main process wires bounded startup recovery into real load and crash paths
   assert.match(source, /createStartupRecoveryCoordinator/);
   assert.match(source, /startupRecoveryCoordinator\.loadInitial/);
   assert.match(source, /startupRecoveryCoordinator\.rendererCrashed/);
+  assert.match(source, /startupRecoveryCoordinator\.rendererInitializationFailed/);
   assert.match(source, /startupRecoveryCoordinator\.rendererReady/);
   assert.match(source, /createStartupFailureDocument/);
 });
@@ -282,6 +283,32 @@ test('renderer crash recovery reloads once and cannot enter an infinite reload l
     details: crashes[1]
   }]);
   assert.equal(revealCalls, 1);
+});
+
+test('renderer initialization failures share the bounded recovery path', async () => {
+  const failures = [];
+  let reloadCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {}
+  });
+
+  await coordinator.rendererInitializationFailed({ message: 'first failure' });
+  await coordinator.rendererInitializationFailed({ message: 'second failure' });
+
+  assert.equal(reloadCalls, 1);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-initialization',
+    attempt: 2,
+    details: { message: 'second failure' }
+  }]);
 });
 
 test('a successful renderer ready event reveals content and resets crash recovery', async () => {

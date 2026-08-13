@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('api', {
     });
   },
   signalCloseHandshakeReady: () => ipcRenderer.send('app:close-handshake-ready'),
+  signalRendererInitializationFailed: (details) => ipcRenderer.send('app:renderer-initialization-failed', details),
 
   // Always on top
   setAlwaysOnTop: (value) => ipcRenderer.invoke('set-always-on-top', value),

@@ -90,6 +90,7 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   assert.match(startFailure, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveUploadRecovery\(null\)/);
   const startHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('start-upload'"), mainSource.indexOf("ipcMain.handle('cancel-upload'"));
   assert.match(startHandler, /await configStore\.saveUploadRecovery\(recovery\)/);
+  assert.ok(startHandler.indexOf('sourceCleanup.registerGroups(sourceCleanupGroups)') < startHandler.indexOf('saveUploadRecovery(recovery)'));
   assert.match(startHandler, /catch \(error\)[\s\S]*return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' }/);
   const addHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'"), mainSource.indexOf("ipcMain.handle('finish-after-active'"));
   assert.match(addHandler, /await configStore\.saveUploadRecovery\(nextRecovery\)/);
