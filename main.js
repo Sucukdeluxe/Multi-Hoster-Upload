@@ -27,7 +27,8 @@ const { walkFolderAsync } = require('./lib/file-discovery');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
-const { formatUploadLogLine, parseUploadLogLine } = require('./lib/upload-log');
+const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
+const { getUploadAuditLogPath, createUploadAuditWriter } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
@@ -495,12 +496,15 @@ function _flushRotLog() {
 }
 
 function getAllLogPaths() {
-  const upload = getLogFilePath();
+  const configuredUpload = getLogFilePath();
+  const uploadTarget = _resolveUploadLogTarget();
+  const upload = uploadTarget ? uploadTarget.path : configuredUpload;
   const debugPath = getDebugLogPath();
   const rot = getRotLogPath();
   const dir = path.dirname(debugPath);
   return {
     fileuploader: upload,
+    uploadAudit: _uploadAuditWriter.getActivePath() || getUploadAuditLogPath(upload),
     debug: debugPath,
     accountRotation: rot,
     doodstreamDebug: path.join(dir, 'doodstream-debug.log'),
@@ -774,13 +778,13 @@ function _invalidateUploadLogTargetCache() {
   _cachedUploadLogKey = '';
 }
 
-function _resolveUploadLogTarget() {
+function _resolveUploadLogTarget(excludedPath) {
   const primary = getLogFilePath();
   // The primary path already encodes the mode + date/session, so it changes
   // when the user toggles mode, daily rolls at midnight, or this is a new
   // process — cache invalidates naturally on path change.
   const key = primary;
-  if (_cachedUploadLogKey === key && _cachedUploadLogTarget) return _cachedUploadLogTarget;
+  if (_cachedUploadLogKey === key && _cachedUploadLogTarget && _cachedUploadLogTarget.path !== excludedPath) return _cachedUploadLogTarget;
 
   const commit = (t) => {
     _cachedUploadLogTarget = t;
@@ -789,22 +793,27 @@ function _resolveUploadLogTarget() {
   };
 
   // Try primary → desktop → userData, mirror the original fallback ladder.
-  try {
-    fs.mkdirSync(path.dirname(primary), { recursive: true });
-    return commit({ path: primary, isFallback: false });
-  } catch (err) {
-    debugLog(`uploadLog primary dir unavailable (${err.message})`);
+  if (primary !== excludedPath) {
+    try {
+      fs.mkdirSync(path.dirname(primary), { recursive: true });
+      return commit({ path: primary, isFallback: false });
+    } catch (err) {
+      debugLog(`uploadLog primary dir unavailable (${err.message})`);
+    }
   }
   const desktop = getSafeDesktopDir();
   if (desktop) {
     try {
       const p = buildFallbackLogName(desktop);
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      return commit({ path: p, isFallback: true });
+      if (p !== excludedPath) {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        return commit({ path: p, isFallback: true });
+      }
     } catch {}
   }
   try {
     const p = buildFallbackLogName(app.getPath('userData'));
+    if (p === excludedPath) return null;
     fs.mkdirSync(path.dirname(p), { recursive: true });
     return commit({ path: p, isFallback: true });
   } catch (err) {
@@ -818,6 +827,15 @@ function _resolveUploadLogTarget() {
 // the disk. 50 MB ≈ ~600k log lines, plenty for human inspection.
 const UPLOAD_LOG_MAX_BYTES = 50 * 1024 * 1024;
 const UPLOAD_LOG_MAX_BACKUPS = 3;
+const _uploadAuditWriter = createUploadAuditWriter({
+  fs,
+  path,
+  resolveUploadLogTarget: _resolveUploadLogTarget,
+  rotateLogFile: maybeRotateLogFile,
+  invalidateUploadLogTarget: _invalidateUploadLogTargetCache,
+  persistFallbackLogPath: _persistFallbackLogPath,
+  reportError: (label, error) => debugLog(`${label} audit append failed: ${error.message}`)
+});
 
 function _flushUploadLog() {
   if (_uploadLogWriting || _uploadLogBuffer.length === 0) return;
@@ -862,9 +880,9 @@ function _flushUploadLog() {
   });
 }
 
-function _persistFallbackLogPath(workingPath) {
+async function _persistFallbackLogPath(workingPath) {
   try {
-    if (!settingsImportGate.canStartUpload()) return;
+    if (!settingsImportGate.canStartUpload()) return false;
     const cfg = configStore.load();
     const gs = cfg.globalSettings || {};
     const mode = gs.logMode || 'single';
@@ -880,15 +898,17 @@ function _persistFallbackLogPath(workingPath) {
       const base = path.basename(workingPath);
       toSave = path.join(dir, stripModeStampFromFileName(base));
     }
-    if (gs.logFilePath === toSave) return;
+    if (gs.logFilePath === toSave) return true;
     gs.logFilePath = toSave;
     cfg.globalSettings = gs;
-    configStore.save({ globalSettings: gs }).catch(() => {});
+    await configStore.save({ globalSettings: gs });
     _invalidateUploadLogTargetCache();
     _invalidateLogSettings();
     safeSend('log-path-auto-updated', { logFilePath: toSave });
+    return true;
   } catch (err) {
     debugLog(`persist fallback logpath failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -916,25 +936,18 @@ function appendUploadLog(hoster, link, fileName) {
   }
 }
 
+async function appendUploadAuditLine(line, label) {
+  return _uploadAuditWriter.append(line, label);
+}
+
 async function appendSourceCleanupAudit(event) {
   debugLog(`source-cleanup: ${event.outcome} ${event.file} trigger=${event.trigger || '-'}`);
-  const line = `# SOURCE-CLEANUP ${JSON.stringify(event)}\r\n`;
-  const delays = [0, 100, 250];
-  for (const delay of delays) {
-    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-    const target = _resolveUploadLogTarget();
-    if (!target) continue;
-    try {
-      fs.mkdirSync(path.dirname(target.path), { recursive: true });
-      maybeRotateLogFile(target.path, UPLOAD_LOG_MAX_BYTES, UPLOAD_LOG_MAX_BACKUPS, debugLog);
-      await fs.promises.appendFile(target.path, line, 'utf-8');
-      return true;
-    } catch (error) {
-      _invalidateUploadLogTargetCache();
-      debugLog(`source-cleanup audit append failed: ${error.message}`);
-    }
-  }
-  return false;
+  return appendUploadAuditLine(`# SOURCE-CLEANUP ${JSON.stringify(event)}\r\n`, 'source-cleanup');
+}
+
+async function appendUploadPlanAudit(plan, mode) {
+  debugLog(`upload-plan: mode=${mode} files=${plan.fileCount} destinations=${plan.destinationCount} uploads=${plan.plannedUploadCount}`);
+  return appendUploadAuditLine(formatUploadPlanLogLine(new Date(), plan, mode), 'upload-plan');
 }
 
 function flattenHistoryForExport(history) {
@@ -2008,11 +2021,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
   const isAutoRetry = !!(payload && payload.isAutoRetry);
   const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
+  const batchPlan = summarizeBatchPlan({ files, hosters, jobs });
 
   // At 500+ jobs JSON.stringify blew up the debug log with MB-sized lines
   // per start-upload and added noticeable delay — log counts only.
-  logMarker('BATCH START', { files: files.length, hosters: hosters.length, jobs: jobs.length });
-  debugLog(`start-upload: files=${files.length}, hosters=${hosters.length}, jobs=${jobs.length}`);
+  logMarker('BATCH START', batchPlan);
+  debugLog(`start-upload: files=${batchPlan.fileCount}, hosters=${batchPlan.destinationCount}, jobs=${batchPlan.plannedUploadCount}`);
 
   const pick = makeAccountPicker(config);
   const tasks = jobs.length > 0
@@ -2037,6 +2051,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   debugLog(`  tasks built: ${tasks.length}`);
 
   if (tasks.length === 0) {
+    await appendUploadPlanAudit(batchPlan, 'start');
     const skippedSummary = stats.mergeSkippedIntoSummary({
       id: `skipped-${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -2052,6 +2067,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     setImmediate(() => safeSend('upload-batch-done', skippedSummary));
     return { started: true, taskCount: 0, skippedJobs };
   }
+
+  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
+  globalThis._mhuUploadManagerRef = uploadManager;
+  const _thisManager = uploadManager;
+
+  await appendUploadPlanAudit(batchPlan, 'start');
 
   const recovery = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2085,10 +2106,6 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // new upload; addJobs during a running batch keeps them).
   _jobLogCollector.clear();
 
-  // Pass hoster settings to the upload manager
-  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
-  globalThis._mhuUploadManagerRef = uploadManager;
-  const _thisManager = uploadManager;
   const sourceCleanup = createSourceFileCleanup({
     fs,
     path,
@@ -2101,8 +2118,10 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   try {
     sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
   } catch (error) {
-    uploadManager = null;
-    globalThis._mhuUploadManagerRef = null;
+    if (uploadManager === _thisManager) {
+      uploadManager = null;
+      globalThis._mhuUploadManagerRef = null;
+    }
     return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
   }
   for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
@@ -2351,6 +2370,7 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   if (!uploadManager || !uploadManager.running) {
     return { error: 'Kein Upload aktiv' };
   }
+  const batchManager = uploadManager;
   const config = configStore.load();
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
   const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
@@ -2361,19 +2381,23 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   const skippedJobs = jobs
     .filter(j => j && j.id && !taskJobIds.has(j.id))
     .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
-  const sourceCleanupFingerprints = uploadManager.sourceFileCleanup
-    ? await uploadManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
+  const sourceCleanupFingerprints = batchManager.sourceFileCleanup
+    ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
     : {};
-  if (uploadManager.sourceFileCleanup) {
-    for (const skipped of skippedJobs) uploadManager.sourceFileCleanup.markSkipped(skipped.jobId);
+  if (uploadManager !== batchManager || !batchManager.running) {
+    return { error: 'Kein Upload aktiv' };
+  }
+  if (batchManager.sourceFileCleanup) {
+    for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
   }
 
   if (tasks.length === 0) {
     debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
+    if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
     return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
   }
 
-  const addResult = uploadManager.addJobs(tasks);
+  const addResult = batchManager.addJobs(tasks);
   const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
   const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
     ? addResult.alreadyInBatchJobIds
@@ -2382,6 +2406,7 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   debugLog(
     `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
   );
+  if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
   return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
 });
 
@@ -2534,11 +2559,13 @@ ipcMain.handle('create-support-bundle', async () => {
         CreatedAt: new Date().toISOString()
       },
       sanitizedConfig: sanitizeConfig(cfg),
+      secrets: collectSecretValues(cfg),
       files: [
         { label: 'debug.log (last 5 MB)', path: paths.debug, maxBytes: 5 * 1024 * 1024 },
         { label: 'account-rotation.log (last 2 MB)', path: paths.accountRotation, maxBytes: 2 * 1024 * 1024 },
         { label: 'doodstream-debug.log (last 2 MB)', path: paths.doodstreamDebug, maxBytes: 2 * 1024 * 1024 },
         { label: 'crash.log', path: path.join(paths.logDir || path.dirname(paths.debug), 'crash.log'), maxBytes: 1 * 1024 * 1024 },
+        { label: 'upload-audit.log (last 2 MB)', path: paths.uploadAudit, maxBytes: 2 * 1024 * 1024 },
         { label: 'fileuploader.log (last 1 MB)', path: paths.fileuploader, maxBytes: 1 * 1024 * 1024 }
       ]
     });

@@ -328,6 +328,7 @@ let queueJobs = []; // { id, file, fileName, hoster, status, bytesUploaded, byte
 const _jobIndexById = new Map(); // id -> job (O(1) lookup)
 const _jobIndexByUploadId = new Map(); // uploadId -> job
 const selectedJobIds = new Set();
+let selectionAnchorJobId = null;
 let _sessionTotalBytes = 0; // Total bytes ever added to queue this session
 let _sessionUploadedBytes = 0; // Bytes fully uploaded this session (done jobs)
 const _sessionTrackedJobs = new Set(); // Job IDs already counted for totalBytes
@@ -1710,6 +1711,7 @@ function indexJob(job) {
 function removeJobFromIndex(job, keepCompletedKey) {
   _jobIndexById.delete(job.id);
   if (job.uploadId) _jobIndexByUploadId.delete(job.uploadId);
+  if (selectionAnchorJobId === job.id) selectionAnchorJobId = null;
   // Track deletion so handleProgress() won't re-create this job from stale callbacks
   _deletedJobIds.add(job.id);
   if (job.uploadId) _deletedJobIds.add(job.uploadId);
@@ -1755,7 +1757,9 @@ function applyQueueSelectionClasses() {
   const rows = tbody.getElementsByClassName('queue-row');
   for (let i = 0; i < rows.length; i++) {
     const tr = rows[i];
-    tr.classList.toggle('selected', selectedJobIds.has(tr.dataset.jobId));
+    const selected = selectedJobIds.has(tr.dataset.jobId);
+    tr.classList.toggle('selected', selected);
+    tr.setAttribute('aria-selected', String(selected));
   }
 }
 
@@ -1963,7 +1967,10 @@ function _getVisibleQueueJobs() {
 }
 
 function _normalizeQueueSelectionToVisible(visibleJobs = _getVisibleQueueJobs()) {
-  if (selectedJobIds.size === 0) return false;
+  if (selectedJobIds.size === 0) {
+    selectionAnchorJobId = null;
+    return false;
+  }
   const visibleIds = new Set(visibleJobs.map(job => job.id));
   let changed = false;
   for (const id of selectedJobIds) {
@@ -1971,6 +1978,9 @@ function _normalizeQueueSelectionToVisible(visibleJobs = _getVisibleQueueJobs())
       selectedJobIds.delete(id);
       changed = true;
     }
+  }
+  if (selectionAnchorJobId && !visibleIds.has(selectionAnchorJobId)) {
+    selectionAnchorJobId = selectedJobIds.values().next().value || null;
   }
   return changed;
 }
@@ -2230,10 +2240,13 @@ function handleRowClick(e, row) {
   if (e.ctrlKey || e.metaKey) {
     if (selectedJobIds.has(jobId)) selectedJobIds.delete(jobId);
     else selectedJobIds.add(jobId);
-  } else if (e.shiftKey && selectedJobIds.size > 0) {
+    selectionAnchorJobId = jobId;
+  } else if (e.shiftKey && (selectionAnchorJobId || selectedJobIds.size > 0)) {
     // Use sorted jobs cache for correct shift-click with virtual scrolling
     const sortedIds = _sortedJobsCache.map(j => j.id);
-    const lastIdx = sortedIds.findIndex(id => selectedJobIds.has(id));
+    const fallbackAnchor = selectedJobIds.values().next().value || null;
+    const anchorId = sortedIds.includes(selectionAnchorJobId) ? selectionAnchorJobId : fallbackAnchor;
+    const lastIdx = sortedIds.indexOf(anchorId);
     const curIdx = sortedIds.indexOf(jobId);
     if (lastIdx >= 0 && curIdx >= 0) {
       const from = Math.min(lastIdx, curIdx);
@@ -2243,6 +2256,7 @@ function handleRowClick(e, row) {
   } else {
     selectedJobIds.clear();
     selectedJobIds.add(jobId);
+    selectionAnchorJobId = jobId;
     // Single click on done job -> copy link
     const job = _jobIndexById.get(jobId);
     if (job && job.status === 'done' && job.result) {
@@ -2284,6 +2298,7 @@ function handleRowContextMenu(e, row) {
   if (!selectedJobIds.has(jobId)) {
     selectedJobIds.clear();
     selectedJobIds.add(jobId);
+    selectionAnchorJobId = jobId;
     applyQueueSelectionClasses();
     updateQueueActionButtons();
   }
@@ -2756,6 +2771,7 @@ document.addEventListener('keydown', (e) => {
         const visibleJobs = _getVisibleQueueJobs();
         selectedJobIds.clear();
         visibleJobs.forEach(j => selectedJobIds.add(j.id));
+        selectionAnchorJobId = visibleJobs[0]?.id || null;
         renderQueueTable();
       }
     }
@@ -2801,7 +2817,7 @@ async function handleContextAction(action) {
       const j = _jobIndexById.get(id);
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
     });
-    if (activeIds.length > 0) window.api.cancelSelectedJobs(activeIds);
+    if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
     const _deletedKeys = [];
     queueJobs = queueJobs.filter(j => {
       if (selectedJobIds.has(j.id)) {
@@ -2812,6 +2828,7 @@ async function handleContextAction(action) {
       return true;
     });
     selectedJobIds.clear();
+    selectionAnchorJobId = null;
     syncSelectedFilesFromQueue();
     suppressPreviewKeysStillSelected(_deletedKeys);
     renderQueueTable();
@@ -2822,13 +2839,16 @@ async function handleContextAction(action) {
     copyAllLinks();
   } else if (action === 'delete-all') {
     if (!queueJobs.length || !await showAppConfirm({ title: 'Alle Uploads entfernen?', message: `${queueJobs.length} ${queueJobs.length === 1 ? 'Upload wird' : 'Uploads werden'} aus der Liste entfernt.`, confirmText: 'Alle entfernen', danger: true })) return;
-    const activeIds = queueJobs
-      .filter(j => j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server')
-      .map(j => j.id);
-    if (activeIds.length > 0) window.api.cancelSelectedJobs(activeIds);
+    const hasActiveJobs = uploading || queueJobs.some(j => j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
+    if (hasActiveJobs) {
+      _cancelAutoRetry(true);
+      await window.api.cancelUpload();
+      uploading = false;
+    }
     queueJobs.forEach(j => removeJobFromIndex(j));
     queueJobs = [];
     selectedJobIds.clear();
+    selectionAnchorJobId = null;
     selectedFiles = [];
     syncSelectedFilesFromQueue();
     renderQueueTable();
@@ -2853,6 +2873,7 @@ async function handleContextAction(action) {
       return true;
     });
     selectedJobIds.clear();
+    selectionAnchorJobId = null;
     syncSelectedFilesFromQueue();
     renderQueueTable();
     if (queueJobs.length === 0) { selectedFiles = []; updateUploadView(); }
@@ -3564,6 +3585,7 @@ async function retrySelectedJobs() {
   // jobs the double render freezes the UI for multiple seconds.
   selectedJobIds.clear();
   retryJobs.forEach(j => selectedJobIds.add(j.id));
+  selectionAnchorJobId = retryJobs[0]?.id || null;
   persistQueueStateSoon();
   await startSelectedUpload(retryJobs);
 }
@@ -3575,13 +3597,16 @@ async function abortSelectedJobs() {
   queueJobs.forEach((job) => {
     if (!selectedJobIds.has(job.id)) return;
 
-    if (['preview', 'queued'].includes(job.status)) {
+    if (job.status === 'preview') {
       job.status = 'aborted';
       job.error = 'Abgebrochen';
       job.progress = 0;
       job.uploadId = null;
-    } else if (['getting-server', 'uploading', 'retrying'].includes(job.status)) {
+    } else if (['queued', 'getting-server', 'uploading', 'retrying'].includes(job.status)) {
       activeJobIds.push(job.id);
+      job.status = 'aborted';
+      job.error = 'Abgebrochen';
+      job.progress = 0;
     }
   });
 
@@ -3590,6 +3615,7 @@ async function abortSelectedJobs() {
   }
 
   selectedJobIds.clear();
+  selectionAnchorJobId = null;
   syncSelectedFilesFromQueue();
   renderQueueTable();
   updateQueueActionButtons();
@@ -4255,6 +4281,7 @@ async function _renderLogPathsList(el) {
     if (!paths || typeof paths !== 'object') { el.innerHTML = '<span class="hint">Pfade nicht verfügbar.</span>'; return; }
     const entries = [
       ['fileuploader', 'fileuploader.log'],
+      ['uploadAudit', 'upload-audit.log'],
       ['debug', 'debug.log'],
       ['accountRotation', 'account-rotation.log'],
       ['doodstreamDebug', 'doodstream-debug.log']
@@ -6629,7 +6656,7 @@ function renderRecentUploadsPanel(_appendOnly = false) {
         return;
       }
       // Clear queue selection when clicking in recent panel — class-toggle only.
-      if (selectedJobIds.size > 0) { selectedJobIds.clear(); applyQueueSelectionClasses(); updateQueueActionButtons(); }
+      if (selectedJobIds.size > 0) { selectedJobIds.clear(); selectionAnchorJobId = null; applyQueueSelectionClasses(); updateQueueActionButtons(); }
       const id = parseInt(tr.dataset.order, 10);
       if (e.ctrlKey || e.metaKey) {
         if (selectedRecentIds.has(id)) selectedRecentIds.delete(id);
@@ -7249,6 +7276,7 @@ function setupListeners() {
     if (e.target.closest('.view-main') && !e.target.closest('.queue-row') && !e.target.closest('.btn') && !e.target.closest('.context-menu') && !e.target.closest('.recent-files-panel')) {
       if (selectedJobIds.size > 0) {
         selectedJobIds.clear();
+        selectionAnchorJobId = null;
         renderQueueTable();
         updateQueueActionButtons();
       }
@@ -7658,6 +7686,7 @@ async function importUploadLog() {
 
   if (removed > 0) {
     selectedJobIds.clear();
+    selectionAnchorJobId = null;
     syncSelectedFilesFromQueue();
     rebuildJobIndex();
     renderQueueTable();

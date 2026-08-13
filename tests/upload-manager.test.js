@@ -1,7 +1,10 @@
 const { describe, it, mock, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('path');
 const { EventEmitter } = require('events');
+const { createSourceFileCleanup } = require('../lib/source-file-cleanup');
 
 // We need to mock fs.statSync and the hoster upload functions before requiring upload-manager
 // Use node:test mock.module (available in Node 22+)
@@ -397,6 +400,158 @@ describe('UploadManager', () => {
 
     await batchPromise;
     assert.ok(statuses.some((entry) => entry.jobId === 'selected-job' && entry.status === 'aborted'));
+  });
+
+  it('cancelJobs prevents a not-yet-spawned job from starting', async () => {
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const settled = new Map();
+    mgr.on('job-settled', (event) => settled.set(event.jobId, event.status));
+    const tasks = Array.from({ length: 101 }, (_, index) => ({
+      jobId: index === 100 ? 'late-cancelled-job' : `early-job-${index}`,
+      file: `/test/chunk-${index}.mp4`,
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      sourceCleanupToken: `cleanup-${index}`
+    }));
+
+    const batchPromise = mgr.startBatch(tasks);
+    mgr.cancelJobs(['late-cancelled-job']);
+    await batchPromise;
+
+    const lateCalls = mockUploadFile.mock.calls.filter((call) => call.arguments[1] === '/test/chunk-100.mp4');
+    assert.equal(lateCalls.length, 0);
+    assert.equal(settled.get('late-cancelled-job'), 'aborted');
+  });
+
+  it('cancel before startBatch prevents the reserved batch from uploading', async () => {
+    const mgr = new UploadManager({});
+    let summary = null;
+    mgr.on('batch-done', (value) => { summary = value; });
+
+    mgr.cancel();
+    await mgr.startBatch([{
+      jobId: 'prestart-cancelled-job',
+      file: '/test/prestart-cancelled.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      sourceCleanupToken: 'cleanup-prestart'
+    }]);
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(summary.succeeded, 0);
+  });
+
+  it('cancelJobs before startBatch prevents the reserved job from uploading', async () => {
+    const mgr = new UploadManager({});
+    let summary = null;
+    const settled = [];
+    mgr.on('batch-done', (value) => { summary = value; });
+    mgr.on('job-settled', (value) => settled.push(value));
+
+    mgr.cancelJobs(['prestart-selected-job']);
+    await mgr.startBatch([{
+      jobId: 'prestart-selected-job',
+      file: '/test/prestart-selected.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      sourceCleanupToken: 'cleanup-prestart-selected'
+    }]);
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(summary.succeeded, 0);
+    assert.equal(settled.at(-1).status, 'aborted');
+  });
+
+  it('cancelJobs rejects a late success from an uploader that ignores abort', async () => {
+    let releaseUpload;
+    mockUploadFile.mock.mockImplementation(async () => new Promise((resolve) => {
+      releaseUpload = () => resolve({ download_url: 'https://doodstream.com/d/late', embed_url: null, file_code: 'late' });
+    }));
+    const mgr = new UploadManager({});
+    const settled = [];
+    const progress = [];
+    let summary = null;
+    mgr.on('job-settled', (event) => settled.push(event));
+    mgr.on('progress', (event) => progress.push(event));
+    mgr.on('batch-done', (value) => { summary = value; });
+    const batchPromise = mgr.startBatch([{
+      jobId: 'late-success-job',
+      file: '/test/late-success.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      sourceCleanupToken: 'cleanup-late-success'
+    }]);
+
+    for (let index = 0; index < 50 && !releaseUpload; index++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    mgr.cancelJobs(['late-success-job']);
+    releaseUpload();
+    await batchPromise;
+
+    assert.equal(settled.at(-1).status, 'aborted');
+    assert.equal(progress.some(event => event.status === 'done'), false);
+    assert.equal(summary.succeeded, 0);
+  });
+
+  it('late success after cancellation stays blocked by the real source cleanup gate', async (t) => {
+    const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mhu-manager-cleanup-'));
+    const file = path.join(directory, 'source.bin');
+    await fs.promises.writeFile(file, Buffer.from('source-data'));
+    t.after(() => fs.promises.rm(directory, { recursive: true, force: true }));
+
+    let releaseUpload;
+    mockUploadFile.mock.mockImplementation(async () => new Promise((resolve) => {
+      releaseUpload = () => resolve({ download_url: 'https://doodstream.com/d/late-cleanup', embed_url: null, file_code: 'late-cleanup' });
+    }));
+
+    const audits = [];
+    const cleanup = createSourceFileCleanup({
+      fs,
+      path,
+      platform: process.platform,
+      isEnabled: () => true,
+      audit: (event) => audits.push(event),
+      journal: { plan: async () => {}, clear: async () => {} }
+    });
+    await cleanup.registerGroups([{
+      token: 'cleanup-late-seam',
+      file,
+      requiredHosters: ['doodstream.com'],
+      completedHosters: [],
+      jobs: [{ jobId: 'late-cleanup-job', file, hoster: 'doodstream.com', status: 'pending' }]
+    }]);
+
+    const mgr = new UploadManager({});
+    let settleChain = Promise.resolve();
+    let summary = null;
+    mgr.on('job-settled', (event) => {
+      settleChain = settleChain.then(() => cleanup.settle(event));
+    });
+    mgr.on('batch-done', (value) => { summary = value; });
+
+    const batchPromise = mgr.startBatch([{
+      jobId: 'late-cleanup-job',
+      file,
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      sourceCleanupToken: 'cleanup-late-seam'
+    }]);
+    for (let index = 0; index < 50 && !releaseUpload; index++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    mgr.cancelJobs(['late-cleanup-job']);
+    releaseUpload();
+    await batchPromise;
+    await settleChain;
+    const outcomes = await cleanup.finishBatch({ historyPersisted: true, queuePersisted: true });
+
+    assert.equal(summary.succeeded, 0);
+    assert.deepEqual(outcomes, ['blocked']);
+    assert.equal(audits.at(-1).outcome, 'blocked');
+    await fs.promises.access(file);
   });
 
   it('addJobs returns duplicate info and still runs newly queued jobs', async () => {

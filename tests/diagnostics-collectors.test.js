@@ -18,6 +18,7 @@ function makeFixture() {
   const fixtureZeta = ['WBHOOK', 'SECRET', 'TOKEN'].join('');
   const paths = {
     fileuploader: path.join(dir, 'fileuploader.log'),
+    uploadAudit: path.join(dir, 'upload-audit.log'),
     debug: path.join(dir, 'debug.log'),
     accountRotation: path.join(dir, 'account-rotation.log'),
     doodstreamDebug: path.join(dir, 'doodstream-debug.log'),
@@ -25,6 +26,7 @@ function makeFixture() {
     logDir: dir
   };
   fs.writeFileSync(paths.debug, `boot ok\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
+  fs.writeFileSync(paths.uploadAudit, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
   fs.writeFileSync(paths.doodstreamDebug, `api_key=${fixtureGamma} sess=abc\n`);
   fs.writeFileSync(paths.crashLog, 'CRASH at 12:00\n');
   const config = {
@@ -88,11 +90,26 @@ test('getHistory falls back to loadConfig().history when loadHistory is absent (
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
   const { collectors } = makeFixture();
   const dbg = collectors.readLog({ name: 'debug', tailKb: 64 });
+  const audit = collectors.readLog({ name: 'uploadAudit', tailKb: 64 });
   assert.ok(!dbg.content.includes('SECRETTOKEN123456'), 'value-scrub removes the live diag token from logs');
   assert.ok(!/Bearer abcdef123456/.test(dbg.content), 'pattern-scrub removes Authorization Bearer');
+  assert.equal(audit.name, 'uploadAudit');
+  assert.ok(!audit.content.includes('SECRETTOKEN123456'), 'source cleanup audit is readable only through the redacted diagnostics path');
   assert.equal(collectors.readLog({ name: 'doodstreamDebug' }).ok, false, 'doodstream-debug.log is not in the readable allowlist');
   assert.equal(collectors.readLog({ name: '../../etc/passwd' }).ok, false, 'arbitrary names are rejected (no path traversal)');
   assert.equal(collectors.readLog({ name: 'crash' }).name, 'crash');
+});
+
+test('rotated audit backups are listed and readable with the rotation naming convention', () => {
+  const { collectors, paths, fixtureAlpha } = makeFixture();
+  const backupPath = path.join(path.dirname(paths.uploadAudit), 'upload-audit.1.log');
+  fs.writeFileSync(backupPath, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
+  const listed = collectors.listLogs().files.find(file => file.name === 'uploadAudit');
+  assert.ok(listed.variants.some(variant => variant.backup === 1));
+  assert.ok(!collectors.listLogs().otherLogs.some(file => file.name === 'upload-audit.1.log'));
+  const backup = collectors.readLog({ name: 'uploadAudit', backup: 1, tailKb: 64 });
+  assert.equal(backup.path, backupPath);
+  assert.ok(!backup.content.includes(fixtureAlpha));
 });
 
 test('readLog grep is case-insensitive substring with | alternation, and is ReDoS-safe', () => {
