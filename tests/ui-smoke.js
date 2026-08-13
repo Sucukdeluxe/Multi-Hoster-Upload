@@ -31,7 +31,11 @@ const fs = require('fs');
 const net = require('net');
 const path = require('path');
 const ConfigStore = require(path.join(process.cwd(), 'lib', 'config-store'));
+const RemoteServer = require(path.join(process.cwd(), 'lib', 'remote-server'));
+const { listenOnLoopback, installLoopbackRemoteServerGuard } = require(path.join(process.cwd(), 'tests', 'support', 'ui-network-safety'));
 const updaterModule = require(path.join(process.cwd(), 'lib', 'updater'));
+const uiRemoteBindAddresses = [];
+installLoopbackRemoteServerGuard(RemoteServer, address => uiRemoteBindAddresses.push(address));
 let preparedUpdateMockCalls = 0;
 let launchedUpdateMockCalls = 0;
 let updateCheckMockCalls = 0;
@@ -534,28 +538,48 @@ setTimeout(async () => {
     check('Upload sidebar drops hidden selections when changing filters', uploadFilterState.active.selected.join('|') === 'ui-active-z');
 
     const uploadProgressMotion = await wc.executeJavaScript(\`(async () => {
-      const track = document.createElement('div');
-      track.className = 'progress-bar-bg';
-      track.style.cssText = 'position:fixed;left:20px;top:20px;width:300px;';
-      const fill = document.createElement('div');
-      fill.className = 'progress-bar-fill status-uploading';
-      fill.style.width = '10%';
-      track.append(fill);
-      document.body.append(track);
+      const table = document.createElement('table');
+      table.style.cssText = 'position:fixed;left:20px;top:20px;width:700px;';
+      const tbody = document.createElement('tbody');
+      const job = { id: 'ui-smooth-progress', file: 'C:/ui/smooth.bin', fileName: 'smooth.bin', hoster: 'byse.sx', status: 'uploading', bytesUploaded: 920, bytesTotal: 1000, speedKbs: 1, elapsed: 1, remaining: 1, progress: .92 };
+      tbody.innerHTML = buildRowHtml(job);
+      table.append(tbody);
+      document.body.append(table);
+      const row = tbody.querySelector('.queue-row');
+      const track = row.querySelector('.progress-bar-bg');
+      const fill = row.querySelector('.progress-bar-fill');
+      track.style.cssText = 'flex:none;width:400px;';
       const ratio = () => fill.getBoundingClientRect().width / track.getBoundingClientRect().width;
       const background = getComputedStyle(fill).backgroundImage;
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const start = ratio();
-      fill.style.width = '80%';
-      await new Promise(resolve => setTimeout(resolve, 70));
-      const middle = ratio();
-      await new Promise(resolve => setTimeout(resolve, 260));
+      job.progress = .924;
+      job.bytesUploaded = 924;
+      _updateRowInPlace(row, job);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const fractionalMiddle = ratio();
+      await new Promise(resolve => setTimeout(resolve, 240));
+      const fractionalEnd = ratio();
+      const fractionalLabel = row.querySelector('.progress-pct').textContent;
+      job.progress = .93;
+      job.bytesUploaded = 930;
+      _updateRowInPlace(row, job);
+      const nextFrames = [];
+      for (let frame = 0; frame < 12; frame++) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        nextFrames.push(ratio());
+      }
+      await new Promise(resolve => setTimeout(resolve, 240));
       const end = ratio();
-      track.remove();
-      return { background, start, middle, end };
+      table.remove();
+      return { background, start, fractionalMiddle, fractionalEnd, fractionalLabel, nextFrames, end };
     })()\`);
     check('Active upload progress uses the green success gradient', uploadProgressMotion.background === 'linear-gradient(90deg, rgb(117, 211, 155), rgb(156, 226, 184))');
-    check('Active upload progress visibly interpolates percentage changes', uploadProgressMotion.start > 0.08 && uploadProgressMotion.start < 0.12 && uploadProgressMotion.middle > uploadProgressMotion.start + 0.02 && uploadProgressMotion.middle < 0.78 && uploadProgressMotion.end > 0.78 && uploadProgressMotion.end < 0.82);
+    check('Active upload progress moves continuously before the rounded percentage changes', uploadProgressMotion.start > .919 && uploadProgressMotion.start < .921 && uploadProgressMotion.fractionalMiddle > uploadProgressMotion.start && uploadProgressMotion.fractionalMiddle < .924 && uploadProgressMotion.fractionalEnd > .923 && uploadProgressMotion.fractionalEnd < .925 && uploadProgressMotion.fractionalLabel === '92%');
+    const smoothFrameCount = uploadProgressMotion.nextFrames.slice(1).filter((value, index) => value > uploadProgressMotion.nextFrames[index] + .00001).length;
+    const monotonicFrames = uploadProgressMotion.nextFrames.every((value, index, values) => index === 0 || value >= values[index - 1] - .00001);
+    console.log('Upload progress frame trace: ' + [uploadProgressMotion.fractionalEnd, ...uploadProgressMotion.nextFrames, uploadProgressMotion.end].map(value => (value * 100).toFixed(3)).join(' -> '));
+    check('Active upload progress glides through the next whole percentage across real frames', uploadProgressMotion.nextFrames.length === 12 && smoothFrameCount >= 8 && monotonicFrames && uploadProgressMotion.nextFrames.at(-1) > uploadProgressMotion.fractionalEnd && uploadProgressMotion.nextFrames.at(-1) < .93 && uploadProgressMotion.end > .929 && uploadProgressMotion.end < .931);
 
     const uploadSelectionScope = await wc.executeJavaScript(\`(() => {
       const makeJob = (id, status) => ({ id, file: 'C:/ui/' + id + '.bin', fileName: id + '.bin', hoster: 'byse.sx', status, bytesUploaded: 0, bytesTotal: 1024, speedKbs: 0, elapsed: 0, remaining: 0, progress: status === 'done' ? 1 : 0 });
@@ -1279,10 +1303,8 @@ setTimeout(async () => {
     try { fs.unlinkSync(importPersistFailurePath); } catch {}
 
     const occupiedRemotePortServer = net.createServer();
-    await new Promise((resolve, reject) => {
-      occupiedRemotePortServer.once('error', reject);
-      occupiedRemotePortServer.listen(0, resolve);
-    });
+    await listenOnLoopback(occupiedRemotePortServer);
+    const occupiedRemoteBindAddress = occupiedRemotePortServer.address().address;
     const occupiedRemotePort = occupiedRemotePortServer.address().port;
     const configBeforeRemoteFailure = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
     const alwaysOnTopAfterRemoteFailure = !Boolean(configBeforeRemoteFailure.globalSettings.alwaysOnTop);
@@ -1309,6 +1331,7 @@ setTimeout(async () => {
 
     const generatedRemoteSettings = await wc.executeJavaScript('saveRemoteSettingsTracked(' + JSON.stringify({ ...restoredRemoteSettings, enabled: true, token: '' }) + ')');
     const generatedRemoteToken = generatedRemoteSettings?.settings?.token || '';
+    check('Electron UI smoke keeps every network listener on loopback', occupiedRemoteBindAddress === '127.0.0.1' && uiRemoteBindAddresses.length > 0 && uiRemoteBindAddresses.every(address => address === '127.0.0.1'));
     const canonicalRemoteAfterFullSave = await wc.executeJavaScript('(async () => { config.globalSettings = { ...(config.globalSettings || {}), remote: { ...' + JSON.stringify(restoredRemoteSettings) + ', enabled: false, token: "" } }; renderSettings(); const tokenInput = document.getElementById("remoteTokenInput"); if (tokenInput) tokenInput.value = ""; await saveSettings({ feedbackText: "Gespeichert" }); return config.globalSettings.remote?.token || ""; })()');
     const configAfterGeneratedTokenSave = JSON.parse(fs.readFileSync(activeConfigStore.filePath, 'utf-8'));
     check('Full settings save preserves the canonical remote token', generatedRemoteToken.length > 0 && canonicalRemoteAfterFullSave === generatedRemoteToken && configAfterGeneratedTokenSave.globalSettings.remote?.token === generatedRemoteToken);
