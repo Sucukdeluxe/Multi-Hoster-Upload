@@ -3176,34 +3176,16 @@ function _buildDiagnosticHandler() {
   };
 }
 
-function _getSuggestedRemoteHosts() {
-  const os = require('os');
-  const hosts = [];
-  try {
-    for (const entry of Object.values(os.networkInterfaces())) {
-      for (const net of (entry || [])) {
-        if (net && net.family === 'IPv4' && !net.internal && net.address) hosts.push(net.address);
-      }
-    }
-  } catch {}
-  return [...new Set(hosts)];
-}
-
 function _diagAllowlist(diag) {
   return Array.isArray(diag && diag.allowlist) ? diag.allowlist.map((x) => String(x).trim()).filter(Boolean) : [];
 }
 
-function _diagBindHost(diag) {
-  const mode = (diag && diag.bindMode) || 'local';
-  if (mode === 'network' && _diagAllowlist(diag).length > 0) return '0.0.0.0';
+function _diagBindHost() {
   return '127.0.0.1';
 }
 
-function _diagPublicHost(diag) {
-  const explicit = String((diag && diag.publicHost) || '').trim();
-  if (explicit) return explicit;
-  if (_diagBindHost(diag) === '127.0.0.1') return '127.0.0.1';
-  return _getSuggestedRemoteHosts()[0] || '127.0.0.1';
+function _diagPublicHost() {
+  return '127.0.0.1';
 }
 
 function buildDiagnosticCode(diag, fp) {
@@ -3255,11 +3237,11 @@ ipcMain.handle('diagnostics:get-settings', () => {
   return {
     enabled: !!diag.enabled,
     port: diag.port || 9110,
-    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
+    bindMode: 'local',
     bindAddress: _diagBindHost(diag),
-    publicHost: diag.publicHost || '',
+    publicHost: '127.0.0.1',
     allowlist: _diagAllowlist(diag),
-    suggestedHosts: _getSuggestedRemoteHosts(),
+    suggestedHosts: [],
     label: diag.label || require('os').hostname(),
     codeIssuedAt: diag.codeIssuedAt || 0,
     code: diag.token ? buildDiagnosticCode(diag) : ''
@@ -3274,11 +3256,9 @@ ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
     ...cur,
     enabled: !!(incoming && incoming.enabled),
     port: (incoming && Number(incoming.port)) || cur.port || 9110,
-    bindMode: (incoming && incoming.bindMode === 'network') ? 'network' : 'local',
-    publicHost: (incoming && incoming.publicHost !== null && incoming.publicHost !== undefined) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
-    allowlist: (incoming && Array.isArray(incoming.allowlist))
-      ? incoming.allowlist.map((x) => String(x).trim()).filter(Boolean)
-      : _diagAllowlist(cur),
+    bindMode: 'local',
+    publicHost: '127.0.0.1',
+    allowlist: [],
     label: (incoming && incoming.label !== null && incoming.label !== undefined) ? String(incoming.label) : cur.label
   };
   next.bindAddress = _diagBindHost(next);
