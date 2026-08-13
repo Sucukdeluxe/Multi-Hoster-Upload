@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const hosters = require('../lib/hosters');
+const DoodstreamUploader = require('../lib/doodstream-upload');
 const VoeUploader = require('../lib/voe-upload');
 const VidmolyUploader = require('../lib/vidmoly-upload');
 const originalUploadFile = hosters.uploadFile;
@@ -75,6 +76,21 @@ async function withUploaderMethods(Uploader, upload, operation) {
   } finally {
     Uploader.prototype.login = originalLogin;
     Uploader.prototype.upload = originalUpload;
+  }
+}
+
+async function withDoodstreamMethods(methods, operation) {
+  const originals = {};
+  for (const [name, method] of Object.entries(methods)) {
+    originals[name] = DoodstreamUploader.prototype[name];
+    DoodstreamUploader.prototype[name] = method;
+  }
+  try {
+    return await operation();
+  } finally {
+    for (const [name, method] of Object.entries(originals)) {
+      DoodstreamUploader.prototype[name] = method;
+    }
   }
 }
 
@@ -307,6 +323,266 @@ test('recovery claims do not leak into a later batch on the same manager', async
 
   assert.equal(first.succeeded, 1);
   assert.equal(second.succeeded, 1);
+});
+
+test('VOE API and login auth paths share account-wide remote code claims', async () => {
+  const sharedCode = 'VOEALLAUTH01';
+  await withUploaderMethods(
+    VoeUploader,
+    async function () {
+      await new Promise(resolve => setImmediate(resolve));
+      return this._buildUrls(sharedCode);
+    },
+    async () => {
+      loadManager(async (hoster, file, apiKey, onProgress, signal, throttle, options) => {
+        const claim = options && options.recoveryClaim;
+        if (claim && !claim.reserve(sharedCode)) {
+          const error = new Error('Remote identity already claimed');
+          error.hosterTransient = true;
+          throw error;
+        }
+        return {
+          file_code: sharedCode,
+          download_url: `https://voe.sx/${sharedCode}`,
+          embed_url: `https://voe.sx/e/${sharedCode}`
+        };
+      });
+      const manager = new UploadManager(settings('voe.sx', 2));
+
+      const summary = await runBatch(manager, [
+        {
+          jobId: 'voe-login-auth',
+          file: firstPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_SHARED_ACCOUNT',
+          username: 'account@example.test',
+          password: 'password'
+        },
+        {
+          jobId: 'voe-api-auth',
+          file: distinctPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_SHARED_ACCOUNT',
+          apiKey: 'VOE_API_KEY'
+        }
+      ]);
+
+      assert.equal(summary.succeeded, 1);
+      assert.equal(summary.failed, 1);
+    }
+  );
+});
+
+test('an uncertain VOE API upload blocks a later same-title login upload', async () => {
+  let markApiStarted;
+  let releaseApi;
+  let loginUploads = 0;
+  const apiStarted = new Promise(resolve => {
+    markApiStarted = resolve;
+  });
+  const apiGate = new Promise(resolve => {
+    releaseApi = resolve;
+  });
+  await withUploaderMethods(
+    VoeUploader,
+    async function () {
+      loginUploads++;
+      return this._buildUrls('UNSAFEVOELOGIN');
+    },
+    async () => {
+      loadManager(async () => {
+        markApiStarted();
+        await apiGate;
+        const error = new Error('VOE API result could not be confirmed');
+        error.remoteCommitUncertain = true;
+        throw error;
+      });
+      const manager = new UploadManager(settings('voe.sx', 2));
+      const batch = runBatch(manager, [
+        {
+          jobId: 'voe-api-uncertain',
+          file: firstPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_SHARED_ACCOUNT',
+          apiKey: 'VOE_API_KEY'
+        }
+      ]);
+
+      await waitFor(apiStarted, 500, 'VOE API upload did not start');
+      const added = manager.addJobs([
+        {
+          jobId: 'voe-login-later',
+          file: secondPath,
+          hoster: 'voe.sx',
+          accountId: 'VOE_SHARED_ACCOUNT',
+          username: 'account@example.test',
+          password: 'password'
+        }
+      ]);
+      assert.equal(added.added, 1);
+      releaseApi();
+      const summary = await batch;
+
+      assert.equal(summary.succeeded, 0);
+      assert.equal(summary.failed, 2);
+      assert.equal(loginUploads, 0);
+    }
+  );
+});
+
+test('a keyless Doodstream web ambiguity blocks a later same-title upload', async () => {
+  let markUploadStarted;
+  let releaseUpload;
+  let uploadCalls = 0;
+  const uploadStarted = new Promise(resolve => {
+    markUploadStarted = resolve;
+  });
+  const uploadGate = new Promise(resolve => {
+    releaseUpload = resolve;
+  });
+  await withDoodstreamMethods({
+    login: async function () {},
+    deriveApiKey: async function () {
+      return null;
+    },
+    upload: async function () {
+      uploadCalls++;
+      if (uploadCalls === 1) {
+        markUploadStarted();
+        await uploadGate;
+        const error = new Error('Doodstream returned an empty upload result');
+        error.hosterTransient = true;
+        error.diagnostic = { phase: 'upload-result' };
+        throw error;
+      }
+      return {
+        file_code: 'UNSAFE_DOOD_CODE',
+        download_url: 'https://doodstream.com/d/UNSAFE_DOOD_CODE',
+        embed_url: 'https://doodstream.com/e/UNSAFE_DOOD_CODE'
+      };
+    }
+  }, async () => {
+    loadManager();
+    const manager = new UploadManager(settings('doodstream.com', 2));
+    const batch = runBatch(manager, [
+      {
+        jobId: 'dood-web-uncertain',
+        file: firstPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_SHARED_ACCOUNT',
+        username: 'account@example.test',
+        password: 'password'
+      }
+    ]);
+
+    await waitFor(uploadStarted, 500, 'Doodstream web upload did not start');
+    const added = manager.addJobs([
+      {
+        jobId: 'dood-web-later',
+        file: secondPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_SHARED_ACCOUNT',
+        username: 'account@example.test',
+        password: 'password'
+      }
+    ]);
+    assert.equal(added.added, 1);
+    releaseUpload();
+    const summary = await batch;
+
+    assert.equal(summary.succeeded, 0);
+    assert.equal(summary.failed, 2);
+    assert.equal(uploadCalls, 1);
+  });
+});
+
+test('Doodstream key resolution is singleflight per account', async () => {
+  let releaseLogin;
+  let loginCalls = 0;
+  let deriveCalls = 0;
+  const loginGate = new Promise(resolve => {
+    releaseLogin = resolve;
+  });
+  await withDoodstreamMethods({
+    login: async function () {
+      loginCalls++;
+      await loginGate;
+    },
+    deriveApiKey: async function () {
+      deriveCalls++;
+      return 'DERIVED_DOOD_KEY';
+    }
+  }, async () => {
+    loadManager();
+    const manager = new UploadManager(settings('doodstream.com', 12));
+    const resolutions = Array.from({ length: 12 }, (_, index) => manager._resolveDoodstreamApiKey({
+      accountId: 'DOOD_SHARED_ACCOUNT',
+      username: `account-${index}@example.test`,
+      password: 'password'
+    }));
+    const queuedLoginCalls = loginCalls;
+
+    releaseLogin();
+    const keys = await Promise.all(resolutions);
+
+    assert.equal(queuedLoginCalls, 1);
+    assert.equal(loginCalls, 1);
+    assert.equal(deriveCalls, 1);
+    assert.deepEqual(keys, Array(12).fill('DERIVED_DOOD_KEY'));
+  });
+});
+
+test('Doodstream web and API auth paths use one canonical account claim identity', async () => {
+  const sharedCode = 'DOODALLAUTH01';
+  await withDoodstreamMethods({
+    login: async function () {},
+    deriveApiKey: async function () {
+      return null;
+    },
+    upload: async function () {
+      await new Promise(resolve => setImmediate(resolve));
+      return {
+        file_code: sharedCode,
+        download_url: `https://doodstream.com/d/${sharedCode}`,
+        embed_url: `https://doodstream.com/e/${sharedCode}`
+      };
+    }
+  }, async () => {
+    loadManager(async (hoster, file, apiKey, onProgress, signal, throttle, options) => {
+      if (!options.recoveryClaim.reserve(sharedCode)) {
+        const error = new Error('Remote identity already claimed');
+        error.hosterTransient = true;
+        throw error;
+      }
+      return {
+        file_code: sharedCode,
+        download_url: `https://doodstream.com/d/${sharedCode}`,
+        embed_url: `https://doodstream.com/e/${sharedCode}`
+      };
+    });
+    const manager = new UploadManager(settings('doodstream.com', 2));
+
+    const summary = await runBatch(manager, [
+      {
+        jobId: 'dood-web-auth',
+        file: firstPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_SHARED_ACCOUNT',
+        username: 'account@example.test',
+        password: 'password'
+      },
+      {
+        jobId: 'dood-api-auth',
+        file: distinctPath,
+        hoster: 'doodstream.com',
+        accountId: 'DOOD_SHARED_ACCOUNT',
+        apiKey: 'DOOD_API_KEY'
+      }
+    ]);
+
+    assert.equal(summary.succeeded, 1);
+    assert.equal(summary.failed, 1);
+  });
 });
 
 for (const scenario of [

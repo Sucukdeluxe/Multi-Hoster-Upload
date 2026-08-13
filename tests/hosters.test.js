@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { __test, createRecoveryClaimRegistry } = require('../lib/hosters');
+const { __test, createRecoveryClaimRegistry, normalizeRecoveryTitle } = require('../lib/hosters');
 
 describe('hosters helpers', () => {
   it('extracts VOE file_code from nested result payloads', () => {
@@ -96,6 +96,19 @@ describe('hosters helpers', () => {
 });
 
 describe('recovery claim registry', () => {
+  it('keeps symbol-only titles distinct while matching Unicode-equivalent forms', () => {
+    const gear = normalizeRecoveryTitle('⚙.mkv');
+    const emojiGear = normalizeRecoveryTitle('⚙️.mp4');
+    const fire = normalizeRecoveryTitle('🔥.mkv');
+    const joined = normalizeRecoveryTitle('👩‍💻.mkv');
+    const unjoined = normalizeRecoveryTitle('👩💻.mkv');
+
+    assert.ok(gear);
+    assert.equal(emojiGear, gear);
+    assert.notEqual(fire, gear);
+    assert.notEqual(joined, unjoined);
+  });
+
   it('claims remote codes across every title of one normalized hoster account', () => {
     const registry = createRecoveryClaimRegistry();
     const first = registry.forUpload(' VOE.SX ', 'ＡＣＣＯＵＮＴ', 'First Episode.mkv');
