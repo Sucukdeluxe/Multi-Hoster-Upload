@@ -107,4 +107,6 @@ test('main process keeps diagnostics local and fails closed at its final reply b
   assert.match(source, /function _diagAllowlist\(\)\s*{\s*return \[\]/);
   assert.match(source, /bindMode: 'local'/);
   assert.match(source, /catch\s*{\s*result = { ok: false, error: 'diagnostic response could not be safely returned' }/);
+  assert.match(source, /loadConfig:\s*\(\)\s*=>\s*configStore\.loadDiagnosticsConfig\(\)/);
+  assert.match(source, /loadHistory:\s*\(\)\s*=>\s*configStore\.loadDiagnosticsHistory\(\)/);
 });

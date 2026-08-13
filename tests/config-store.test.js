@@ -666,6 +666,47 @@ describe('ConfigStore', () => {
     assert.equal(config.hosters['doodstream.com'][0].apiKey, 'from-backup');
   });
 
+  it('strict diagnostics config loading rejects primary failures while normal loading keeps recovery', () => {
+    assert.equal(typeof store.loadDiagnosticsConfig, 'function');
+
+    fs.writeFileSync(store.filePath + '.bak', JSON.stringify({
+      hosters: { 'doodstream.com': [{ id: 'bak-1', authType: 'api', apiKey: 'from-backup' }] },
+      hosterSettings: {},
+      globalSettings: {},
+      history: []
+    }), 'utf-8');
+    fs.writeFileSync(store.filePath, '{broken-config', 'utf-8');
+
+    assert.equal(store.load().hosters['doodstream.com'][0].apiKey, 'from-backup');
+    assert.throws(() => store.loadDiagnosticsConfig());
+
+    fs.rmSync(store.filePath);
+    assert.equal(store.load().globalSettings.language, 'en');
+    assert.throws(() => store.loadDiagnosticsConfig());
+  });
+
+  it('strict diagnostics config loading decrypts current credentials and propagates decryption failures', () => {
+    assert.equal(typeof store.loadDiagnosticsConfig, 'function');
+
+    const encrypted = `enc:v1:${Buffer.from('test-protected:diagnostic-secret').toString('base64')}`;
+    fs.writeFileSync(store.filePath, JSON.stringify({
+      hosters: { 'doodstream.com': [{ id: 'diag-1', authType: 'api', apiKey: encrypted }] },
+      hosterSettings: {},
+      globalSettings: {},
+      history: []
+    }), 'utf-8');
+
+    assert.equal(store.loadDiagnosticsConfig().hosters['doodstream.com'][0].apiKey, 'diagnostic-secret');
+
+    const originalDecryptString = safeStorage.decryptString;
+    safeStorage.decryptString = () => { throw new Error('diagnostic decrypt failure'); };
+    try {
+      assert.throws(() => store.loadDiagnosticsConfig(), /Gespeicherte Zugangsdaten konnten nicht entschlüsselt werden/);
+    } finally {
+      safeStorage.decryptString = originalDecryptString;
+    }
+  });
+
   it('wipe-guard: a settings-only save recovers accounts from .bak when the live config validly has none', async () => {
     // Post-wipe state: live config parses fine but has empty hosters; a backup still holds the accounts.
     fs.writeFileSync(store.filePath, JSON.stringify({ hosters: {}, hosterSettings: {}, globalSettings: {}, history: [] }), 'utf-8');
@@ -728,6 +769,46 @@ describe('ConfigStore history split (electron-history.json)', () => {
     s._migrateHistory();
     assert.deepEqual(s.load().history, [], 'history is not carried in the always-loaded config');
     assert.equal(s.loadHistory().length, 30);
+  });
+
+  it('strict diagnostics history accepts valid empty history and rejects failed or corrupt dedicated reads', () => {
+    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
+    writeConfigWithHistory(7);
+    s._migrateHistory();
+
+    fs.writeFileSync(s.historyPath, '[]', 'utf-8');
+    assert.deepEqual(s.loadDiagnosticsHistory(), []);
+
+    for (const invalidHistory of ['null', '{}', '{"history":null}', '{broken-history']) {
+      fs.writeFileSync(s.historyPath, invalidHistory, 'utf-8');
+      assert.throws(() => s.loadDiagnosticsHistory());
+    }
+
+    fs.rmSync(s.historyPath);
+    fs.mkdirSync(s.historyPath);
+    assert.throws(() => s.loadDiagnosticsHistory());
+  });
+
+  it('strict diagnostics history never falls back to stale config history when a dedicated file exists', () => {
+    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
+    writeConfigWithHistory(7);
+    fs.writeFileSync(s.historyPath, 'null', 'utf-8');
+
+    assert.equal(s._historyMigrated, false);
+    assert.equal(s.loadHistory().length, 7);
+    assert.throws(() => s.loadDiagnosticsHistory());
+  });
+
+  it('strict diagnostics history preserves the valid pre-migration history path', () => {
+    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
+    writeConfigWithHistory(7);
+
+    assert.equal(s.loadDiagnosticsHistory().length, 7);
+
+    const config = JSON.parse(fs.readFileSync(s.filePath, 'utf-8'));
+    config.history = null;
+    fs.writeFileSync(s.filePath, JSON.stringify(config), 'utf-8');
+    assert.throws(() => s.loadDiagnosticsHistory());
   });
 
   it('appendHistory writes to history.json; the next config write strips stale history from the config file', async () => {

@@ -3246,8 +3246,8 @@ function _diagAgentInfo() {
 
 function _buildDiagnosticHandler() {
   const collectors = createCollectors({
-    loadConfig: () => configStore.load(),
-    loadHistory: () => configStore.loadHistory(),
+    loadConfig: () => configStore.loadDiagnosticsConfig(),
+    loadHistory: () => configStore.loadDiagnosticsHistory(),
     getAllLogPaths,
     support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
     stats,
