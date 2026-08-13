@@ -69,6 +69,103 @@ test('audit writer reports the actual fallback file after a failed primary write
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test('audit writer retries a safe target after sync or close durability failures', async (t) => {
+  const { createUploadAuditWriter } = require('../lib/upload-audit');
+  for (const failedStage of ['sync', 'close']) {
+    await t.test(failedStage, async () => {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), `mhu-upload-audit-${failedStage}-`));
+      const primaryLog = path.join(directory, 'primary', 'fileuploader.log');
+      const fallbackLog = path.join(directory, 'fallback', 'fileuploader.log');
+      const primaryAudit = path.join(directory, 'primary', 'upload-audit.log');
+      const fallbackAudit = path.join(directory, 'fallback', 'upload-audit.log');
+      const syncCalls = [];
+      const closeCalls = [];
+      const reports = [];
+      const durabilityFs = {
+        ...fs,
+        promises: {
+          ...fs.promises,
+          open: async (targetPath, flags) => {
+            const handle = await fs.promises.open(targetPath, flags);
+            return {
+              appendFile: handle.appendFile.bind(handle),
+              sync: async () => {
+                syncCalls.push(targetPath);
+                if (targetPath === primaryAudit && failedStage === 'sync') throw new Error('controlled sync failure');
+                return handle.sync();
+              },
+              close: async () => {
+                closeCalls.push(targetPath);
+                await handle.close();
+                if (targetPath === primaryAudit && failedStage === 'close') throw new Error('controlled close failure');
+              }
+            };
+          }
+        }
+      };
+      const writer = createUploadAuditWriter({
+        fs: durabilityFs,
+        path,
+        resolveUploadLogTarget: excluded => {
+          if (!excluded.has(primaryLog)) return { path: primaryLog, isFallback: false };
+          if (!excluded.has(fallbackLog)) return { path: fallbackLog, isFallback: true };
+          return null;
+        },
+        rotateLogFile: () => {},
+        invalidateUploadLogTarget: () => {},
+        persistFallbackLogPath: async () => true,
+        reportError: (label, error) => reports.push({ label, message: error.message }),
+        retryDelays: [0, 0]
+      });
+
+      assert.equal(await writer.append('# UPLOAD-PLAN {}\r\n', 'upload-plan'), true);
+      assert.equal(writer.getActivePath(), fallbackAudit);
+      assert.deepEqual(syncCalls, [primaryAudit, fallbackAudit]);
+      assert.deepEqual(closeCalls, [primaryAudit, fallbackAudit]);
+      assert.equal(fs.readFileSync(fallbackAudit, 'utf8'), '# UPLOAD-PLAN {}\r\n');
+      assert.equal(reports.some(report => report.label === 'upload-plan' && report.message.includes(failedStage)), true);
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+  }
+});
+
+test('audit writer fails closed when no target can sync the appended bytes', async () => {
+  const { createUploadAuditWriter } = require('../lib/upload-audit');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-upload-audit-sync-exhausted-'));
+  const targets = ['first', 'second'].map(name => path.join(directory, name, 'fileuploader.log'));
+  const durabilityFs = {
+    ...fs,
+    promises: {
+      ...fs.promises,
+      open: async (targetPath, flags) => {
+        const handle = await fs.promises.open(targetPath, flags);
+        return {
+          appendFile: handle.appendFile.bind(handle),
+          sync: async () => { throw new Error(`controlled sync failure: ${targetPath}`); },
+          close: handle.close.bind(handle)
+        };
+      }
+    }
+  };
+  const writer = createUploadAuditWriter({
+    fs: durabilityFs,
+    path,
+    resolveUploadLogTarget: excluded => {
+      const targetPath = targets.find(candidate => !excluded.has(candidate));
+      return targetPath ? { path: targetPath, isFallback: true } : null;
+    },
+    rotateLogFile: () => {},
+    invalidateUploadLogTarget: () => {},
+    persistFallbackLogPath: async () => true,
+    reportError: () => {},
+    retryDelays: [0, 0]
+  });
+
+  assert.equal(await writer.append('# UPLOAD-PLAN {}\r\n', 'upload-plan'), false);
+  assert.equal(writer.getActivePath(), null);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test('audit writer rejects false and thrown fallback persistence before trying the next safe target', async (t) => {
   const { createUploadAuditWriter } = require('../lib/upload-audit');
   for (const rejection of ['false', 'throw']) {

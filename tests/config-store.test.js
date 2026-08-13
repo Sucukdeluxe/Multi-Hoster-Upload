@@ -513,6 +513,51 @@ describe('ConfigStore', () => {
     assert.equal(store.load().globalSettings.lastBrowseDirectory, selectedDirectory);
   });
 
+  it('merges the fallback log path after earlier queued settings without reverting them', async () => {
+    assert.equal(typeof store.saveFallbackLogPath, 'function');
+    await store.save({
+      globalSettings: {
+        alwaysOnTop: false,
+        webhookUrl: 'https://before.invalid',
+        logFilePath: ''
+      }
+    });
+
+    const originalAtomicWrite = store._atomicWrite.bind(store);
+    let releaseSettingsWrite;
+    let signalSettingsWriteStarted;
+    const settingsWriteStarted = new Promise(resolve => { signalSettingsWriteStarted = resolve; });
+    store._atomicWrite = (data) => {
+      const settings = JSON.parse(data).globalSettings;
+      if (!releaseSettingsWrite && settings.webhookUrl === 'https://concurrent.invalid') {
+        signalSettingsWriteStarted();
+        return new Promise((resolve, reject) => {
+          releaseSettingsWrite = () => originalAtomicWrite(data).then(resolve, reject);
+        });
+      }
+      return originalAtomicWrite(data);
+    };
+
+    const current = store.load();
+    const settingsSave = store.save({
+      globalSettings: {
+        ...current.globalSettings,
+        alwaysOnTop: true,
+        webhookUrl: 'https://concurrent.invalid'
+      }
+    });
+    await settingsWriteStarted;
+    const fallbackPath = path.join(tmpDir, 'fallback', 'fileuploader.log');
+    const fallbackSave = store.saveFallbackLogPath(fallbackPath);
+    releaseSettingsWrite();
+    await Promise.all([settingsSave, fallbackSave]);
+
+    const saved = store.load().globalSettings;
+    assert.equal(saved.alwaysOnTop, true);
+    assert.equal(saved.webhookUrl, 'https://concurrent.invalid');
+    assert.equal(saved.logFilePath, fallbackPath);
+  });
+
   it('merges remote settings in the write queue and returns the canonical token', async () => {
     await store.save({
       globalSettings: {
