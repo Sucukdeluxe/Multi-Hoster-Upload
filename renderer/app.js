@@ -60,6 +60,8 @@ let selectedUploadHosters = [];
 let config = { hosters: {}, hosterSettings: {}, globalSettings: {} };
 let hosterSettings = {};
 let uploading = false;
+let sourceCleanupFinalizationPending = false;
+let sourceCleanupRevocationPending = false;
 let healthCheckRunning = false;
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
@@ -445,16 +447,18 @@ async function init() {
   }
   window.api.onUploadBatchDone(async (data) => {
     const summary = data && data.summary ? data.summary : data;
-    handleBatchDone(summary);
-    if (data && data.finalizationId && window.api.completeUploadFinalization) {
-      if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
-      queuePersistThrottle.cancel();
-      await window.api.completeUploadFinalization({
-        finalizationId: data.finalizationId,
-        pendingQueue: queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
-          ? buildPersistedQueueState()
-          : null
-      });
+    const requiresFinalization = Boolean(data && data.finalizationId && window.api.completeUploadFinalization);
+    if (!requiresFinalization) {
+      handleBatchDone(summary);
+      return;
+    }
+    sourceCleanupFinalizationPending = true;
+    try {
+      handleBatchDone(summary, { deferPersistence: true });
+      await completeSourceCleanupFinalization(data);
+    } finally {
+      sourceCleanupFinalizationPending = false;
+      updateQueueActionButtons();
     }
   });
   window.api.onUploadStats((data) => {
@@ -1234,9 +1238,13 @@ function restoreQueueStateFromConfig() {
         failureDetails: job.failureDetails || null,
         interrupted: interruptedJobIds.size > 0 && !['done', 'error', 'skipped'].includes(job.status),
         result: job.result || null,
+        sourceCleanupMetadataVersion: job.sourceCleanupMetadataVersion === 2 ? 2 : null,
         sourceCleanupToken: job.sourceCleanupToken || null,
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
-        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
+        sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
+          ? [...job.sourceCleanupConfirmedHosters]
+          : [],
+        sourceCleanupProvisionalHosters: [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         attempt: 0,
         maxAttempts: job.maxAttempts || 0,
@@ -1311,9 +1319,12 @@ function buildPersistedQueueState() {
         error: isTerminal ? (job.error || null) : null,
         failureDetails: isTerminal ? (job.failureDetails || null) : null,
         result: isTerminal ? (job.result || null) : null,
+        sourceCleanupMetadataVersion: job.sourceCleanupToken ? 2 : null,
         sourceCleanupToken: job.sourceCleanupToken || null,
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
-        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
+        sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
+          ? [...job.sourceCleanupConfirmedHosters]
+          : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         maxAttempts: job.maxAttempts || 0
       };
@@ -1527,7 +1538,7 @@ function updateStartButton() {
   const hosters = getSelectedHosters();
   const hasQueuedJobs = queueJobs.some(isStartableQueueJob);
   const canBuildQueueFromSelection = selectedFiles.length > 0 && hosters.length > 0;
-  btn.disabled = uploading || !(hasQueuedJobs || canBuildQueueFromSelection);
+  btn.disabled = uploading || sourceCleanupFinalizationPending || !(hasQueuedJobs || canBuildQueueFromSelection);
 }
 
 const _UPLOAD_SELECTION_STATUSES = new Set(['done', 'error', 'aborted', 'skipped']);
@@ -1563,8 +1574,8 @@ function updateQueueActionButtons() {
   const moveDownBtn = document.getElementById('moveDownBtn');
   const moveBottomBtn = document.getElementById('moveBottomBtn');
 
-  if (startSelectedBtn) startSelectedBtn.disabled = uploading || !hasStartableSelection;
-  if (reuploadBtn) reuploadBtn.disabled = !hasUploadSelection;
+  if (startSelectedBtn) startSelectedBtn.disabled = uploading || sourceCleanupFinalizationPending || !hasStartableSelection;
+  if (reuploadBtn) reuploadBtn.disabled = sourceCleanupFinalizationPending || !hasUploadSelection;
   if (abortSelectedBtn) abortSelectedBtn.disabled = !hasAbortSelection;
   if (finishStopBtn) finishStopBtn.disabled = !uploading;
   if (abortAllBtn) abortAllBtn.disabled = !uploading;
@@ -2894,8 +2905,54 @@ function getSelectedJobLinks() {
 
 // --- Upload ---
 function prepareSourceCleanup(jobs) {
-  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [] };
-  return window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
+  if (!window.SourceCleanupPolicy) return { groups: [] };
+  const enabled = config.globalSettings?.deleteSourceAfterSuccessfulUpload === true;
+  const hasMetadata = Array.isArray(jobs) && jobs.some((job) => job?.sourceCleanupToken);
+  if (!enabled && !hasMetadata) return { groups: [] };
+  const preparation = window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
+  return enabled ? preparation : { ...preparation, groups: [] };
+}
+
+async function persistSourceCleanupRevocations(preparation) {
+  if (Array.isArray(preparation?.revokedHosters) && preparation.revokedHosters.length > 0) {
+    sourceCleanupRevocationPending = true;
+  }
+  if (!sourceCleanupRevocationPending) return;
+  queuePersistThrottle.cancel();
+  await persistQueueStateNow();
+  await flushConfigWrites();
+  sourceCleanupRevocationPending = false;
+}
+
+async function completeSourceCleanupFinalization(data) {
+  if (!data?.finalizationId || !window.api.completeUploadFinalization) return false;
+  if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
+  queuePersistThrottle.cancel();
+  let writesReady = true;
+  try {
+    await flushConfigWrites();
+  } catch {
+    writesReady = false;
+  }
+  const persist = async () => {
+    if (!writesReady) {
+      try {
+        await window.api.completeUploadFinalization({ finalizationId: data.finalizationId, ready: false });
+      } catch {}
+      return false;
+    }
+    return window.api.completeUploadFinalization({
+      finalizationId: data.finalizationId,
+      pendingQueue: queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
+        ? buildPersistedQueueState()
+        : null
+    });
+  };
+  if (!window.SourceCleanupPolicy?.persistRoundCompletions) return Boolean(await persist());
+  return window.SourceCleanupPolicy.persistRoundCompletions(queueJobs, {
+    historyPersisted: data.historyPersisted === true,
+    persist
+  });
 }
 
 function serializeUploadJob(job) {
@@ -2904,15 +2961,16 @@ function serializeUploadJob(job) {
     file: job.file,
     fileName: job.fileName,
     hoster: job.hoster,
+    sourceCleanupMetadataVersion: job.sourceCleanupToken ? 2 : null,
     sourceCleanupToken: job.sourceCleanupToken || null,
     sourceCleanupRequiredHosters: job.sourceCleanupRequiredHosters || [],
-    sourceCleanupCompletedHosters: job.sourceCleanupCompletedHosters || [],
+    sourceCleanupConfirmedHosters: job.sourceCleanupConfirmedHosters || [],
     sourceCleanupFingerprint: job.sourceCleanupFingerprint || null
   };
 }
 
 async function startUpload(opts) {
-  if (uploading) return;
+  if (uploading || sourceCleanupFinalizationPending) return;
   if (!(opts && opts._restoredAutoStart)) cancelStartupQueueAutoStart();
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
   else _cancelAutoRetry(false);
@@ -2950,6 +3008,7 @@ async function startUpload(opts) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
+    await persistSourceCleanupRevocations(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
@@ -2991,6 +3050,7 @@ function _markSkippedJobs(result) {
 }
 
 async function startSelectedUpload(explicitJobs) {
+  if (sourceCleanupFinalizationPending) return;
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();
@@ -3008,6 +3068,7 @@ async function startSelectedUpload(explicitJobs) {
       renderQueueTable();
       let result = null;
       try {
+        await persistSourceCleanupRevocations(cleanupPreparation);
         result = await window.api.addJobsToBatch({
           jobs: addable.map(serializeUploadJob),
           sourceCleanupGroups: cleanupPreparation.groups
@@ -3071,6 +3132,7 @@ async function startSelectedUpload(explicitJobs) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
+    await persistSourceCleanupRevocations(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
@@ -3237,7 +3299,7 @@ function _handleProgressImpl(data) {
   persistQueueStateSoon();
 }
 
-function handleBatchDone(summary) {
+function handleBatchDone(summary, options = {}) {
   uploading = false;
   applySummaryResults(summary);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
@@ -3312,8 +3374,10 @@ function handleBatchDone(summary) {
     }
   }
 
-  if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status))) persistQueueStateSoon(true);
-  else clearPersistedQueueStateSoon();
+  if (!options.deferPersistence) {
+    if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status))) persistQueueStateSoon(true);
+    else clearPersistedQueueStateSoon();
+  }
 
   lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: lastUploadStats.totalBytes, elapsed: lastUploadStats.elapsed, activeJobs: 0 };
   updateStatusBar();
@@ -3408,6 +3472,7 @@ function _maybeShowBatchSummary(summary) {
 }
 
 function _retryFailedFromBuckets(buckets, transientOnly) {
+  if (sourceCleanupFinalizationPending) return;
   const cats = transientOnly ? ['hoster-transient', 'network', 'unknown'] : ['hoster-transient', 'network', 'unknown', 'file-rejected', 'account-error'];
   const toRetry = [];
   for (const cat of cats) {
@@ -3540,6 +3605,7 @@ async function copyJobLogToClipboard() {
 
 // --- Retry ---
 async function retrySelectedJobs() {
+  if (sourceCleanupFinalizationPending) return;
   _normalizeQueueSelectionToVisible();
   const retryJobs = [];
   // Build a Set for O(1) selectedFiles dedup below.

@@ -122,7 +122,7 @@ let lastSessionSummary = null;
 let sourceDeleteJournal = null;
 const pendingUploadFinalizations = new Map();
 
-function requestUploadFinalization(summary) {
+function requestUploadFinalization(summary, historyPersisted) {
   const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -136,7 +136,7 @@ function requestUploadFinalization(summary) {
         resolve(value);
       }
     });
-    safeSend('upload-batch-done', { summary, finalizationId });
+    safeSend('upload-batch-done', { summary, finalizationId, historyPersisted: historyPersisted === true });
   });
 }
 const activeUploadProducerTrackers = new Set();
@@ -2276,7 +2276,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
-    const queuePersisted = await requestUploadFinalization(summary);
+    const queuePersisted = await requestUploadFinalization(summary, historyPersisted);
     try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
@@ -2978,6 +2978,10 @@ ipcMain.handle('complete-upload-finalization', async (_event, payload) => {
   const finalizationId = payload && payload.finalizationId;
   const pending = finalizationId && pendingUploadFinalizations.get(finalizationId);
   if (!pending) return false;
+  if (payload.ready === false) {
+    pending.resolve(false);
+    return false;
+  }
   try {
     await configStore.savePendingQueue(payload.pendingQueue ?? null);
     pending.resolve(true);

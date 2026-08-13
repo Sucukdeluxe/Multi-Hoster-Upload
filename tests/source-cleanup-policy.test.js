@@ -48,13 +48,13 @@ test('prepareGroups creates one Windows manifest with a stable token and immutab
     token: 'cleanup-1',
     file: 'C:\\Uploads\\Movie.MKV',
     requiredHosters: ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx'],
-    completedHosters: ['doodstream.com', 'voe.sx'],
+    confirmedHosters: [],
     fingerprint: null,
     jobs: [
-      { jobId: 'job-doodstream', hoster: 'doodstream.com', status: 'done' },
-      { jobId: 'job-voe', hoster: 'voe.sx', status: 'done' },
-      { jobId: 'job-vidmoly', hoster: 'vidmoly.me', status: 'error' },
-      { jobId: 'job-byse', hoster: 'byse.sx', status: 'preview' }
+      { jobId: 'job-doodstream', hoster: 'doodstream.com', status: 'done', currentRound: false },
+      { jobId: 'job-voe', hoster: 'voe.sx', status: 'done', currentRound: false },
+      { jobId: 'job-vidmoly', hoster: 'vidmoly.me', status: 'error', currentRound: true },
+      { jobId: 'job-byse', hoster: 'byse.sx', status: 'preview', currentRound: false }
     ]
   });
   assert.deepEqual(queueJobs.map((job) => job.sourceCleanupToken), [
@@ -74,11 +74,13 @@ test('prepareGroups creates one Windows manifest with a stable token and immutab
   assert.doesNotThrow(() => JSON.stringify(prepared.groups));
 });
 
-test('prepareGroups reuses persisted metadata across a partial retry', () => {
+test('prepareGroups reuses confirmed metadata across a partial retry', () => {
   const queueJobs = queueFixture();
   policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-1', 'win32');
-  queueJobs[0].sourceCleanupCompletedHosters = ['doodstream.com', 'voe.sx'];
-  queueJobs[1].sourceCleanupCompletedHosters = ['doodstream.com', 'voe.sx'];
+  for (const job of queueJobs) {
+    job.sourceCleanupMetadataVersion = 2;
+    job.sourceCleanupConfirmedHosters = ['doodstream.com', 'voe.sx'];
+  }
   queueJobs[0].status = 'preview';
   queueJobs[1].status = 'preview';
 
@@ -93,7 +95,7 @@ test('prepareGroups reuses persisted metadata across a partial retry', () => {
     'vidmoly.me',
     'byse.sx'
   ]);
-  assert.deepEqual(prepared.groups[0].completedHosters, ['doodstream.com', 'voe.sx']);
+  assert.deepEqual(prepared.groups[0].confirmedHosters, ['doodstream.com', 'voe.sx']);
   assert.equal(prepared.groups[0].jobs.find((job) => job.hoster === 'vidmoly.me').status, 'error');
 });
 
@@ -163,7 +165,7 @@ test('removeRequirement drops only an explicitly discarded unstarted hoster', ()
   }
 });
 
-test('markCompleted preserves successful hosters for later retries', () => {
+test('markCompleted keeps successful hosters provisional for the current round', () => {
   const queueJobs = queueFixture();
   policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-1', 'win32');
 
@@ -171,11 +173,8 @@ test('markCompleted preserves successful hosters for later retries', () => {
   policy.markCompleted(queueJobs, queueJobs[2], 'win32');
 
   for (const job of queueJobs) {
-    assert.deepEqual(job.sourceCleanupCompletedHosters, [
-      'doodstream.com',
-      'voe.sx',
-      'vidmoly.me'
-    ]);
+    assert.deepEqual(job.sourceCleanupConfirmedHosters, []);
+    assert.deepEqual(job.sourceCleanupProvisionalHosters, ['vidmoly.me']);
   }
 });
 
@@ -201,5 +200,129 @@ test('applyFingerprints attaches Main fingerprints by token and includes them in
   for (const job of queueJobs) {
     assert.deepEqual(job.sourceCleanupFingerprint, fingerprint);
     assert.notEqual(job.sourceCleanupFingerprint, fingerprint);
+  }
+});
+
+test('keeps round successes provisional until history and queue persistence succeed', async () => {
+  const queueJobs = [
+    { id: 'job-voe', file: 'C:\\Uploads\\Round.bin', hoster: 'voe.sx', status: 'preview' },
+    { id: 'job-byse', file: 'C:\\Uploads\\Round.bin', hoster: 'byse.sx', status: 'error' }
+  ];
+  policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-round', 'win32');
+  queueJobs[0].status = 'done';
+
+  policy.markCompleted(queueJobs, queueJobs[0], 'win32');
+
+  for (const job of queueJobs) {
+    assert.deepEqual(job.sourceCleanupConfirmedHosters, []);
+    assert.deepEqual(job.sourceCleanupProvisionalHosters, ['voe.sx']);
+  }
+
+  let persistedHosters = null;
+  const queuePersisted = await policy.persistRoundCompletions(queueJobs, {
+    historyPersisted: true,
+    persist: async () => {
+      persistedHosters = queueJobs.map((job) => [...job.sourceCleanupConfirmedHosters]);
+      return true;
+    }
+  });
+
+  assert.equal(queuePersisted, true);
+  assert.deepEqual(persistedHosters, [['voe.sx'], ['voe.sx']]);
+  for (const job of queueJobs) {
+    assert.deepEqual(job.sourceCleanupConfirmedHosters, ['voe.sx']);
+    assert.deepEqual(job.sourceCleanupProvisionalHosters, []);
+  }
+});
+
+test('rolls back provisional promotion when the final queue save fails', async () => {
+  const queueJobs = [
+    {
+      id: 'job-voe',
+      file: 'C:\\Uploads\\Partial.bin',
+      hoster: 'voe.sx',
+      status: 'done',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-partial',
+      sourceCleanupRequiredHosters: ['voe.sx', 'byse.sx'],
+      sourceCleanupConfirmedHosters: ['voe.sx']
+    },
+    {
+      id: 'job-byse',
+      file: 'C:\\Uploads\\Partial.bin',
+      hoster: 'byse.sx',
+      status: 'preview',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-partial',
+      sourceCleanupRequiredHosters: ['voe.sx', 'byse.sx'],
+      sourceCleanupConfirmedHosters: ['voe.sx']
+    }
+  ];
+  policy.prepareGroups(queueJobs, [queueJobs[1]], () => 'unused', 'win32');
+  queueJobs[1].status = 'done';
+  policy.markCompleted(queueJobs, queueJobs[1], 'win32');
+
+  const queuePersisted = await policy.persistRoundCompletions(queueJobs, {
+    historyPersisted: true,
+    persist: async () => false
+  });
+
+  assert.equal(queuePersisted, false);
+  for (const job of queueJobs) {
+    assert.deepEqual(job.sourceCleanupConfirmedHosters, ['voe.sx']);
+    assert.deepEqual(job.sourceCleanupProvisionalHosters, []);
+  }
+});
+
+test('ignores legacy v2.1.19 completed markers when preparing a retry', () => {
+  const queueJobs = [{
+    id: 'job-voe',
+    file: 'C:\\Uploads\\Legacy.bin',
+    hoster: 'voe.sx',
+    status: 'error',
+    sourceCleanupToken: 'cleanup-legacy',
+    sourceCleanupRequiredHosters: ['voe.sx'],
+    sourceCleanupCompletedHosters: ['voe.sx']
+  }];
+
+  const prepared = policy.prepareGroups(queueJobs, queueJobs, () => 'unused', 'win32');
+
+  assert.deepEqual(prepared.groups[0].confirmedHosters, []);
+  assert.equal(queueJobs[0].sourceCleanupMetadataVersion, 2);
+  assert.deepEqual(queueJobs[0].sourceCleanupConfirmedHosters, []);
+  assert.equal(Object.prototype.hasOwnProperty.call(queueJobs[0], 'sourceCleanupCompletedHosters'), false);
+});
+
+test('selecting a confirmed hoster for retry revokes its durable completion', () => {
+  const queueJobs = [
+    {
+      id: 'job-voe',
+      file: 'C:\\Uploads\\Retry.bin',
+      hoster: 'voe.sx',
+      status: 'preview',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-retry',
+      sourceCleanupRequiredHosters: ['voe.sx', 'byse.sx'],
+      sourceCleanupConfirmedHosters: ['voe.sx', 'byse.sx']
+    },
+    {
+      id: 'job-byse',
+      file: 'C:\\Uploads\\Retry.bin',
+      hoster: 'byse.sx',
+      status: 'done',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-retry',
+      sourceCleanupRequiredHosters: ['voe.sx', 'byse.sx'],
+      sourceCleanupConfirmedHosters: ['voe.sx', 'byse.sx']
+    }
+  ];
+
+  const prepared = policy.prepareGroups(queueJobs, [queueJobs[0]], () => 'unused', 'win32');
+
+  assert.deepEqual(prepared.groups[0].confirmedHosters, ['byse.sx']);
+  assert.equal(prepared.groups[0].jobs[0].currentRound, true);
+  assert.equal(prepared.groups[0].jobs[1].currentRound, false);
+  for (const job of queueJobs) {
+    assert.deepEqual(job.sourceCleanupConfirmedHosters, ['byse.sx']);
   }
 });

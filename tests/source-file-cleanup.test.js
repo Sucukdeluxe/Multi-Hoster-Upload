@@ -19,7 +19,7 @@ function group(file, overrides = {}) {
     token: 'cleanup-1',
     file,
     requiredHosters: ['voe.sx', 'byse.sx'],
-    completedHosters: [],
+    confirmedHosters: [],
     jobs: [
       { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending' },
       { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending' }
@@ -81,7 +81,7 @@ test('fingerprints a regular file and keeps the registered manifest immutable', 
   assert.equal(typeof fingerprints['cleanup-1'].ino, 'number');
 
   manifest.requiredHosters.splice(1, 1);
-  manifest.completedHosters.push('byse.sx');
+  manifest.confirmedHosters.push('byse.sx');
   manifest.jobs[1].hoster = 'voe.sx';
   await cleanup.settle({
     token: 'cleanup-1',
@@ -182,7 +182,13 @@ test('combines previous successes with a successful retry without relaxing other
   await t.test('last retry completes the immutable group', async (subtest) => {
     const { file } = await makeSource(subtest, 'retry-completes.bin');
     const { cleanup } = makeCleanup();
-    const manifest = group(file, { completedHosters: ['voe.sx'] });
+    const manifest = group(file, {
+      confirmedHosters: ['voe.sx'],
+      jobs: [
+        { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: false },
+        { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending', currentRound: true }
+      ]
+    });
     await cleanup.registerGroups([manifest]);
     await cleanup.settle({ token: 'cleanup-1', jobId: 'job-byse', file, hoster: 'byse.sx', status: 'done' });
 
@@ -196,11 +202,11 @@ test('combines previous successes with a successful retry without relaxing other
     const { cleanup, audits } = makeCleanup();
     const manifest = group(file, {
       requiredHosters: ['voe.sx', 'byse.sx', 'vidmoly.me'],
-      completedHosters: ['voe.sx'],
+      confirmedHosters: ['voe.sx'],
       jobs: [
-        { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done' },
-        { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending' },
-        { jobId: 'job-vidmoly', file, hoster: 'vidmoly.me', status: 'error' }
+        { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: false },
+        { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending', currentRound: true },
+        { jobId: 'job-vidmoly', file, hoster: 'vidmoly.me', status: 'error', currentRound: false }
       ]
     });
     await cleanup.registerGroups([manifest]);
@@ -466,4 +472,119 @@ test('rechecks the staged file and restores a replacement without deleting it', 
   assert.equal(unlinkCalls, 0);
   assert.equal((await fs.promises.readFile(file, 'utf-8')), 'replacement data');
   assert.equal(audits.at(-1).outcome, 'source-changed');
+});
+
+test('keeps the source after done, failed history persistence, and an aborted retry of the same hoster', async (t) => {
+  const { file } = await makeSource(t, 'history-barrier-retry.bin');
+  const firstRound = makeCleanup();
+  const firstManifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true }]
+  });
+  await firstRound.cleanup.registerGroups([firstManifest]);
+  await firstRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done' });
+
+  assert.deepEqual(await firstRound.cleanup.finishBatch({ historyPersisted: false, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+
+  const retryRound = makeCleanup();
+  const retryManifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    completedHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true }]
+  });
+  await retryRound.cleanup.registerGroups([retryManifest]);
+  await retryRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'aborted' });
+
+  assert.deepEqual(await retryRound.cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+});
+
+test('deletes after a persisted partial round and a successful retry of the remaining hoster', async (t) => {
+  const { file } = await makeSource(t, 'partial-round-retry.bin');
+  const firstRound = makeCleanup();
+  const firstManifest = group(file, {
+    jobs: [
+      { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true },
+      { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending', currentRound: true }
+    ]
+  });
+  await firstRound.cleanup.registerGroups([firstManifest]);
+  await firstRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done' });
+  await firstRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-byse', file, hoster: 'byse.sx', status: 'error' });
+
+  assert.deepEqual(await firstRound.cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+
+  const retryRound = makeCleanup();
+  const retryManifest = group(file, {
+    confirmedHosters: ['voe.sx'],
+    jobs: [
+      { jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: false },
+      { jobId: 'job-byse', file, hoster: 'byse.sx', status: 'pending', currentRound: true }
+    ]
+  });
+  await retryRound.cleanup.registerGroups([retryManifest]);
+  await retryRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-byse', file, hoster: 'byse.sx', status: 'done' });
+
+  assert.deepEqual(await retryRound.cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['deleted']);
+  assert.equal(await exists(file), false);
+});
+
+test('does not trust a legacy completion after a failed queue barrier and restart', async (t) => {
+  const { file } = await makeSource(t, 'queue-barrier-restart.bin');
+  const firstRound = makeCleanup();
+  const firstManifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true }]
+  });
+  await firstRound.cleanup.registerGroups([firstManifest]);
+  await firstRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done' });
+
+  assert.deepEqual(await firstRound.cleanup.finishBatch({ historyPersisted: true, queuePersisted: false }), ['blocked']);
+  assert.equal(await exists(file), true);
+
+  const restartedRound = makeCleanup();
+  const restartedManifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    completedHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true }]
+  });
+  await restartedRound.cleanup.registerGroups([restartedManifest]);
+  await restartedRound.cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'error' });
+
+  assert.deepEqual(await restartedRound.cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+});
+
+test('lets a current non-done retry override an earlier confirmed completion', async (t) => {
+  const { file } = await makeSource(t, 'confirmed-hoster-retry.bin');
+  const { cleanup, audits } = makeCleanup();
+  const manifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    confirmedHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done', currentRound: true }]
+  });
+  await cleanup.registerGroups([manifest]);
+  await cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'aborted' });
+
+  assert.deepEqual(await cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+  assert.deepEqual(audits[0].blockingStatuses, [{ hoster: 'voe.sx', status: 'aborted' }]);
+});
+
+test('re-registering a hoster for the current round invalidates its earlier current success', async (t) => {
+  const { file } = await makeSource(t, 'same-batch-retry.bin');
+  const { cleanup, audits } = makeCleanup();
+  const manifest = group(file, {
+    requiredHosters: ['voe.sx'],
+    jobs: [{ jobId: 'job-voe', file, hoster: 'voe.sx', status: 'pending', currentRound: true }]
+  });
+  await cleanup.registerGroups([manifest]);
+  await cleanup.settle({ token: 'cleanup-1', jobId: 'job-voe', file, hoster: 'voe.sx', status: 'done' });
+  await cleanup.registerGroups([manifest]);
+
+  assert.deepEqual(await cleanup.finishBatch({ historyPersisted: true, queuePersisted: true }), ['blocked']);
+  assert.equal(await exists(file), true);
+  assert.deepEqual(audits[0].blockingStatuses, [{ hoster: 'voe.sx', status: 'pending' }]);
 });
