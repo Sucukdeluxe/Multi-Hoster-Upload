@@ -648,6 +648,70 @@ describe('UploadManager', () => {
     assert.ok(statuses.some((entry) => entry.jobId === 'job-third' && entry.status === 'done'));
   });
 
+  it('accepts each job ID only once across concurrent addJobs calls', async () => {
+    const anchorPath = '/race/anchor.mp4';
+    const racePath = '/race/concurrent.mp4';
+    const originalStatSync = fs.statSync;
+    const originalStat = fs.promises.stat;
+    const pendingStats = [];
+    let concurrentStarts = 0;
+    let batchPromise;
+
+    fs.statSync = function(p) {
+      if (p === anchorPath || p === racePath) return { size: 0 };
+      return originalStatSync.call(this, p);
+    };
+    fs.promises.stat = function(p) {
+      if (p === anchorPath || p === racePath) {
+        return new Promise((resolve) => pendingStats.push({ path: p, resolve }));
+      }
+      return originalStat.call(this, p);
+    };
+
+    try {
+      mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+        if (filePath === racePath) concurrentStarts++;
+        if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+      });
+
+      const mgr = new UploadManager({
+        'doodstream.com': { retries: 0, parallelCount: 3, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+      });
+      const controllerRegistrations = [];
+      const registerController = mgr.jobAbortControllers.set;
+      mgr.jobAbortControllers.set = function(jobId, controller) {
+        if (jobId === 'job-concurrent') controllerRegistrations.push(controller);
+        return registerController.call(this, jobId, controller);
+      };
+
+      batchPromise = mgr.startBatch([
+        { jobId: 'job-anchor', file: anchorPath, hoster: 'doodstream.com', apiKey: 'k' }
+      ]);
+      assert.equal(mgr.running, true);
+
+      const task = { jobId: 'job-concurrent', file: racePath, hoster: 'doodstream.com', apiKey: 'k' };
+      const addResults = await Promise.all([
+        Promise.resolve().then(() => mgr.addJobs([task])),
+        Promise.resolve().then(() => mgr.addJobs([{ ...task }]))
+      ]);
+      const concurrentStats = pendingStats.filter((entry) => entry.path === racePath);
+      for (const entry of pendingStats) entry.resolve({ size: fakeFileSize });
+      await batchPromise;
+
+      assert.equal(addResults.reduce((total, result) => total + result.added, 0), 1);
+      assert.deepEqual(addResults.flatMap((result) => result.alreadyInBatchJobIds), ['job-concurrent']);
+      assert.equal(concurrentStats.length, 1);
+      assert.equal(controllerRegistrations.length, 1);
+      assert.equal(concurrentStarts, 1);
+    } finally {
+      for (const entry of pendingStats) entry.resolve({ size: fakeFileSize });
+      if (batchPromise) await batchPromise.catch(() => {});
+      fs.statSync = originalStatSync;
+      fs.promises.stat = originalStat;
+    }
+  });
+
   it('_combineSignals propagates abort from either source', () => {
     const mgr = new UploadManager({});
     const ac1 = new AbortController();
@@ -771,7 +835,7 @@ describe('UploadManager', () => {
     assert.ok(maxConcurrent <= 2, `scaleParallelUploads should cap at 2, was ${maxConcurrent}`);
   });
 
-  it('addJobs injects new tasks into running batch', async () => {
+  it('addJobs includes newly injected tasks in the batch summary', async () => {
     let started = 0;
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
       started++;
@@ -802,6 +866,9 @@ describe('UploadManager', () => {
     await batchPromise;
     assert.ok(summary);
     assert.equal(started, 4, 'all 4 jobs should have run');
+    assert.equal(summary.total, 4);
+    assert.equal(summary.succeeded, 4);
+    assert.equal(summary.failed, 0);
   });
 
   it('addJobs rejects duplicates already in running batch', async () => {
