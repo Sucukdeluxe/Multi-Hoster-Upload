@@ -11,6 +11,14 @@ test('packages every Electron preload referenced by the main process', () => {
   assert.equal(packageJson.build.win.signAndEditExecutable, false);
 });
 
+test('both release repositories run the real Electron UI audit in CI', () => {
+  for (const relativePath of ['.github/workflows/ci.yml', '.gitea/workflows/ci.yml']) {
+    const workflow = fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
+    assert.match(workflow, /RUN_UI_SMOKE:\s*['"]1['"]/);
+    assert.match(workflow, /run:\s*npm run verify/);
+  }
+});
+
 test('packaged identity is exact while public artifact routing remains stable', () => {
   assert.equal(packageJson.build.productName, 'Multi Hoster Uploader');
   assert.equal(packageJson.build.win.executableName, 'Multi Hoster Uploader');
