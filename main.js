@@ -40,6 +40,7 @@ const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { buildTerminalJobSnapshots } = require('./lib/upload-recovery');
+const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -982,8 +983,7 @@ function flattenHistoryForExport(history) {
       for (const result of results) {
         // Only accept real URLs. file_code alone is just an opaque ID and
         // ends up looking like "nur sone Nummerierung" in the CSV.
-        const rawLink = result && (result.download_url || result.embed_url) || '';
-        const link = /^https?:\/\//i.test(String(rawLink)) ? String(rawLink) : '';
+        const link = selectPublicUploadUrl(result);
         rows.push({
           batchId,
           batchTimestamp,
@@ -2158,7 +2158,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       });
     }
     if (data.status === 'done' && data.result) {
-      const link = data.result.download_url || data.result.embed_url || data.result.file_code || '';
+      const link = selectPublicUploadUrl(data.result);
       if (link) {
         if (shouldLogHosterToFile(data.hoster)) {
           appendUploadLog(data.hoster || '', link, data.fileName || '');

@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { assertUploadConfirmation } = require('../lib/upload-confirmation');
+const { assertUploadConfirmation, selectPublicUploadUrl } = require('../lib/upload-confirmation');
+
+test('selects only a real public URL for logs and exports', () => {
+  assert.equal(selectPublicUploadUrl({ download_url: 'https://doodstream.com/d/abc123', file_code: 'abc123' }), 'https://doodstream.com/d/abc123');
+  assert.equal(selectPublicUploadUrl({ embed_url: 'https://voe.sx/e/abc123', file_code: 'abc123' }), 'https://voe.sx/e/abc123');
+  assert.equal(selectPublicUploadUrl({ download_url: 'javascript:alert(1)', file_code: 'abc123' }), '');
+  assert.equal(selectPublicUploadUrl({ file_code: 'abc123' }), '');
+});
 
 test('materializes canonical Doodstream URLs from a confirmed file code', () => {
   assert.deepEqual(
