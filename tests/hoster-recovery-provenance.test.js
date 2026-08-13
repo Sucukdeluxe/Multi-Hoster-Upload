@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const VoeUploader = require('../lib/voe-upload');
 const VidmolyUploader = require('../lib/vidmoly-upload');
+const { createRecoveryClaimRegistry } = require('../lib/hosters');
 
 function response(body, status = 200, contentType = 'application/json') {
   return {
@@ -115,4 +116,74 @@ test('Vidmoly preserves a failed recovery baseline as a safe structured error', 
       return true;
     }
   );
+});
+
+test('VOE concurrent same-name recovery claims one remote entry only once', async () => {
+  const registry = createRecoveryClaimRegistry();
+  const first = new VoeUploader(registry.forUpload('voe.sx', 'ACCOUNT', 'Shared Episode.mkv'));
+  const second = new VoeUploader(registry.forUpload('voe.sx', 'ACCOUNT', 'shared-episode.mp4'));
+  const remoteFiles = [{ file_code: 'VOE_SHARED', title: 'shared episode' }];
+  first._fetchFileList = async () => remoteFiles;
+  second._fetchFileList = async () => remoteFiles;
+  first._sleep = async () => {};
+  second._sleep = async () => {};
+
+  const results = await Promise.all([
+    first._resolveUploadedFile('C:\\source-a\\Shared Episode.mkv', new Set(), null),
+    second._resolveUploadedFile('D:\\source-b\\shared-episode.mp4', new Set(), null)
+  ]);
+
+  assert.deepEqual(results.filter(Boolean).map(result => result.file_code), ['VOE_SHARED']);
+});
+
+test('VOE concurrent same-name recovery accepts distinct remote codes', async () => {
+  const registry = createRecoveryClaimRegistry();
+  const first = new VoeUploader(registry.forUpload('voe.sx', 'ACCOUNT', 'Shared Episode.mkv'));
+  const second = new VoeUploader(registry.forUpload('voe.sx', 'ACCOUNT', 'shared-episode.mp4'));
+  first._fetchFileList = async () => [{ file_code: 'VOE_FIRST', title: 'shared episode' }];
+  second._fetchFileList = async () => [{ file_code: 'VOE_SECOND', title: 'shared episode' }];
+  first._sleep = async () => {};
+  second._sleep = async () => {};
+
+  const results = await Promise.all([
+    first._resolveUploadedFile('C:\\source-a\\Shared Episode.mkv', new Set(), null),
+    second._resolveUploadedFile('D:\\source-b\\shared-episode.mp4', new Set(), null)
+  ]);
+
+  assert.deepEqual(results.map(result => result.file_code), ['VOE_FIRST', 'VOE_SECOND']);
+});
+
+test('Vidmoly concurrent same-name recovery claims one remote entry only once', async () => {
+  const registry = createRecoveryClaimRegistry();
+  const first = new VidmolyUploader(registry.forUpload('vidmoly.me', 'ACCOUNT', 'Shared Episode.mkv'));
+  const second = new VidmolyUploader(registry.forUpload('vidmoly.me', 'ACCOUNT', 'shared-episode.mp4'));
+  const remoteFiles = [{ file_code: 'VIDSHARED001', full_title: 'shared episode' }];
+  first._fetchVmList = async () => remoteFiles;
+  second._fetchVmList = async () => remoteFiles;
+  first._sleep = async () => {};
+  second._sleep = async () => {};
+
+  const results = await Promise.all([
+    first._resolveUploadedFileFromVmApi('C:\\source-a\\Shared Episode.mkv', new Set(), null),
+    second._resolveUploadedFileFromVmApi('D:\\source-b\\shared-episode.mp4', new Set(), null)
+  ]);
+
+  assert.deepEqual(results.filter(Boolean).map(result => result.file_code), ['VIDSHARED001']);
+});
+
+test('Vidmoly concurrent same-name recovery accepts distinct remote codes', async () => {
+  const registry = createRecoveryClaimRegistry();
+  const first = new VidmolyUploader(registry.forUpload('vidmoly.me', 'ACCOUNT', 'Shared Episode.mkv'));
+  const second = new VidmolyUploader(registry.forUpload('vidmoly.me', 'ACCOUNT', 'shared-episode.mp4'));
+  first._fetchVmList = async () => [{ file_code: 'VIDFIRST0001', full_title: 'shared episode' }];
+  second._fetchVmList = async () => [{ file_code: 'VIDSECOND001', full_title: 'shared episode' }];
+  first._sleep = async () => {};
+  second._sleep = async () => {};
+
+  const results = await Promise.all([
+    first._resolveUploadedFileFromVmApi('C:\\source-a\\Shared Episode.mkv', new Set(), null),
+    second._resolveUploadedFileFromVmApi('D:\\source-b\\shared-episode.mp4', new Set(), null)
+  ]);
+
+  assert.deepEqual(results.map(result => result.file_code), ['VIDFIRST0001', 'VIDSECOND001']);
 });
