@@ -6,7 +6,6 @@ const path = require('path');
 const support = require('../lib/support-bundle');
 const stats = require('../lib/stats');
 const { createCollectors } = require('../lib/diagnostics-collectors');
-const { createAgent } = require('../lib/diagnostics-agent');
 
 function makeFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-diag-'));
@@ -191,4 +190,19 @@ test('serverHealth assembles the one-shot hub without leaking secrets', () => {
   assert.ok(h.server && h.queue && h.errors && h.logs, 'hub has all sections');
   assert.ok(!json.includes('HUNTER2SECRET') && !json.includes('SECRETTOKEN123456') && !json.includes('WBHOOKSECRETTOKEN'), 'no secret leaks in server_health');
   assert.ok(!json.includes(dir) && !json.includes(paths.debug), 'server_health must not expose absolute log paths');
+});
+
+test('redactResponse scrubs configured secrets and absolute paths from arbitrary nested output', () => {
+  const { collectors, fixtureAlpha } = makeFixture();
+  const value = {
+    error: `token ${fixtureAlpha} at C:\\Users\\PrivateProfile\\secret.log`,
+    nested: [{ source: '\\\\?\\UNC\\private-server\\secret-share\\secret.log' }]
+  };
+  const out = collectors.redactResponse(value);
+  const json = JSON.stringify(out);
+  assert.ok(!json.includes(fixtureAlpha));
+  assert.ok(!json.includes('PrivateProfile'));
+  assert.ok(!json.includes('private-server'));
+  assert.match(json, /<redacted>/);
+  assert.match(json, /<redacted-path>/);
 });
