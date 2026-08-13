@@ -303,6 +303,50 @@ describe('UploadManager', () => {
     assert.equal(statuses.filter((status) => status === 'aborted').length, 0);
   });
 
+  it('cancels one selected job followed by all 100 active uploads without retaining resources', async () => {
+    let active = 0;
+    let started = 0;
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
+      started++;
+      active++;
+      await new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          active--;
+          reject(new Error('Aborted'));
+        }, { once: true });
+      });
+    });
+
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 100, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    }, { parallelUploadCount: 100 });
+    const tasks = Array.from({ length: 100 }, (_, index) => ({
+      jobId: `active-cancel-${index}`,
+      file: `/test/active-cancel-${index}.mp4`,
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }));
+    const batchPromise = mgr.startBatch(tasks);
+
+    for (let attempt = 0; attempt < 200 && started < 100; attempt++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(started, 100);
+    assert.equal(active, 100);
+
+    const cancelStartedAt = performance.now();
+    mgr.cancelJobs(['active-cancel-0']);
+    mgr.cancel();
+    await batchPromise;
+    const cancelDuration = performance.now() - cancelStartedAt;
+
+    assert.ok(cancelDuration < 1000, `cancel took ${cancelDuration.toFixed(1)}ms`);
+    assert.equal(active, 0);
+    assert.equal(mgr.running, false);
+    assert.equal(mgr.jobAbortControllers.size, 0);
+    assert.equal(mgr.statsInterval, null);
+  });
+
   it('maxSizeMb filter skips oversized files', async () => {
     fakeFileSize = 5 * 1024 * 1024; // 5 MB
 
