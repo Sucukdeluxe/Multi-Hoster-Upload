@@ -498,7 +498,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   font-size: 10px;
   font-weight: 600;
 }
-.status-badge.status-preview { color: var(--text-muted); }
+.status-badge.status-preview { color: var(--success); background: rgba(0, 184, 148, 0.15); }
 .status-badge.status-queued { color: var(--text-muted); background: rgba(255,255,255,0.05); }
 .status-badge.status-getting-server { color: var(--accent); }
 .status-badge.status-uploading { color: #5dabf7; background: rgba(93, 171, 247, 0.15); }
@@ -1735,40 +1735,6 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-  }
-
-  .tab-indicator {
-    transition-duration: 280ms !important;
-  }
-
-  .view-sidebar-indicator,
-  .settings-nav-indicator {
-    transition-duration: 220ms !important;
-  }
-
-  .language-picker-indicator {
-    transition-duration: 240ms !important;
-  }
-
-  .progress-bar-fill {
-    transition-duration: 360ms !important;
-  }
-
-  .menu-opening {
-    animation-duration: 180ms !important;
-  }
-
-  .menu-closing {
-    animation-duration: 160ms !important;
-  }
-
-  .account-collapse {
-    transition-duration: 220ms, 160ms, 0s !important;
-  }
-
-  .account-hoster-group-header .panel-arrow,
-  .account-hoster-settings-header .panel-arrow {
-    transition-duration: 180ms !important;
   }
 }
 
@@ -3089,8 +3055,7 @@ input[type="checkbox"] {
 .settings-nav-button {
   min-height: 36px;
   padding: 7px 10px;
-  border: 1px solid transparent;
-  border-left: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text-muted);
   font-size: 12px;
@@ -4004,13 +3969,9 @@ input[type="checkbox"] {
   }
 
   .upload-speed-sparkline {
-    width: 64px;
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .upload-speed-sparkline canvas {
-    display: none;
+    width: 118px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
   }
 
   .settings-layout {

@@ -119,6 +119,11 @@ test('rare account, backup, update, and confirmation states translate in both di
     ['Backup importiert', 'Backup imported'],
     ['Import fehlgeschlagen', 'Import failed'],
     ['Upload-Start fehlgeschlagen', 'Failed to start upload'],
+    ['Initialisierung fehlgeschlagen', 'Initialization failed'],
+    ['Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden', 'Import applied. The queue could not be saved completely'],
+    ['Jobs konnten nicht hinzugefügt werden', 'Jobs could not be added'],
+    ['Test fehlgeschlagen', 'Test failed'],
+    ['. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH).', '. Remote access is only available through a tunnel (for example, Tailscale/SSH).'],
     ['erneut versuchbar', 'retryable'],
     ['manuell', 'manual'],
     ['Abgebrochen.', 'Canceled.'],
@@ -144,12 +149,15 @@ test('interpolated rare errors translate without leaking German copy', () => {
   const cases = [
     ['Login ok, Upload-Form bereit (Dateifeld: file)', 'Login successful, upload form ready (file field: file)'],
     ['Klartext-Backup ist kein gültiges JSON: Unexpected token', 'Plain JSON backup is not valid JSON: Unexpected token'],
-    ['Export fehlgeschlagen: Zugriff verweigert', 'Export failed: Zugriff verweigert'],
-    ['Import fehlgeschlagen: Datei beschädigt', 'Import failed: Datei beschädigt'],
-    ['Initialisierung fehlgeschlagen: Konfiguration fehlt', 'Initialization failed: Konfiguration fehlt']
+    ['Export fehlgeschlagen: Zugriff verweigert', 'Export failed: Access denied'],
+    ['Import fehlgeschlagen: Datei beschädigt', 'Import failed: File is damaged'],
+    ['Initialisierung fehlgeschlagen: Konfiguration fehlt', 'Initialization failed: Configuration is missing']
   ];
 
-  for (const [german, english] of cases) assert.equal(translateText(german, 'en'), english, german);
+  for (const [german, english] of cases) {
+    assert.equal(translateText(german, 'en'), english, german);
+    assert.equal(translateText(english, 'de'), german, english);
+  }
 });
 
 test('main-process user-facing copy contains no mojibake', () => {

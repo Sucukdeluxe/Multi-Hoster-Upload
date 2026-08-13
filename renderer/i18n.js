@@ -24,6 +24,7 @@
     ['Maximale Größe (MB)', 'Maximum size (MB)'],
     ['Bildschirm und Eingabesteuerung bleiben gesperrt.', 'Screen and input control remain locked.'],
     ['Bindet nur an', 'Binds only to'],
+    ['. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH).', '. Remote access is only available through a tunnel (for example, Tailscale/SSH).'],
     ['Bindet an', 'Binds to'],
     ['. Nur IPs/CIDRs aus der Allowlist dürfen verbinden (Loopback immer) — zusätzlich zum Token. Über Tailscale: trage deinen Tailnet-Bereich ein (z.B.', '. Only IPs/CIDRs from the allowlist may connect (loopback is always allowed), in addition to the token. For Tailscale, enter your tailnet range, e.g.'],
     [') und die Tailscale-IP/MagicDNS oben als Code-Adresse. Transport ist plaintext über den Tunnel — Tailscale/WireGuard verschlüsselt.', ') and enter the Tailscale IP or MagicDNS name above as the code address. Transport is plaintext through the tunnel; Tailscale/WireGuard provides encryption.'],
@@ -472,6 +473,9 @@
     ['Kein gültiger Account für diesen Hoster', 'No valid account is available for this host'],
     ['Keine gültigen Zugangsdaten für die gewählten Hoster.', 'No valid credentials are available for the selected hosts.'],
     ['Unbekannter Fehler', 'Unknown error'],
+    ['Zugriff verweigert', 'Access denied'],
+    ['Datei beschädigt', 'File is damaged'],
+    ['Konfiguration fehlt', 'Configuration is missing'],
     ['Kein Log-Pfad gefunden', 'No log path was found'],
     ['Ungültige URL (muss mit http(s):// beginnen)', 'Invalid URL (must start with http(s)://)'],
     ['Backup-Datei ist zu groß oder ungültig', 'The backup file is too large or invalid'],
@@ -549,6 +553,10 @@
     ['Backup importiert', 'Backup imported'],
     ['Import fehlgeschlagen', 'Import failed'],
     ['Upload-Start fehlgeschlagen', 'Failed to start upload'],
+    ['Initialisierung fehlgeschlagen', 'Initialization failed'],
+    ['Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden', 'Import applied. The queue could not be saved completely'],
+    ['Jobs konnten nicht hinzugefügt werden', 'Jobs could not be added'],
+    ['Test fehlgeschlagen', 'Test failed'],
     ['erneut versuchbar', 'retryable'],
     ['manuell', 'manual'],
     ['Abgebrochen.', 'Canceled.'],
@@ -632,15 +640,19 @@
     const core = text.slice(leading.length, text.length - trailing.length);
     const exact = target === 'en' ? deToEn.get(core) : enToDe.get(core);
     if (exact) return `${leading}${exact}${trailing}`;
+    const translateErrorDetail = (detail) => {
+      const translated = target === 'en' ? deToEn.get(detail) : enToDe.get(detail);
+      return translated || (target === 'en' ? 'Unknown error' : 'Unbekannter Fehler');
+    };
     const patterns = target === 'en'
       ? [
           [/^Update v(.+) verfügbar$/, 'Update v$1 available'],
           [/^Wiederhergestellte Warteschlange startet in (.+) s \((.+) Jobs\)\.$/, 'Restored queue starts in $1 s ($2 jobs).'],
           [/^Login ok, Upload-Form bereit \(Dateifeld: (.+)\)$/, 'Login successful, upload form ready (file field: $1)'],
           [/^Klartext-Backup ist kein gültiges JSON: (.+)$/, 'Plain JSON backup is not valid JSON: $1'],
-          [/^Export fehlgeschlagen: (.+)$/, 'Export failed: $1'],
-          [/^Import fehlgeschlagen: (.+)$/, 'Import failed: $1'],
-          [/^Initialisierung fehlgeschlagen: (.+)$/, 'Initialization failed: $1'],
+          [/^Export fehlgeschlagen: (.+)$/, (_, detail) => `Export failed: ${translateErrorDetail(detail)}`],
+          [/^Import fehlgeschlagen: (.+)$/, (_, detail) => `Import failed: ${translateErrorDetail(detail)}`],
+          [/^Initialisierung fehlgeschlagen: (.+)$/, (_, detail) => `Initialization failed: ${translateErrorDetail(detail)}`],
           [/^Quelldatei-Schutz konnte nicht vorbereitet werden: (.+)$/, 'Source file protection could not be prepared: $1'],
           [/^Clouddrop: API-Antwort war kein JSON (.+)$/, 'Clouddrop: API response was not JSON $1'],
           [/^Clouddrop: Datei nicht lesbar: (.+)$/, 'Clouddrop: File cannot be read: $1'],
@@ -740,6 +752,11 @@
           [/^Update v(.+) verfügbar\. Klicken zum Installieren\.$/, 'Update v$1 available. Click to install.']
         ]
       : [
+          [/^Login successful, upload form ready \(file field: (.+)\)$/, 'Login ok, Upload-Form bereit (Dateifeld: $1)'],
+          [/^Plain JSON backup is not valid JSON: (.+)$/, 'Klartext-Backup ist kein gültiges JSON: $1'],
+          [/^Export failed: (.+)$/, (_, detail) => `Export fehlgeschlagen: ${translateErrorDetail(detail)}`],
+          [/^Import failed: (.+)$/, (_, detail) => `Import fehlgeschlagen: ${translateErrorDetail(detail)}`],
+          [/^Initialization failed: (.+)$/, (_, detail) => `Initialisierung fehlgeschlagen: ${translateErrorDetail(detail)}`],
           [/^Update v(.+) available$/, 'Update v$1 verfügbar'],
           [/^Sleep in (\d+)s\.\.\.$/, 'Ruhezustand in $1s...'],
           [/^Shut down in (\d+)s\.\.\.$/, 'Herunterfahren in $1s...'],
