@@ -35,6 +35,9 @@ const RemoteServer = require(path.join(process.cwd(), 'lib', 'remote-server'));
 const { listenOnLoopback, installLoopbackRemoteServerGuard } = require(path.join(process.cwd(), 'tests', 'support', 'ui-network-safety'));
 const updaterModule = require(path.join(process.cwd(), 'lib', 'updater'));
 const uiRemoteBindAddresses = [];
+const startupConfigPath = path.join(app.getPath('userData'), 'electron-config.json');
+fs.mkdirSync(path.dirname(startupConfigPath), { recursive: true });
+fs.writeFileSync(startupConfigPath, JSON.stringify({ globalSettings: { language: 'de' } }), 'utf8');
 installLoopbackRemoteServerGuard(RemoteServer, address => uiRemoteBindAddresses.push(address));
 let preparedUpdateMockCalls = 0;
 let launchedUpdateMockCalls = 0;
@@ -57,13 +60,28 @@ updaterModule.launchPreparedUpdate = () => {
 const initialIpcHandlers = new Map();
 const registerIpcHandler = ipcMain.handle.bind(ipcMain);
 let initialConfigReadDelayed = false;
+let startupLanguagePendingSnapshot = null;
 ipcMain.handle = (channel, listener) => {
   const registeredListener = channel === 'get-config'
     ? async (...args) => {
         const result = await listener(...args);
         if (!initialConfigReadDelayed) {
           initialConfigReadDelayed = true;
-          await new Promise(resolve => setTimeout(resolve, 4000));
+          const deadline = Date.now() + 1500;
+          let window = BrowserWindow.getAllWindows()[0];
+          while (window && !window.isVisible() && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+            window = BrowserWindow.getAllWindows()[0];
+          }
+          startupLanguagePendingSnapshot = window
+            ? {
+                visible: window.isVisible(),
+                language: await window.webContents.executeJavaScript('document.documentElement.lang'),
+                query: await window.webContents.executeJavaScript('location.search')
+              }
+            : null;
+          const elapsed = 1500 - Math.max(0, deadline - Date.now());
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, 4000 - elapsed)));
         }
         return result;
       }
@@ -132,6 +150,18 @@ setTimeout(async () => {
   const wc = win.webContents;
   const originalBounds = win.getBounds();
   const visualScreenshotDir = ${JSON.stringify(visualScreenshotDir)};
+  const rendererDiagnostics = [];
+  let rendererUnresponsiveCount = 0;
+  wc.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level === 3) rendererDiagnostics.push({ type: 'console', message, line, sourceId });
+  });
+  wc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) rendererDiagnostics.push({ type: 'load', errorCode, errorDescription, validatedURL });
+  });
+  wc.on('render-process-gone', (_event, details) => {
+    rendererDiagnostics.push({ type: 'gone', details });
+  });
+  win.on('unresponsive', () => { rendererUnresponsiveCount++; });
 
   async function captureVisual(name) {
     if (!visualScreenshotDir) return;
@@ -159,6 +189,9 @@ setTimeout(async () => {
     check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
 
+    const germanStartupReady = await waitUntil(() => wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")'));
+    check('Returning German profiles never expose an English frame while startup config is pending', startupLanguagePendingSnapshot !== null && (!startupLanguagePendingSnapshot.visible || startupLanguagePendingSnapshot.language === 'de') && startupLanguagePendingSnapshot.query === '?language=de' && germanStartupReady === 'de|de|Upload,Accounts,Einstellungen,Verlauf');
+    await wc.executeJavaScript('(async () => { config.globalSettings = { ...(config.globalSettings || {}), language: "en" }; await window.api.saveGlobalSettings(config.globalSettings); setUiLanguage("en"); renderSettings(); })()');
     const languageReady = await waitUntil(() => wc.executeJavaScript('Boolean(document.getElementById("languageInput"))'));
     check('Fresh profiles render in English by default', languageReady === true && await wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")') === 'en|en|Upload,Accounts,Settings,History');
     await wc.executeJavaScript('document.getElementById("settings-tab").click()');
@@ -194,6 +227,20 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click()');
     const liveLanguageSwitch = await wc.executeJavaScript('(() => { const input = document.getElementById("languageInput"); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); const german = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "en"; input.dispatchEvent(new Event("change", { bubbles: true })); const english = [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(","); input.value = "de"; input.dispatchEvent(new Event("change", { bubbles: true })); return [german, english, document.documentElement.lang].join("|"); })()');
     check('Language changes apply immediately in both directions', liveLanguageSwitch === 'Upload,Accounts,Einstellungen,Verlauf|Upload,Accounts,Settings,History|de');
+    const localizedStableMetric = await wc.executeJavaScript(\`(async () => {
+      _sessionDoneCount = 1234;
+      updateStatusBar();
+      await new Promise(resolve => setTimeout(resolve, 360));
+      const metric = document.getElementById('uploadTelemetryCompleted');
+      const german = [metric?.textContent.trim(), metric?.getAttribute('aria-label')];
+      setUiLanguage('en');
+      const english = [metric?.textContent.trim(), metric?.getAttribute('aria-label')];
+      setUiLanguage('de');
+      _sessionDoneCount = 0;
+      updateStatusBar();
+      return { german, english };
+    })()\`);
+    check('Language changes redraw stable telemetry values with the active locale', localizedStableMetric.german.join('|') === '1.234|1.234' && localizedStableMetric.english.join('|') === '1,234|1,234');
     const germanSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
     check('German sidebar hierarchy uses distinct localized kickers', germanSidebarHeadings.join('::') === 'Arbeitsbereich|Uploads::Accounts verwalten|Accounts::Archiv|Verlauf');
     const saveAfterLanguageChange = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-success")].join("|"); })()');
@@ -202,6 +249,28 @@ setTimeout(async () => {
     await waitUntil(() => wc.executeJavaScript('document.getElementById("saveSettingsBtn").disabled'));
     const saveAfterCommit = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-secondary")].join("|"); })()');
     check('Saving returns the action to its disabled gray state', saveAfterCommit === 'true|true');
+    const englishLanguageQuery = await wc.executeJavaScript(\`(async () => {
+      const input = document.getElementById('languageInput');
+      input.value = 'en';
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await saveSettings({ feedbackText: 'Saved' });
+      return new URL(location.href).searchParams.get('language');
+    })()\`);
+    const languageReloadFinished = new Promise(resolve => wc.once('did-finish-load', resolve));
+    wc.reload();
+    await languageReloadFinished;
+    const reloadedLanguageState = await waitUntil(() => wc.executeJavaScript(\`(() => {
+      if (typeof config !== 'object' || config.globalSettings?.language !== 'en') return '';
+      return [document.documentElement.lang, location.search, [...document.querySelectorAll('.tab')].map(tab => tab.textContent.trim()).join(',')].join('|');
+    })()\`));
+    const germanLanguageQuery = await wc.executeJavaScript(\`(async () => {
+      const input = document.getElementById('languageInput');
+      input.value = 'de';
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await saveSettings({ feedbackText: 'Gespeichert' });
+      return { query: new URL(location.href).searchParams.get('language'), active: document.documentElement.lang };
+    })()\`);
+    check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === 'en|?language=en|Upload,Accounts,Settings,History' && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
 
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
@@ -461,6 +530,36 @@ setTimeout(async () => {
     check('Header and sidebar speed update synchronously from the same live sample', telemetryUpdate.speedPair === '2 kB/s|2 kB/s');
     const secondSynchronizedSpeed = await wc.executeJavaScript('lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 1536 }; updateStatusBar(); [document.getElementById("uploadTelemetrySpeed")?.textContent, document.getElementById("uploadSpeedValue")?.textContent].join("|")');
     check('Header and sidebar speed stay synchronized across later samples', secondSynchronizedSpeed === '1.5 MB/s|1.5 MB/s');
+    const runtimeTimerRestart = await wc.executeJavaScript(\`(async () => {
+      if (statsRunTimer) clearInterval(statsRunTimer);
+      statsRunTimer = null;
+      statsStartTime = 0;
+      handleStats({ state: 'uploading', globalSpeedKbs: 1, totalBytes: 1, elapsed: 0, activeJobs: 1 });
+      const first = { start: statsStartTime, timer: statsRunTimer };
+      handleStats({ state: 'idle', globalSpeedKbs: 0, totalBytes: 1, elapsed: 1, activeJobs: 0 });
+      const idle = { start: statsStartTime, timer: statsRunTimer };
+      await new Promise(resolve => setTimeout(resolve, 2));
+      handleStats({ state: 'uploading', globalSpeedKbs: 1, totalBytes: 2, elapsed: 0, activeJobs: 1 });
+      const second = { start: statsStartTime, timer: statsRunTimer };
+      handleStats({ state: 'idle', globalSpeedKbs: 0, totalBytes: 2, elapsed: 1, activeJobs: 0 });
+      return { first, idle, second, settled: { start: statsStartTime, timer: statsRunTimer } };
+    })()\`);
+    check('Runtime telemetry starts a fresh timer for every upload batch', runtimeTimerRestart.first.start > 0 && runtimeTimerRestart.first.timer !== null && runtimeTimerRestart.idle.start === 0 && runtimeTimerRestart.idle.timer === null && runtimeTimerRestart.second.start > runtimeTimerRestart.first.start && runtimeTimerRestart.second.timer !== null && runtimeTimerRestart.settled.start === 0 && runtimeTimerRestart.settled.timer === null);
+    const failedQueueCountConsistency = await wc.executeJavaScript(\`(() => {
+      queueJobs = [
+        { id: 'failed-count-a', status: 'error', bytesTotal: 1024, bytesUploaded: 0 },
+        { id: 'failed-count-b', status: 'error', bytesTotal: 1024, bytesUploaded: 0 },
+        { id: 'failed-count-waiting', status: 'queued', bytesTotal: 1024, bytesUploaded: 0 }
+      ];
+      _sessionErrorCount = 0;
+      _queueStatsCache = null;
+      updateStatusBar();
+      return {
+        filter: document.getElementById('uploadSidebarErrorCount')?.textContent,
+        telemetry: document.getElementById('uploadTelemetryFailed')?.getAttribute('aria-label')
+      };
+    })()\`);
+    check('Failed queue jobs update the filter badge and telemetry count consistently', failedQueueCountConsistency.filter === '2' && failedQueueCountConsistency.telemetry === '2');
     await new Promise(resolve => setTimeout(resolve, 360));
     await wc.executeJavaScript('queueJobs = []; _sessionDoneCount = 0; _sessionErrorCount = 0; lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 0, activeJobs: 0, state: "idle" }; updateStatusBar();');
 
@@ -953,6 +1052,64 @@ setTimeout(async () => {
     check('Account sidebar classifies disabled and credential-less accounts as action needed', accountFilterState.counters.join('|') === '4|1|2|1');
     check('Account sidebar exposes exactly one pressed filter', accountFilterState.error.pressed.join('|') === 'error' && accountFilterState.error.active.join('|') === 'error' && accountFilterState.all.pressed.join('|') === 'all' && accountFilterState.all.active.join('|') === 'all');
 
+    ipcMain.removeHandler('run-health-check');
+    ipcMain.handle('run-health-check', (_event, payload) => ({ results: (payload.hosters || []).map(item => ({ accountId: item.accountId, status: 'ok', message: 'Ready' })) }));
+    const completedAccountCheckState = await wc.executeJavaScript(\`checkSingleAccount('ui-filter-ready').then(() => ({ status: accountStatuses['ui-filter-ready']?.status, generations: accountStatusGenerations.size }))\`);
+    check('Completed account checks release their generation tokens', completedAccountCheckState.status === 'ok' && completedAccountCheckState.generations === 0);
+    restoreInitialIpcHandler('run-health-check');
+
+    let resolveStaleAccountCheck = null;
+    ipcMain.removeHandler('run-health-check');
+    ipcMain.handle('run-health-check', () => new Promise(resolve => { resolveStaleAccountCheck = resolve; }));
+    const staleAccountCheck = wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters['byse.sx'] = [{ id: 'ui-stale-account-check', enabled: true, authType: 'api', apiKey: 'old-key' }];
+      accountStatuses = { 'ui-stale-account-check': { status: 'ok', message: 'Old credentials ready' } };
+      healthCheckRunning = false;
+      renderAccounts();
+      return checkSingleAccount('ui-stale-account-check');
+    })()\`);
+    await waitUntil(() => resolveStaleAccountCheck);
+    await wc.executeJavaScript(\`(() => {
+      const candidateHosters = structuredClone(config.hosters);
+      candidateHosters['byse.sx'][0].apiKey = 'new-key';
+      _applyCommittedAccount(
+        { accountId: 'ui-stale-account-check', candidateHosters, isEdit: true },
+        { status: 'ok', message: 'New credentials ready' }
+      );
+    })()\`);
+    resolveStaleAccountCheck({ results: [{ accountId: 'ui-stale-account-check', status: 'error', message: 'Old credential check failed' }] });
+    await staleAccountCheck;
+    const staleAccountCheckState = await wc.executeJavaScript(\`(() => {
+      const status = accountStatuses['ui-stale-account-check'];
+      const card = document.querySelector('[data-account-id="ui-stale-account-check"]');
+      return { status: status?.status, message: status?.message, card: card?.querySelector('.account-status')?.textContent.trim() };
+    })()\`);
+    check('A late account check cannot overwrite newly committed credentials', staleAccountCheckState.status === 'ok' && staleAccountCheckState.message === 'New credentials ready' && staleAccountCheckState.card === 'Bereit');
+    restoreInitialIpcHandler('run-health-check');
+
+    let resolveImportedAccountCheck = null;
+    ipcMain.removeHandler('run-health-check');
+    ipcMain.handle('run-health-check', () => new Promise(resolve => { resolveImportedAccountCheck = resolve; }));
+    const importedAccountCheck = wc.executeJavaScript(\`(() => {
+      healthCheckRunning = false;
+      return checkSingleAccount('ui-stale-account-check');
+    })()\`);
+    await waitUntil(() => resolveImportedAccountCheck);
+    await wc.executeJavaScript(\`(() => {
+      const imported = structuredClone(config);
+      imported.hosters['byse.sx'][0].apiKey = 'imported-key';
+      applyImportedConfig(imported, 'Importiert');
+    })()\`);
+    resolveImportedAccountCheck({ results: [{ accountId: 'ui-stale-account-check', status: 'error', message: 'Pre-import credentials failed' }] });
+    await importedAccountCheck;
+    const importedAccountCheckState = await wc.executeJavaScript(\`(() => {
+      const status = accountStatuses['ui-stale-account-check'];
+      return { status: status?.status, message: status?.message || '', generations: accountStatusGenerations.size, apiKey: config.hosters['byse.sx'][0].apiKey };
+    })()\`);
+    check('A backup import invalidates account checks started with older credentials', importedAccountCheckState.status === 'unchecked' && importedAccountCheckState.message === '' && importedAccountCheckState.generations === 0 && importedAccountCheckState.apiKey === 'imported-key');
+    restoreInitialIpcHandler('run-health-check');
+
     console.log('\\n=== Settings View ===');
 
     await wc.executeJavaScript('document.querySelector(".tab[data-view=\\'settings\\']").click()');
@@ -1047,6 +1204,21 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'diagnose\\']")?.click()');
     const diagnoseSettingsSpacing = await wc.executeJavaScript('(() => { const grid = document.querySelector("[data-subpage=diagnose] .settings-grid-mini")?.getBoundingClientRect(); const port = document.getElementById("diagPortInput")?.closest(".settings-row")?.getBoundingClientRect(); return grid && port ? Math.round(port.top - grid.bottom) : -1; })()');
     check('Diagnose settings keep space before Port', diagnoseSettingsSpacing >= 8);
+
+    let resolveStaleDiagnosticsSettings = null;
+    ipcMain.removeHandler('diagnostics:get-settings');
+    ipcMain.handle('diagnostics:get-settings', () => new Promise(resolve => { resolveStaleDiagnosticsSettings = resolve; }));
+    await wc.executeJavaScript('renderSettings()');
+    await waitUntil(() => resolveStaleDiagnosticsSettings);
+    await wc.executeJavaScript('document.querySelector("[data-settings-page=diagnose]")?.click(); (() => { const input = document.getElementById("diagPortInput"); input.value = "9222"; input.dispatchEvent(new Event("input", { bubbles: true })); })()');
+    resolveStaleDiagnosticsSettings({ enabled: true, port: 9110, bindMode: 'network', publicHost: 'diagnostics.example.test', allowlist: ['100.64.0.0/10'] });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const staleDiagnosticsState = await wc.executeJavaScript('(() => ({ port: document.getElementById("diagPortInput")?.value, enabled: document.getElementById("diagEnabledInput")?.checked, bindMode: document.getElementById("diagBindModeInput")?.value, publicHost: document.getElementById("diagPublicHostInput")?.value, allowlist: document.getElementById("diagAllowlistInput")?.value }))()');
+    check('A late diagnostics response preserves the edited field and fills every untouched field', staleDiagnosticsState.port === '9222' && staleDiagnosticsState.enabled === true && staleDiagnosticsState.bindMode === 'network' && staleDiagnosticsState.publicHost === 'diagnostics.example.test' && staleDiagnosticsState.allowlist === '100.64.0.0/10');
+    restoreInitialIpcHandler('diagnostics:get-settings');
+    await wc.executeJavaScript('renderSettings(); document.querySelector("[data-settings-page=diagnose]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 80));
+
     const diagnosticsDirtyTracking = await wc.executeJavaScript('(async () => { const original = await window.api.diagnosticsGetSettings(); const input = document.getElementById("diagPublicHostInput"); establishSettingsBaseline(); input.value = "ui-diagnostics-save.invalid"; input.dispatchEvent(new Event("input", { bubbles: true })); const button = document.getElementById("saveSettingsBtn"); const enabled = button.disabled === false && button.classList.contains("btn-success"); if (enabled) await saveSettings({ feedbackText: "Gespeichert" }); const persisted = await window.api.diagnosticsGetSettings(); await saveDiagnosticsSettingsTracked(original); input.value = original.publicHost || ""; establishSettingsBaseline(); return { enabled, persisted: persisted.publicHost }; })()');
     check('Diagnostics changes enable Save and persist with the full settings form', diagnosticsDirtyTracking.enabled === true && diagnosticsDirtyTracking.persisted === 'ui-diagnostics-save.invalid');
 
@@ -1506,6 +1678,48 @@ setTimeout(async () => {
     const historyActive = await wc.executeJavaScript('document.getElementById("history-view")?.classList.contains("active")');
     check('History tab active', historyActive);
 
+    const historyRaceResolvers = [];
+    ipcMain.removeHandler('get-history');
+    ipcMain.handle('get-history', () => new Promise(resolve => { historyRaceResolvers.push(resolve); }));
+    const staleHistoryLoad = wc.executeJavaScript('loadHistory()');
+    await waitUntil(() => historyRaceResolvers.length === 1);
+    const latestHistoryLoad = wc.executeJavaScript('loadHistory()');
+    await waitUntil(() => historyRaceResolvers.length === 2);
+    historyRaceResolvers[1]([{ timestamp: '2026-08-10T10:00:01.000Z', files: [{ name: 'latest-history.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/latest' }] }] }]);
+    await latestHistoryLoad;
+    historyRaceResolvers[0]([{ timestamp: '2026-08-10T10:00:00.000Z', files: [{ name: 'stale-history.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/stale' }] }] }]);
+    await staleHistoryLoad;
+    const historyRaceResult = await wc.executeJavaScript('[...document.querySelectorAll("#historyBody .history-row .col-filename")].map(cell => cell.textContent.trim()).join("|")');
+    check('A late stale history response cannot overwrite the latest rendered history', historyRaceResult === 'latest-history.bin');
+    ipcMain.removeHandler('get-history');
+    ipcMain.handle('get-history', () => historyFixture);
+    await wc.executeJavaScript('loadHistory()');
+
+    const historyFixtureBeforeLifetimeCheck = historyFixture;
+    historyFixture = [{
+      timestamp: '2026-08-10T10:05:00.000Z',
+      files: [{ name: 'lifetime.bin', results: [{ status: 'done', hoster: 'voe.sx', download_url: 'https://example.invalid/lifetime' }] }]
+    }];
+    await wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters['voe.sx'] = [{ id: 'ui-lifetime-account', enabled: true, authType: 'login', username: 'lifetime@example.invalid', password: 'fictional-password' }];
+      accountStatuses = { 'ui-lifetime-account': { status: 'ok', message: 'Bereit' } };
+      window._historyForStats = [];
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+      window.__uiLifetimeGroup = document.querySelector('[data-hoster-group="voe.sx"]');
+    })()\`);
+    await wc.executeJavaScript('loadHistory()');
+    const lifetimeRefreshState = await wc.executeJavaScript(\`(() => {
+      const group = document.querySelector('[data-hoster-group="voe.sx"]');
+      const meta = group?.querySelector('[data-hoster-lifetime="voe.sx"]');
+      return { sameGroup: group === window.__uiLifetimeGroup, visible: Boolean(meta && !meta.hidden), text: meta?.textContent.trim() || '' };
+    })()\`);
+    check('Loaded history refreshes hoster lifetime success without replacing the account group', lifetimeRefreshState.sameGroup && lifetimeRefreshState.visible && lifetimeRefreshState.text === '100% ok (1)');
+    historyFixture = historyFixtureBeforeLifetimeCheck;
+    await wc.executeJavaScript('loadHistory()');
+    await wc.executeJavaScript('HOSTERS.forEach(name => { config.hosters[name] = []; }); accountStatuses = {}; renderAccounts()');
+
     const historyWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("history-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
     check('History view separates sidebar and main workspace', historyWorkspaceLayout === true);
 
@@ -1721,7 +1935,70 @@ setTimeout(async () => {
     })()\`);
     check('Unavailable recent, queue, and history actions are disabled', emptyActionState === 'true|true|true|true|true');
 
+    const recentLocaleState = await wc.executeJavaScript(\`(() => {
+      const timestamp = Date.UTC(2026, 7, 10, 13, 14, 15);
+      setUiLanguage('de');
+      sessionFilesData = [{ date: formatDateTime(timestamp).text, dateTs: timestamp, filename: 'locale.bin', host: 'voe.sx', link: 'https://example.invalid/locale', isError: false, order: 1 }];
+      _recentDataVersion++;
+      renderRecentUploadsPanel();
+      const german = document.querySelector('#recentFilesBody .recent-file-row td')?.textContent.trim();
+      setUiLanguage('en');
+      const english = document.querySelector('#recentFilesBody .recent-file-row td')?.textContent.trim();
+      const expectedEnglish = formatDateTime(timestamp).text;
+      setUiLanguage('de');
+      sessionFilesData = [];
+      _recentDataVersion++;
+      renderRecentUploadsPanel();
+      return { german, english, expectedEnglish };
+    })()\`);
+    check('Recent upload timestamps immediately follow the selected interface language', recentLocaleState.german !== recentLocaleState.english && recentLocaleState.english === recentLocaleState.expectedEnglish);
+
+    const recentCapScrollState = await wc.executeJavaScript(\`(() => {
+      document.querySelector('.tab[data-view="upload"]')?.click();
+      queueJobs = [{ id: 'ui-recent-cap', file: 'C:/ui/recent-cap.bin', fileName: 'recent-cap.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }];
+      rebuildJobIndex();
+      updateUploadView();
+      renderQueueTable();
+      recentSortState.key = 'date';
+      recentSortState.direction = 'desc';
+      sessionFilesData = Array.from({ length: SESSION_FILES_CAP }, (_, index) => ({
+        date: String(index),
+        dateTs: index,
+        filename: 'cap-' + index + '.bin',
+        host: 'byse.sx',
+        link: 'https://example.invalid/cap-' + index,
+        isError: false,
+        order: index
+      }));
+      _recentDataVersion++;
+      renderRecentUploadsPanel();
+      const wrap = document.querySelector('.recent-files-table-wrap');
+      wrap.scrollTop = 560;
+      const before = wrap.scrollTop;
+      sessionFilesData = sessionFilesData.slice(1);
+      sessionFilesData.push({ date: 'new', dateTs: SESSION_FILES_CAP + 1, filename: 'cap-new.bin', host: 'byse.sx', link: 'https://example.invalid/cap-new', isError: false, order: SESSION_FILES_CAP + 1 });
+      _recentPendingAppends = 1;
+      _recentDataVersion++;
+      renderRecentUploadsPanel();
+      const after = wrap.scrollTop;
+      sessionFilesData = [];
+      _recentPendingAppends = 0;
+      _recentDataVersion++;
+      renderRecentUploadsPanel();
+      queueJobs = [];
+      rebuildJobIndex();
+      updateUploadView();
+      renderQueueTable();
+      return { before, after, delta: after - before };
+    })()\`);
+    if (!(recentCapScrollState.before > 0 && Math.abs(recentCapScrollState.delta - 28) <= 1)) console.log('Recent cap scroll state: ' + JSON.stringify(recentCapScrollState));
+    check('A capped recent-upload list preserves the visible rows when a new item arrives', recentCapScrollState.before > 0 && Math.abs(recentCapScrollState.delta - 28) <= 1);
+
     const keyboardInteractionContract = await wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters['byse.sx'] = [{ id: 'ui-keyboard-account', enabled: true, authType: 'api', apiKey: 'keyboard-key' }];
+      accountStatuses = { 'ui-keyboard-account': { status: 'ok', message: 'Bereit' } };
+      renderAccounts();
       queueJobs = [{ id: 'ui-keyboard-row', file: 'C:/ui/keyboard.bin', fileName: 'keyboard.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }];
       selectedJobIds.clear();
       rebuildJobIndex();
@@ -1770,6 +2047,240 @@ setTimeout(async () => {
       document.querySelector('#shutdownOverlay .shutdown-box')?.getAttribute('role')
     ].join('|'))()\`);
     check('Hoster, job log, delete-account, and shutdown surfaces expose dialog semantics', modalSemantics === 'dialog|dialog|dialog|dialog');
+
+    const rapidViewStability = await wc.executeJavaScript(\`(async () => {
+      const sequence = ['upload', 'accounts', 'settings', 'history', 'settings', 'accounts', 'upload', 'history', 'upload', 'accounts', 'history', 'settings'];
+      const samples = [];
+      for (const target of sequence) {
+        document.querySelector('.tab[data-view="' + target + '"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const activeViews = [...document.querySelectorAll('.view.active')];
+        const activeTabs = [...document.querySelectorAll('.tab.active')];
+        const viewRect = activeViews[0]?.getBoundingClientRect();
+        const speedRect = document.getElementById('uploadSpeedSparkline')?.getBoundingClientRect();
+        const indicatorRect = document.querySelector('.tab-indicator')?.getBoundingClientRect();
+        samples.push({
+          target,
+          activeViews: activeViews.length,
+          activeTabs: activeTabs.length,
+          activeView: activeViews[0]?.id,
+          activeTab: activeTabs[0]?.dataset.view,
+          viewVisible: Boolean(viewRect && viewRect.width > 0 && viewRect.height > 0),
+          speedVisible: Boolean(speedRect && speedRect.width > 0 && speedRect.height > 0),
+          indicatorVisible: Boolean(indicatorRect && indicatorRect.width > 0 && indicatorRect.height > 0),
+          horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1
+        });
+      }
+      document.querySelector('.tab[data-view="upload"]')?.click();
+      return samples;
+    })()\`);
+    const invalidViewFrames = rapidViewStability.filter(sample => sample.activeViews !== 1 || sample.activeTabs !== 1 || sample.activeView !== sample.target + '-view' || sample.activeTab !== sample.target || !sample.viewVisible || !sample.speedVisible || !sample.indicatorVisible || sample.horizontalOverflow);
+    check('Rapid main-view switches never paint a blank, duplicate, or overflowing active view', rapidViewStability.length === 12 && invalidViewFrames.length === 0);
+
+    const languageFrameStability = await wc.executeJavaScript(\`(async () => {
+      _sessionDoneCount = 1234;
+      const languages = ['en', 'de', 'en', 'de', 'en', 'de', 'en', 'de', 'en', 'de', 'en', 'de'];
+      const samples = [];
+      for (const language of languages) {
+        setUiLanguage(language);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const metric = document.getElementById('uploadTelemetryCompleted');
+        samples.push({
+          requested: language,
+          active: document.documentElement.lang,
+          tabs: [...document.querySelectorAll('.tab')].map(tab => tab.textContent.trim()).join('|'),
+          settingsTitle: document.querySelector('[data-subpage="allgemein"] .settings-page-header h3')?.textContent.trim(),
+          uploadKicker: document.querySelector('#upload-view .view-sidebar-kicker')?.textContent.trim(),
+          metricValues: [...(metric?.querySelectorAll(':scope > span') || [])].map(span => span.textContent.trim()),
+          metricLabel: metric?.getAttribute('aria-label')
+        });
+      }
+      _sessionDoneCount = 0;
+      updateStatusBar();
+      return samples;
+    })()\`);
+    const invalidLanguageFrames = languageFrameStability.filter(sample => sample.requested === 'en'
+      ? sample.active !== 'en' || sample.tabs !== 'Upload|Accounts|Settings|History' || sample.settingsTitle !== 'General' || sample.uploadKicker !== 'Workspace' || sample.metricLabel !== '1,234' || sample.metricValues.length === 0 || sample.metricValues.some(value => value !== '0' && value !== '1,234')
+      : sample.active !== 'de' || sample.tabs !== 'Upload|Accounts|Einstellungen|Verlauf' || sample.settingsTitle !== 'Allgemein' || sample.uploadKicker !== 'Arbeitsbereich' || sample.metricLabel !== '1.234' || sample.metricValues.length === 0 || sample.metricValues.some(value => value !== '0' && value !== '1.234'));
+    if (invalidLanguageFrames.length) console.log('Invalid language frames: ' + JSON.stringify(invalidLanguageFrames));
+    check('Rapid language switches expose only complete, locale-consistent painted frames', languageFrameStability.length === 12 && invalidLanguageFrames.length === 0);
+
+    const rollingMetricStability = await wc.executeJavaScript(\`(async () => {
+      setUiLanguage('de');
+      await new Promise(resolve => setTimeout(resolve, 360));
+      const metric = document.getElementById('uploadTelemetryCompleted');
+      const initialRect = metric.getBoundingClientRect();
+      const frames = [];
+      for (let value = 1000; value <= 1020; value++) {
+        _sessionDoneCount = value;
+        updateStatusBar();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const rect = metric.getBoundingClientRect();
+        frames.push({
+          text: metric.textContent.trim(),
+          label: metric.getAttribute('aria-label'),
+          childCount: metric.querySelectorAll(':scope > span').length,
+          width: rect.width,
+          height: rect.height
+        });
+      }
+      await new Promise(resolve => setTimeout(resolve, 360));
+      const settled = { text: metric.textContent.trim(), label: metric.getAttribute('aria-label'), direction: metric.dataset.direction };
+      _sessionDoneCount = 0;
+      updateStatusBar();
+      return { initialRect: { width: initialRect.width, height: initialRect.height }, frames, settled };
+    })()\`);
+    const invalidRollingFrames = rollingMetricStability.frames.filter(frame => !frame.text || !frame.label || frame.childCount < 1 || frame.childCount > 2 || Math.abs(frame.width - rollingMetricStability.initialRect.width) > 0.5 || Math.abs(frame.height - rollingMetricStability.initialRect.height) > 0.5);
+    check('Rapid telemetry updates never expose an empty value or shift the metric layout', rollingMetricStability.frames.length === 21 && invalidRollingFrames.length === 0 && rollingMetricStability.settled.text === '1.020' && rollingMetricStability.settled.label === '1.020' && rollingMetricStability.settled.direction === 'none');
+
+    const virtualQueueStability = await wc.executeJavaScript(\`(async () => {
+      const total = 1200;
+      queueJobs = Array.from({ length: total }, (_, index) => ({
+        id: 'ui-stress-' + index,
+        file: 'C:/ui/stress-' + index + '.bin',
+        fileName: 'stress-' + String(index).padStart(4, '0') + '.bin',
+        hoster: 'byse.sx',
+        status: 'uploading',
+        bytesUploaded: 100,
+        bytesTotal: 1000,
+        speedKbs: 64,
+        elapsed: 1,
+        remaining: 9,
+        progress: .1
+      }));
+      rebuildJobIndex();
+      queueSortState.key = 'filename';
+      queueSortState.direction = 'asc';
+      setUploadSidebarFilter('all');
+      updateUploadView();
+      renderQueueTable();
+      const container = document.getElementById('queueContainer');
+      container.scrollTop = 5600;
+      container.dispatchEvent(new Event('scroll'));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const tbody = document.getElementById('queueBody');
+      const originalRows = [...tbody.querySelectorAll('.queue-row')];
+      const originalIds = originalRows.map(row => row.dataset.jobId);
+      const originalScrollTop = container.scrollTop;
+      let childMutations = 0;
+      let blankFrames = 0;
+      let identityChanges = 0;
+      const observer = new MutationObserver(records => {
+        childMutations += records.filter(record => record.type === 'childList').length;
+      });
+      observer.observe(tbody, { childList: true });
+      for (let frame = 0; frame < 36; frame++) {
+        for (const id of originalIds) {
+          const job = _jobIndexById.get(id);
+          if (!job) continue;
+          job.progress = Math.min(1, job.progress + .0005);
+          job.bytesUploaded = Math.round(job.progress * job.bytesTotal);
+        }
+        renderQueueTable();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const rows = [...tbody.querySelectorAll('.queue-row')];
+        if (!rows.length || rows.some(row => !row.querySelector('.col-filename')?.textContent.trim())) blankFrames++;
+        if (rows.length !== originalRows.length || rows.some((row, index) => row !== originalRows[index])) identityChanges++;
+      }
+      observer.disconnect();
+      const scrollDrift = Math.abs(container.scrollTop - originalScrollTop);
+      const activeIds = new Set(originalIds);
+      queueJobs.forEach(job => { job.status = activeIds.has(job.id) ? 'uploading' : 'done'; });
+      setUploadSidebarFilter('active');
+      updateUploadView();
+      renderQueueTable();
+      const result = {
+        total,
+        rendered: originalRows.length,
+        childMutations,
+        blankFrames,
+        identityChanges,
+        scrollDrift,
+        filteredRows: tbody.querySelectorAll('.queue-row').length,
+        filteredHasVirtualSpacer: Boolean(tbody.querySelector('.virtual-spacer'))
+      };
+      setUploadSidebarFilter('all');
+      queueJobs = [];
+      rebuildJobIndex();
+      renderQueueTable();
+      updateUploadView();
+      updateStatusBar();
+      return result;
+    })()\`);
+    check('High-frequency updates keep virtual queue rows mounted without blank frames or scroll jumps', virtualQueueStability.total === 1200 && virtualQueueStability.rendered > 0 && virtualQueueStability.rendered < 1200 && virtualQueueStability.childMutations === 0 && virtualQueueStability.blankFrames === 0 && virtualQueueStability.identityChanges === 0 && virtualQueueStability.scrollDrift <= 1);
+    check('Switching from a virtual queue to a small filtered result removes virtual spacers', virtualQueueStability.filteredRows === virtualQueueStability.rendered && virtualQueueStability.filteredHasVirtualSpacer === false);
+
+    win.setSize(1100, 900);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click(); queueJobs = [{ id: "ui-panel-resize", file: "C:/ui/panel-resize.bin", fileName: "panel-resize.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 }]; rebuildJobIndex(); updateUploadView(); renderQueueTable(); document.getElementById("recentFilesPanel").style.flex = "0 0 600px"');
+    win.setSize(1100, 550);
+    await new Promise(resolve => setTimeout(resolve, 140));
+    const recentPanelResizeState = await wc.executeJavaScript('(() => { const panel = document.getElementById("recentFilesPanel"); const queue = document.getElementById("queueContainer"); return { panelHeight: panel.getBoundingClientRect().height, queueHeight: queue.getBoundingClientRect().height, viewportHeight: window.innerHeight }; })()');
+    if (!(recentPanelResizeState.panelHeight <= recentPanelResizeState.viewportHeight * 0.7 + 1 && recentPanelResizeState.queueHeight >= 120)) console.log('Recent panel resize state: ' + JSON.stringify(recentPanelResizeState));
+    check('A manually enlarged recent panel is clamped after a height-only window shrink', recentPanelResizeState.panelHeight <= recentPanelResizeState.viewportHeight * 0.7 + 1 && recentPanelResizeState.queueHeight >= 120);
+    win.setSize(1100, 900);
+    await new Promise(resolve => setTimeout(resolve, 140));
+    const initialHiddenResizeState = await wc.executeJavaScript('(() => { document.querySelector(".tab[data-view=upload]")?.click(); const panel = document.getElementById("recentFilesPanel"); panel.style.flex = "0 0 600px"; clampRecentPanelHeight(); const queue = document.getElementById("queueContainer"); return { basis: parseFloat(panel.style.flexBasis), panelHeight: panel.getBoundingClientRect().height, queueHeight: queue.getBoundingClientRect().height }; })()');
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=settings]")?.click()');
+    win.setSize(1100, 550);
+    await new Promise(resolve => setTimeout(resolve, 140));
+    const hiddenRecentPanelState = await wc.executeJavaScript('(() => { const panel = document.getElementById("recentFilesPanel"); return { basis: parseFloat(panel.style.flexBasis), panelHeight: panel.getBoundingClientRect().height }; })()');
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 140));
+    const restoredRecentPanelState = await wc.executeJavaScript('(() => { const panel = document.getElementById("recentFilesPanel"); const queue = document.getElementById("queueContainer"); return { basis: parseFloat(panel.style.flexBasis), panelHeight: panel.getBoundingClientRect().height, queueHeight: queue.getBoundingClientRect().height, viewportHeight: window.innerHeight }; })()');
+    const hiddenResizePreserved = hiddenRecentPanelState.panelHeight === 0 && Math.abs(hiddenRecentPanelState.basis - initialHiddenResizeState.basis) <= 0.5;
+    const hiddenResizeRestored = restoredRecentPanelState.basis < initialHiddenResizeState.basis && restoredRecentPanelState.queueHeight >= 120 && restoredRecentPanelState.panelHeight <= restoredRecentPanelState.viewportHeight * 0.7 + 1;
+    if (!(hiddenResizePreserved && hiddenResizeRestored)) console.log('Hidden recent panel resize state: ' + JSON.stringify({ initialHiddenResizeState, hiddenRecentPanelState, restoredRecentPanelState }));
+    check('Resizing another tab preserves the requested recent height while hidden', hiddenResizePreserved);
+    check('Returning to Upload reclamps the recent panel and restores queue space', hiddenResizeRestored);
+    await wc.executeJavaScript('document.getElementById("recentFilesPanel").style.flex = ""; queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable()');
+
+    const resizeStability = [];
+    for (let cycle = 0; cycle < 8; cycle++) {
+      const width = cycle % 2 === 0 ? 800 : 1100;
+      const height = cycle % 2 === 0 ? 550 : 750;
+      win.setSize(width, height);
+      await new Promise(resolve => setTimeout(resolve, 80));
+      resizeStability.push(await wc.executeJavaScript(\`(async () => {
+        const samples = [];
+        for (const target of ['upload', 'accounts', 'settings', 'history']) {
+          document.querySelector('.tab[data-view="' + target + '"]')?.click();
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const active = document.querySelector('.view.active');
+          const rect = active?.getBoundingClientRect();
+          const settingsHeader = target === 'settings' ? document.querySelector('.settings-header') : null;
+          const settingsHeaderRect = settingsHeader?.getBoundingClientRect();
+          const settingsHeaderStyle = settingsHeader ? getComputedStyle(settingsHeader) : null;
+          const settingsSaveButton = target === 'settings' ? document.getElementById('saveSettingsBtn') : null;
+          const settingsSaveButtonStyle = settingsSaveButton ? getComputedStyle(settingsSaveButton) : null;
+          samples.push({
+            target,
+            visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+            contained: Boolean(active && active.scrollWidth <= active.clientWidth + 1),
+            activeViews: document.querySelectorAll('.view.active').length,
+            settingsHeaderHeight: settingsHeaderRect?.height || null,
+            settingsHeaderMetrics: settingsHeader ? {
+              innerWidth: window.innerWidth,
+              minHeight: settingsHeaderStyle.minHeight,
+              saveHeight: settingsSaveButton.getBoundingClientRect().height,
+              saveMinHeight: settingsSaveButtonStyle.minHeight
+            } : null
+          });
+        }
+        return {
+          samples,
+          documentContained: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1
+        };
+      })()\`));
+    }
+    win.setBounds(originalBounds);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await wc.executeJavaScript('document.querySelector(".tab[data-view=upload]")?.click()');
+    const invalidResizeFrames = resizeStability.filter(cycle => !cycle.documentContained || cycle.samples.some(sample => !sample.visible || !sample.contained || sample.activeViews !== 1 || (sample.target === 'settings' && (sample.settingsHeaderHeight <= 0 || sample.settingsHeaderHeight > (sample.settingsHeaderMetrics.innerWidth <= 839 ? 58 : 64)))));
+    if (invalidResizeFrames.length) console.log('Invalid resize frames: ' + JSON.stringify(invalidResizeFrames));
+    check('Repeated minimum and standard resizes keep every view painted and contained', resizeStability.length === 8 && invalidResizeFrames.length === 0);
+    if (rendererDiagnostics.length) console.log('Renderer diagnostics: ' + JSON.stringify(rendererDiagnostics));
+    check('Dynamic rendering emits no renderer errors, failed loads, crashes, or unresponsive events', rendererDiagnostics.length === 0 && rendererUnresponsiveCount === 0);
 
     const updateHidden = await wc.executeJavaScript('document.getElementById("updateBanner")?.style.display');
     check('Update banner hidden', updateHidden === 'none');

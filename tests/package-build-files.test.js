@@ -36,6 +36,7 @@ test('afterPack brands the executable metadata shown by Windows', async () => {
   assert.equal(editCall.options['file-version'], '9.8.7');
   assert.equal(editCall.options['product-version'], '9.8.7');
   assert.deepEqual(editCall.options['version-string'], {
+    CompanyName: 'Sucukdeluxe',
     FileDescription: 'Multi Hoster Uploader',
     InternalName: 'Multi-Hoster-Upload',
     OriginalFilename: 'Multi-Hoster-Upload.exe',

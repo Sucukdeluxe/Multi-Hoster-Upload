@@ -159,6 +159,19 @@ describe('UploadManager', () => {
     assert.equal(summary.files.length, 2);
   });
 
+  it('emits a final idle stats snapshot after a normal batch', async () => {
+    const mgr = new UploadManager({});
+    const states = [];
+    mgr.on('stats', (stats) => states.push(stats.state));
+
+    await mgr.startBatch([
+      { file: '/test/video.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    assert.equal(states.at(-1), 'idle');
+    assert.equal(mgr.statsInterval, null);
+  });
+
   it('retries on failure then succeeds', async () => {
     let callCount = 0;
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
@@ -230,7 +243,9 @@ describe('UploadManager', () => {
 
     const mgr = new UploadManager({});
     let batchDone = false;
+    const snapshots = [];
     mgr.on('batch-done', () => { batchDone = true; });
+    mgr.on('stats', (stats) => snapshots.push({ ...stats }));
 
     const batchPromise = mgr.startBatch([
       { file: '/test/video.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
@@ -239,10 +254,16 @@ describe('UploadManager', () => {
     // Wait a bit then cancel
     await new Promise(r => setTimeout(r, 100));
     mgr.cancel();
+    const cancellingSnapshot = snapshots.at(-1);
 
     await batchPromise;
     assert.equal(mgr.running, false);
     assert.ok(batchDone, 'batch-done should be emitted even after cancel');
+    assert.equal(cancellingSnapshot.state, 'stopping');
+    assert.ok(cancellingSnapshot.activeJobs > 0);
+    assert.equal(snapshots.at(-1).state, 'idle');
+    assert.equal(snapshots.at(-1).activeJobs, 0);
+    assert.equal(mgr.statsInterval, null);
   });
 
   it('does not emit one aborted progress event per job when cancelling a whole batch', async () => {
