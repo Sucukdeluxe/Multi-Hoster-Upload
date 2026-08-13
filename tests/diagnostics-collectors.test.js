@@ -6,6 +6,7 @@ const path = require('path');
 const support = require('../lib/support-bundle');
 const stats = require('../lib/stats');
 const { createCollectors } = require('../lib/diagnostics-collectors');
+const { createAgent } = require('../lib/diagnostics-agent');
 
 function makeFixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-diag-'));
@@ -116,30 +117,100 @@ test('getHistory, listErrors and serverHealth share loadHistory after migration'
   assert.equal(health.recentBatches[0].timestamp, health.errors.errors[0].ts, 'serverHealth must summarize one history snapshot');
 });
 
-test('history commands fail closed instead of reading stale config history', () => {
+test('getHistory, listErrors and serverHealth leave the supplied history snapshot unchanged', () => {
+  const original = [
+    { timestamp: '2026-01-02T00:00:00.000Z', files: [{ name: 'newer.mkv', results: [{ hoster: 'voe.sx', status: 'done' }] }] },
+    { timestamp: '2026-01-01T00:00:00.000Z', files: [{ name: 'older.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'Not video file format' }] }] }
+  ];
+  const sortingStats = {
+    ...stats,
+    summarizePerHoster: history => {
+      history.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+      return stats.summarizePerHoster(history);
+    }
+  };
+  for (const [name, invoke] of [
+    ['listErrors', c => c.listErrors({})],
+    ['getHistory', c => c.getHistory({ includeFiles: true })],
+    ['serverHealth', c => c.serverHealth({})]
+  ]) {
+    const snapshot = JSON.parse(JSON.stringify(original));
+    const c = createCollectors({
+      loadConfig: () => ({ hosters: {}, globalSettings: {}, history: [] }),
+      loadHistory: () => snapshot,
+      getAllLogPaths: () => ({ logDir: os.tmpdir() }),
+      support, stats: sortingStats,
+      appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
+    });
+    invoke(c);
+    assert.deepEqual(snapshot, original, `${name} must not mutate the supplied history snapshot`);
+  }
+});
+
+test('dedicated history reader failures never report healthy empty history or use stale config history', () => {
+  const sensitive = 'reader-private-value-38152';
+  const config = {
+    hosters: { 'voe.sx': [{ apiKey: sensitive }] },
+    globalSettings: {},
+    history: [{ timestamp: '2025-12-31T00:00:00.000Z', files: [{ name: 'stale.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'stale error' }] }] }]
+  };
+  for (const [scenario, loadHistory] of [
+    ['throwing reader', () => { throw new Error(`history reader failed with ${sensitive}`); }],
+    ['invalid reader result', () => ({ history: [] })]
+  ]) {
+    const c = createCollectors({
+      loadConfig: () => JSON.parse(JSON.stringify(config)),
+      loadHistory,
+      getAllLogPaths: () => ({ logDir: os.tmpdir() }),
+      support, stats,
+      appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
+    });
+    for (const [name, invoke] of [
+      ['getHistory', () => c.getHistory({ includeFiles: true })],
+      ['listErrors', () => c.listErrors({})],
+      ['serverHealth', () => c.serverHealth({})]
+    ]) {
+      assert.throws(invoke, /history/i, `${name} must reject a ${scenario}`);
+    }
+    const agent = createAgent(c);
+    for (const op of ['get_history', 'list_errors', 'server_health']) {
+      const response = agent.handle(op, { includeFiles: true });
+      const json = JSON.stringify(response);
+      assert.equal(response.ok, false, `${op} must report the ${scenario} as unhealthy`);
+      assert.match(response.error, /history/i);
+      assert.ok(!json.includes(sensitive));
+      assert.ok(!json.includes('stale.mkv'));
+    }
+  }
+});
+
+test('history operations fail closed when configured secrets cannot be loaded', () => {
+  const sensitive = 'history-private-value-27491';
+  let historyReads = 0;
   const c = createCollectors({
-    loadConfig: () => ({
-      hosters: {},
-      globalSettings: {},
-      history: [{ timestamp: '2025-12-31T00:00:00.000Z', files: [{ name: 'stale.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'stale error' }] }] }]
-    }),
-    loadHistory: () => null,
+    loadConfig: () => { throw new Error(`secret decryption failed near ${sensitive}`); },
+    loadHistory: () => {
+      historyReads++;
+      return [{ timestamp: '2026-01-04T00:00:00.000Z', files: [{ name: `${sensitive}.mkv`, results: [{ hoster: 'voe.sx', status: 'error', error: `opaque ${sensitive}` }] }] }];
+    },
     getAllLogPaths: () => ({ logDir: os.tmpdir() }),
     support, stats,
     appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
   });
-  const health = c.serverHealth({ errorLimit: 5 });
-  assert.deepEqual({
-    historyBatches: c.getHistory({ limit: 5 }).totalBatches,
-    listedErrors: c.listErrors({ limit: 5 }).total,
-    healthBatches: health.recentBatches.length,
-    healthErrors: health.errors.total
-  }, {
-    historyBatches: 0,
-    listedErrors: 0,
-    healthBatches: 0,
-    healthErrors: 0
-  });
+  for (const [name, invoke] of [
+    ['getHistory', () => c.getHistory({ includeFiles: true })],
+    ['listErrors', () => c.listErrors({})],
+    ['serverHealth', () => c.serverHealth({})]
+  ]) {
+    assert.throws(invoke, /secret decryption failed/, `${name} must fail without the configured redaction secrets`);
+  }
+  assert.equal(historyReads, 0, 'history must not be read before the redaction secrets are available');
+  const agent = createAgent(c);
+  for (const op of ['get_history', 'list_errors', 'server_health']) {
+    const response = agent.handle(op, { includeFiles: true });
+    assert.deepEqual(response, { ok: false, error: 'diagnostic response could not be safely returned' });
+    assert.ok(!JSON.stringify(response).includes(sensitive));
+  }
 });
 
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
