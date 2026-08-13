@@ -261,6 +261,39 @@ describe('ConfigStore', () => {
     assert.equal(history[104].id, 'batch-104');
   });
 
+  it('durably syncs migrated history before replacing the live file', async () => {
+    store._historyMigrated = true;
+    fs.writeFileSync(store.historyPath, '[]', 'utf-8');
+    const originalOpen = fs.promises.open;
+    const originalRename = fs.promises.rename;
+    let synced = false;
+    let renamed = false;
+    fs.promises.open = async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalSync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        await originalSync();
+        synced = true;
+      };
+      return handle;
+    };
+    fs.promises.rename = async (...args) => {
+      assert.equal(synced, true);
+      renamed = true;
+      return originalRename(...args);
+    };
+
+    try {
+      await store.appendHistory({ id: 'durable', files: [] });
+    } finally {
+      fs.promises.open = originalOpen;
+      fs.promises.rename = originalRename;
+    }
+
+    assert.equal(renamed, true);
+    assert.deepEqual(store.loadHistory().map(entry => entry.id), ['durable']);
+  });
+
   it('clearHistory empties the array', async () => {
     await store.appendHistory({ id: 'test', files: [] });
     assert.equal(store.loadHistory().length, 1);

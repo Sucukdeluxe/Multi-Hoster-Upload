@@ -67,4 +67,28 @@ describe('RemoteServer', () => {
     assert.notStrictEqual(end, -1);
     assert.match(source.slice(start, end), /host:\s*'127\.0\.0\.1'/);
   });
+
+  it('rejects non-object JSON before authentication without throwing', () => {
+    const { EventEmitter } = require('node:events');
+    const RemoteServer = require('../lib/remote-server');
+    const server = new RemoteServer();
+    const socket = new EventEmitter();
+    socket.close = (code) => {
+      socket.closeCode = code;
+    };
+    socket.send = () => {};
+    server._config = {
+      token: 'test-token-123',
+      allowlist: [],
+      diagnosticMode: false,
+      onCreateCaptureWindow: () => {},
+      onDestroyCaptureWindow: () => {},
+      onSignalingToCapture: () => {}
+    };
+
+    server._handleConnection(socket, { socket: { remoteAddress: '127.0.0.1' } });
+    assert.doesNotThrow(() => socket.emit('message', Buffer.from('null')));
+    assert.strictEqual(socket.closeCode, 4002);
+    socket.emit('close');
+  });
 });
