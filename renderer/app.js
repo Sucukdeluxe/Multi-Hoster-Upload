@@ -4315,6 +4315,44 @@ function showAppChoice({ message, title, confirmText, alternateText, cancelText 
   return showAppDialog({ message, title, confirmText, alternateText, cancelText, showCancel: true });
 }
 
+let _appAlertListenersReady = false;
+
+function setupAppAlertListeners() {
+  if (_appAlertListenersReady) return;
+  const confirm = document.getElementById('appAlertConfirmBtn');
+  const alternate = document.getElementById('appAlertAlternateBtn');
+  const cancel = document.getElementById('appAlertCancelBtn');
+  const close = document.getElementById('appAlertCloseBtn');
+  const modal = document.getElementById('appAlertModal');
+  if (!confirm || !alternate || !cancel || !close || !modal) return;
+  _appAlertListenersReady = true;
+  confirm.addEventListener('click', () => closeAppAlert(true));
+  alternate.addEventListener('click', () => closeAppAlert('alternate'));
+  cancel.addEventListener('click', () => closeAppAlert(false));
+  close.addEventListener('click', () => closeAppAlert(false));
+  modal.addEventListener('click', event => {
+    if (event.target === modal) closeAppAlert(false);
+  });
+  document.addEventListener('keydown', event => {
+    if (modal.style.display !== 'flex') return;
+    const focusable = [...modal.querySelectorAll('button:not([disabled]):not([hidden])')];
+    if (event.key === 'Tab' && focusable.length) {
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeAppAlert(false);
+    }
+  }, true);
+}
+
 async function executeHealthCheck(hosters, _mode, generations) {
   renderHealthCheckResults([]);
   const result = await window.api.runHealthCheck({ hosters });
@@ -7169,32 +7207,6 @@ function setupListeners() {
     });
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
-  document.getElementById('appAlertConfirmBtn').addEventListener('click', () => closeAppAlert(true));
-  document.getElementById('appAlertAlternateBtn').addEventListener('click', () => closeAppAlert('alternate'));
-  document.getElementById('appAlertCancelBtn').addEventListener('click', () => closeAppAlert(false));
-  document.getElementById('appAlertCloseBtn').addEventListener('click', () => closeAppAlert(false));
-  document.getElementById('appAlertModal').addEventListener('click', event => {
-    if (event.target.id === 'appAlertModal') closeAppAlert(false);
-  });
-  document.addEventListener('keydown', event => {
-    const modal = document.getElementById('appAlertModal');
-    if (modal?.style.display !== 'flex') return;
-    const focusable = [...modal.querySelectorAll('button:not([disabled]):not([hidden])')];
-    if (event.key === 'Tab' && focusable.length) {
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-      }
-      return;
-    }
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      closeAppAlert(false);
-    }
-  }, true);
 
   document.getElementById('clearHistoryBtn').addEventListener('click', openHistoryClearModal);
   document.getElementById('confirmHistoryClearBtn').addEventListener('click', confirmHistoryClear);
@@ -8139,6 +8151,7 @@ function updateStatsPanel() {
 window.api.onUpdateAvailable(showUpdateBanner);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
+setupAppAlertListeners();
 init().then(() => {
   window.api.signalCloseHandshakeReady();
 }).catch((err) => {
