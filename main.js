@@ -132,6 +132,7 @@ const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
 const uploadBatchMutationGates = new WeakMap();
+const uploadRecoveryStates = new WeakMap();
 let lastSessionSummary = null;
 let startupRecoveryCoordinator = null;
 let sourceDeleteJournal = null;
@@ -2092,7 +2093,17 @@ async function executeReservedUploadStart(payload, startLease) {
     startedAt: new Date().toISOString(),
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
-  try { await configStore.saveUploadRecovery(recovery); } catch (error) { debugLog(`upload recovery state could not be saved: ${error.message}`); }
+  try {
+    await configStore.saveUploadRecovery(recovery);
+  } catch (error) {
+    debugLog(`upload recovery state could not be saved: ${error.message}`);
+    if (uploadManager === _thisManager) {
+      uploadManager = null;
+      globalThis._mhuUploadManagerRef = null;
+    }
+    return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
+  }
+  uploadRecoveryStates.set(_thisManager, recovery);
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2435,6 +2446,21 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
         () => true
       );
       if (!auditedAdd.ok) return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
+    }
+    const batchRecovery = uploadRecoveryStates.get(batchManager);
+    const newRecoveryJobIds = tasks.map(task => task.jobId).filter(Boolean);
+    if (batchRecovery && newRecoveryJobIds.length > 0) {
+      const nextRecovery = {
+        ...batchRecovery,
+        jobIds: Array.from(new Set([...(batchRecovery.jobIds || []), ...newRecoveryJobIds]))
+      };
+      try {
+        await configStore.saveUploadRecovery(nextRecovery);
+      } catch (error) {
+        debugLog(`upload recovery state could not be extended: ${error.message}`);
+        return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
+      }
+      Object.assign(batchRecovery, nextRecovery);
     }
     persistRotation(pick);
     const sourceCleanupFingerprints = batchManager.sourceFileCleanup
