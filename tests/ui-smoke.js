@@ -2055,6 +2055,9 @@ setTimeout(async () => {
       const deletedUploadLegacy = run([
         { id: 'completion-replacement', fileName: 'reused.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
       ], { uploadId: 'completion-deleted-upload', fileName: 'reused.bin', hoster: 'voe.sx', status: 'done', result: { download_url: 'https://example.invalid/deleted-upload' } }, 'completion-deleted-upload');
+      const liveIndexedUpload = run([
+        { id: 'completion-live-indexed', uploadId: 'completion-live-upload', fileName: 'indexed.bin', hoster: 'voe.sx', status: 'queued', bytesTotal: 10 }
+      ], { uploadId: 'completion-live-upload', fileName: 'different.bin', hoster: 'different.invalid', status: 'done', result: { download_url: 'https://example.invalid/live-upload' } });
       const ambiguousLegacy = run([
         { id: 'completion-legacy-a', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'queued', bytesTotal: 10 },
         { id: 'completion-legacy-b', fileName: 'legacy.bin', hoster: 'byse.sx', status: 'preview', bytesTotal: 10 }
@@ -2067,11 +2070,12 @@ setTimeout(async () => {
       selectedFiles = [];
       _deletedJobIds.clear();
       rebuildJobIndex();
-      return { exact, missingExact, deletedExact, deletedUploadLegacy, ambiguousLegacy, uniqueLegacy };
+      return { exact, missingExact, deletedExact, deletedUploadLegacy, liveIndexedUpload, ambiguousLegacy, uniqueLegacy };
     })()\`);
     check('Completion events with jobId update only their exact live job', completionIdentityRaces.exact[0].status === 'queued' && completionIdentityRaces.exact[1].status === 'done' && completionIdentityRaces.exact[1].link === 'https://example.invalid/exact-b');
     check('Missing or deleted exact completion IDs never fall back to another job', completionIdentityRaces.missingExact.length === 1 && completionIdentityRaces.missingExact[0].status === 'queued' && completionIdentityRaces.deletedExact.length === 1 && completionIdentityRaces.deletedExact[0].status === 'queued');
     check('Deleted legacy upload IDs never bind to a unique replacement job', completionIdentityRaces.deletedUploadLegacy.length === 1 && completionIdentityRaces.deletedUploadLegacy[0].status === 'queued' && completionIdentityRaces.deletedUploadLegacy[0].uploadId === null && completionIdentityRaces.deletedUploadLegacy[0].link === null);
+    check('Live indexed upload IDs retain precedence over legacy visible identity', completionIdentityRaces.liveIndexedUpload.length === 1 && completionIdentityRaces.liveIndexedUpload[0].status === 'done' && completionIdentityRaces.liveIndexedUpload[0].uploadId === 'completion-live-upload' && completionIdentityRaces.liveIndexedUpload[0].link === 'https://example.invalid/live-upload');
     check('Legacy completion identity applies only to one unambiguous candidate', completionIdentityRaces.ambiguousLegacy.every(job => job.status !== 'done') && completionIdentityRaces.uniqueLegacy.length === 1 && completionIdentityRaces.uniqueLegacy[0].status === 'done' && completionIdentityRaces.uniqueLegacy[0].link === 'https://example.invalid/unique');
     restoreInitialIpcHandler('complete-upload-finalization');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
