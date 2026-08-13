@@ -2861,7 +2861,11 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   background: rgba(255, 255, 255, .035);
 }
 
-.queue-row.selected,
+.queue-row.selected {
+  background: rgba(186, 208, 252, .18) !important;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .recent-file-row.selected,
 .history-row.selected {
   background: rgba(186, 208, 252, .1) !important;
@@ -2951,16 +2955,26 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   min-height: 34px;
 }
 
-.btn-primary,
-.btn-success {
+.btn-primary {
   border-color: transparent;
   background: var(--accent);
   color: var(--accent-ink);
 }
 
-.btn-primary:hover,
-.btn-success:hover {
+.btn-primary:hover {
   background: var(--accent-end);
+  filter: none;
+  transform: none;
+}
+
+.btn-success {
+  border-color: transparent;
+  background: var(--success);
+  color: #082616;
+}
+
+.btn-success:hover {
+  background: var(--success-end);
   filter: none;
   transform: none;
 }
@@ -3345,6 +3359,14 @@ input[type="checkbox"] {
 }
 
 #settings-view :is(input, textarea) {
+  user-select: text;
+}
+
+#upload-view {
+  user-select: none;
+}
+
+#upload-view :is(input, textarea, [contenteditable="true"]) {
   user-select: text;
 }
 

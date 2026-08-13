@@ -85,6 +85,24 @@ test('redactLogText leaves a normal "session" word in prose alone', () => {
   assert.equal(redactLogText(benign, []), benign);
 });
 
+test('redactLogText removes complete local paths from structured and free-form log text', () => {
+  const profilePath = ['C:', 'Users', 'ProfileFixture', 'Private Folder', 'episode.mkv'].join('\\');
+  const drivePath = ['D:', 'Archive', 'Private Folder', 'source.mkv'].join('\\');
+  const stagedPath = ['E:', 'Staging', 'source.pending-delete'].join('\\');
+  const uncPath = ['', '', 'fileserver', 'private-share', 'secret.bin'].join('\\');
+  const input = [
+    `source ${profilePath}`,
+    `failed at ${drivePath}`,
+    JSON.stringify({ stagedFile: stagedPath }),
+    `network source ${uncPath}`
+  ].join('\n');
+  const out = redactLogText(input, []);
+  for (const value of ['ProfileFixture', 'episode.mkv', 'Private Folder', 'source.mkv', 'source.pending-delete', 'fileserver', 'private-share', 'secret.bin']) {
+    assert.ok(!out.includes(value), `private path fragment survived: ${value}`);
+  }
+  assert.ok((out.match(/<redacted-path>/g) || []).length >= 4);
+});
+
 test('sanitizeConfig does not mutate input', () => {
   const input = { hosters: { 'voe.sx': [{ password: 'secret' }] } };
   const clone = JSON.parse(JSON.stringify(input));
@@ -152,4 +170,33 @@ test('buildSupportBundleText handles empty file list and missing header', () => 
   const text = buildSupportBundleText({ sanitizedConfig: {}, files: [] });
   assert.match(text, /=== Multi-Hoster-Upload Support Bundle ===/);
   assert.match(text, /=== Config/);
+});
+
+test('buildSupportBundleText redacts configured and pattern-detected secrets from included logs', () => {
+  const tmp = path.join(os.tmpdir(), `mhu-bundle-secrets-${Date.now()}.log`);
+  const configuredSecret = ['configured', 'Secret', '123456'].join('');
+  const bearerSecret = ['opaque', 'Bearer', '987654321'].join('');
+  const cookieSecret = ['session', 'Cookie', '1122334455'].join('');
+  const querySecret = ['query', 'Secret', '6677889900'].join('');
+  const privatePath = ['C:', 'Users', 'ProfileFixture', 'Private', 'episode.mkv'].join('\\');
+  const stagedPath = ['D:', 'Private', 'episode.pending-delete'].join('\\');
+  fs.writeFileSync(tmp, `# SOURCE-CLEANUP ${JSON.stringify({ file: privatePath, stagedFile: stagedPath })}\ntoken=${configuredSecret}\nAuthorization: Bearer ${bearerSecret}\nCookie: sid=${cookieSecret}\nhttps://example.invalid/upload?api_key=${querySecret}\n`);
+  try {
+    const text = buildSupportBundleText({
+      sanitizedConfig: { globalSettings: { logFilePath: privatePath, pendingQueue: { selectedFiles: [{ path: privatePath }] } } },
+      secrets: [configuredSecret],
+      files: [{ label: 'upload-audit.log', path: tmp }]
+    });
+    assert.ok(!text.includes(configuredSecret));
+    assert.ok(!text.includes(bearerSecret));
+    assert.ok(!text.includes(cookieSecret));
+    assert.ok(!text.includes(querySecret));
+    assert.ok(!text.includes('ProfileFixture'));
+    assert.ok(!text.includes('episode.mkv'));
+    assert.ok(!text.includes('episode.pending-delete'));
+    assert.ok(!text.includes(tmp));
+    assert.match(text, /<redacted>/);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
 });

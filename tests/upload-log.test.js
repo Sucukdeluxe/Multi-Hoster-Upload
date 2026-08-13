@@ -1,6 +1,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { formatUploadLogLine, parseUploadLogLine } = require('../lib/upload-log');
+const {
+  formatUploadLogLine,
+  parseUploadLogLine,
+  summarizeBatchPlan,
+  formatUploadPlanLogLine
+} = require('../lib/upload-log');
 const { partitionRestoredJobsByLog } = require('../lib/queue-dedup');
 
 function previewJob(fileName, hoster) {
@@ -14,6 +19,59 @@ test('writer -> reader round trip: parsed ts is the same epoch frame as the sour
   assert.equal(parsed.hoster, 'voe.sx');
   assert.equal(parsed.fileName, 'a.mkv');
   assert.equal(parsed.ts, d.getTime(), 'parser ts must equal the writer Date epoch (no tz shift)');
+});
+
+test('batch plan records unique sources, destinations, and requested upload count without file paths', () => {
+  const jobs = [];
+  for (const file of ['C:/private/a.mkv', 'C:/private/b.mkv', 'C:/private/c.mkv']) {
+    for (const hoster of ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx']) {
+      jobs.push({ file, hoster });
+    }
+  }
+
+  const plan = summarizeBatchPlan({ jobs });
+  const line = formatUploadPlanLogLine(new Date('2026-08-13T12:00:00.000Z'), plan, 'start');
+
+  assert.deepEqual(plan, {
+    fileCount: 3,
+    destinationCount: 4,
+    plannedUploadCount: 12
+  });
+  assert.equal(line.startsWith('# UPLOAD-PLAN '), true);
+  assert.equal(line.includes('C:/private'), false);
+  assert.equal(line.includes('a.mkv'), false);
+  assert.equal(line.includes('doodstream.com'), false);
+  assert.deepEqual(JSON.parse(line.slice('# UPLOAD-PLAN '.length)), {
+    timestamp: '2026-08-13T12:00:00.000Z',
+    mode: 'start',
+    fileCount: 3,
+    destinationCount: 4,
+    plannedUploadCount: 12
+  });
+  assert.equal(parseUploadLogLine(line), null);
+});
+
+test('batch plan supports the legacy files and hosters payload', () => {
+  assert.deepEqual(summarizeBatchPlan({
+    files: ['C:/private/a.mkv', 'C:/private/b.mkv'],
+    hosters: ['voe.sx', 'doodstream.com']
+  }), {
+    fileCount: 2,
+    destinationCount: 2,
+    plannedUploadCount: 4
+  });
+});
+
+test('batch plan preserves a sparse requested job count instead of multiplying dimensions', () => {
+  assert.deepEqual(summarizeBatchPlan({ jobs: [
+    { file: 'C:/private/a.mkv', hoster: 'voe.sx' },
+    { file: 'C:/private/a.mkv', hoster: 'byse.sx' },
+    { file: 'C:/private/b.mkv', hoster: 'voe.sx' }
+  ] }), {
+    fileCount: 2,
+    destinationCount: 2,
+    plannedUploadCount: 3
+  });
 });
 
 test('SEAM: a real appendUploadLog-format line drops a preview ghost vs a savedAt taken BEFORE completion', () => {

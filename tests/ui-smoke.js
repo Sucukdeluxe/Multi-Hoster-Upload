@@ -203,8 +203,8 @@ setTimeout(async () => {
     await captureVisual('00-language-picker.png');
     await wc.executeJavaScript('document.getElementById("upload-tab").click()');
     const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
-    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-debug.log', 'mp4,mkv,avi']);
-    const neutralUiPathBasenames = new Set(['account-rotation.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-debug.log']);
+    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-audit.log', 'upload-debug.log', 'mp4,mkv,avi']);
+    const neutralUiPathBasenames = new Set(['account-rotation.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-audit.log', 'upload-debug.log']);
     const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !neutralUiPathBasenames.has(path.basename(value)) && !value.includes('Multi-Hoster-Uploader'));
     if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
     check('Every mounted human-facing value is translated or explicitly language-neutral', unexpectedUnchangedValues.length === 0);
@@ -243,8 +243,8 @@ setTimeout(async () => {
     check('Language changes redraw stable telemetry values with the active locale', localizedStableMetric.german.join('|') === '1.234|1.234' && localizedStableMetric.english.join('|') === '1,234|1,234');
     const germanSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
     check('German sidebar hierarchy uses distinct localized kickers', germanSidebarHeadings.join('::') === 'Arbeitsbereich|Uploads::Accounts verwalten|Accounts::Archiv|Verlauf');
-    const saveAfterLanguageChange = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-success")].join("|"); })()');
-    check('Changing language enables the green save action', saveAfterLanguageChange === 'false|true');
+    const saveAfterLanguageChange = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); const channels = getComputedStyle(button).backgroundColor.match(/[0-9.]+/g)?.map(Number) || []; return { disabled: button.disabled, success: button.classList.contains("btn-success"), green: channels.length >= 3 && channels[1] > channels[0] * 1.25 && channels[1] > channels[2] * 1.2 }; })()');
+    check('Changing language enables a visibly green save action', saveAfterLanguageChange.disabled === false && saveAfterLanguageChange.success && saveAfterLanguageChange.green);
     await wc.executeJavaScript('document.getElementById("saveSettingsBtn").click()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("saveSettingsBtn").disabled'));
     const saveAfterCommit = await wc.executeJavaScript('(() => { const button = document.getElementById("saveSettingsBtn"); return [button.disabled, button.classList.contains("btn-secondary")].join("|"); })()');
@@ -722,6 +722,68 @@ setTimeout(async () => {
     check('Status changes drop selections that leave the upload filter', uploadSelectionScope.statusChangeSelected.length === 0 && uploadSelectionScope.statusChangeVisible.join('|') === 'scope-active-z');
     check('Selected upload actions ignore hidden stale selections', uploadSelectionScope.hiddenAction.selected.length === 0 && uploadSelectionScope.hiddenAction.retryDisabled && uploadSelectionScope.hiddenAction.moveDisabled);
 
+    const queueSelectionAnchor = await wc.executeJavaScript(\`(() => {
+      queueJobs = ['a', 'b', 'c', 'd'].map(id => ({ id: 'anchor-' + id, file: 'C:/ui/anchor-' + id + '.bin', fileName: 'anchor-' + id + '.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }));
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      renderQueueTable();
+      const row = id => document.querySelector('[data-job-id="anchor-' + id + '"]');
+      handleRowClick({ ctrlKey: false, metaKey: false, shiftKey: false }, row('a'));
+      handleRowClick({ ctrlKey: true, metaKey: false, shiftKey: false }, row('c'));
+      handleRowClick({ ctrlKey: false, metaKey: false, shiftKey: true }, row('d'));
+      const selected = [...selectedJobIds].sort();
+      const aria = Object.fromEntries(['a', 'b', 'c', 'd'].map(id => [id, row(id).getAttribute('aria-selected')]));
+      queueJobs = [];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      renderQueueTable();
+      return { selected, aria };
+    })()\`);
+    check('Shift selection starts from the last clicked row and keeps ARIA state synchronized', queueSelectionAnchor.selected.join('|') === 'anchor-a|anchor-c|anchor-d' && queueSelectionAnchor.aria.a === 'true' && queueSelectionAnchor.aria.b === 'false' && queueSelectionAnchor.aria.c === 'true' && queueSelectionAnchor.aria.d === 'true');
+
+    const queueSelectionVisual = await wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-selection-visual", file: "C:/ui/selection.bin", fileName: "selection.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 }]; selectedJobIds.clear(); selectedJobIds.add("ui-selection-visual"); rebuildJobIndex(); renderQueueTable(); const row = document.querySelector(".queue-row.selected"); const style = getComputedStyle(row); const channels = style.backgroundColor.match(/[0-9.]+/g)?.map(Number) || []; const result = { userSelect: getComputedStyle(row.querySelector(".col-filename")).userSelect, alpha: channels[3] ?? 1, marker: style.boxShadow !== "none" }; queueJobs = []; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); return result; })()');
+    check('Upload rows prevent accidental text selection and expose a strong selected state', queueSelectionVisual.userSelect === 'none' && queueSelectionVisual.alpha >= 0.16 && queueSelectionVisual.marker);
+
+    const removedAnchorState = await wc.executeJavaScript('(() => { queueJobs = ["a", "b"].map(id => ({ id: "ui-anchor-remove-" + id, file: "C:/ui/anchor-remove-" + id + ".bin", fileName: "anchor-remove-" + id + ".bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 })); selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); const first = document.querySelector("[data-job-id=ui-anchor-remove-a]"); handleRowClick({ ctrlKey: false, metaKey: false, shiftKey: false }, first); const removed = queueJobs.shift(); removeJobFromIndex(removed, true); selectedJobIds.delete(removed.id); renderQueueTable(); const second = document.querySelector("[data-job-id=ui-anchor-remove-b]"); handleRowClick({ ctrlKey: false, metaKey: false, shiftKey: true }, second); const result = { anchor: selectionAnchorJobId, selected: [...selectedJobIds] }; queueJobs = []; selectedJobIds.clear(); selectionAnchorJobId = null; rebuildJobIndex(); renderQueueTable(); return result; })()');
+    check('Removing the selected anchor leaves the next Shift click usable', removedAnchorState.anchor === 'ui-anchor-remove-b' && removedAnchorState.selected.join('|') === 'ui-anchor-remove-b');
+
+    const removeAllDanger = await wc.executeJavaScript('(() => { const item = document.querySelector("#contextMenu [data-action=delete-all]"); const channels = getComputedStyle(item).color.match(/[0-9.]+/g)?.map(Number) || []; return Boolean(item && channels.length >= 3 && channels[0] > channels[1] * 1.2 && channels[0] > channels[2] * 1.15); })()');
+    check('Remove all is visually marked as a destructive queue action', removeAllDanger === true);
+
+    let releaseSelectedQueueCancel = null;
+    ipcMain.removeHandler('cancel-selected-jobs');
+    ipcMain.handle('cancel-selected-jobs', () => new Promise(resolve => { releaseSelectedQueueCancel = () => resolve(true); }));
+    await wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-delete-selected", file: "C:/ui/delete-selected.bin", fileName: "delete-selected.bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 }]; selectedJobIds.clear(); selectedJobIds.add("ui-delete-selected"); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteSelectedPromise = handleContextAction("delete-selected"); return true; })()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
+    await waitUntil(() => releaseSelectedQueueCancel);
+    const selectedQueueStillPresent = await wc.executeJavaScript('queueJobs.length');
+    releaseSelectedQueueCancel();
+    const selectedQueueAfterCancel = await wc.executeJavaScript('window.__uiDeleteSelectedPromise.then(() => { delete window.__uiDeleteSelectedPromise; return queueJobs.length; })');
+    check('Removing selected uploads waits for the main-process cancellation acknowledgement', selectedQueueStillPresent === 1 && selectedQueueAfterCancel === 0);
+    restoreInitialIpcHandler('cancel-selected-jobs');
+
+    let releaseFullQueueCancel = null;
+    let fullQueueCancelCalls = 0;
+    let selectedQueueCancelCalls = 0;
+    ipcMain.removeHandler('cancel-upload');
+    ipcMain.handle('cancel-upload', () => {
+      fullQueueCancelCalls++;
+      return new Promise(resolve => { releaseFullQueueCancel = () => resolve(true); });
+    });
+    ipcMain.removeHandler('cancel-selected-jobs');
+    ipcMain.handle('cancel-selected-jobs', () => { selectedQueueCancelCalls++; return true; });
+    await wc.executeJavaScript('(() => { uploading = true; queueJobs = ["a", "b", "c"].map(id => ({ id: "ui-delete-all-" + id, file: "C:/ui/delete-all-" + id + ".bin", fileName: "delete-all-" + id + ".bin", hoster: "byse.sx", status: "queued", bytesUploaded: 0, bytesTotal: 100, progress: 0 })); selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteAllPromise = handleContextAction("delete-all"); return true; })()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
+    await waitUntil(() => releaseFullQueueCancel);
+    const fullQueueStillPresent = await wc.executeJavaScript('queueJobs.length');
+    releaseFullQueueCancel();
+    const fullQueueAfterCancel = await wc.executeJavaScript('window.__uiDeleteAllPromise.then(() => { delete window.__uiDeleteAllPromise; return { length: queueJobs.length, uploading }; })');
+    check('Remove all awaits one batch cancellation instead of issuing one cancellation per queued job', fullQueueStillPresent === 3 && fullQueueAfterCancel.length === 0 && fullQueueAfterCancel.uploading === false && fullQueueCancelCalls === 1 && selectedQueueCancelCalls === 0);
+    restoreInitialIpcHandler('cancel-upload');
+    restoreInitialIpcHandler('cancel-selected-jobs');
+
     const keyboardTab = await wc.executeJavaScript('document.getElementById("upload-tab").focus(); document.getElementById("upload-tab").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })); document.querySelector(".tab.active")?.textContent?.trim() + "|" + document.activeElement?.id');
     check('Arrow keys move and activate main tabs', keyboardTab === 'Accounts|accounts-tab');
 
@@ -1195,7 +1257,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'logs\\']")?.click()');
     await new Promise(resolve => setTimeout(resolve, 100));
     const logPathLayout = await wc.executeJavaScript('(() => { const block = document.getElementById("logPathsBlock")?.getBoundingClientRect(); const rows = [...document.querySelectorAll("#logPathsList > div")]; const visible = rows.length > 0 && rows.every(row => { const rect = row.getBoundingClientRect(); const code = row.querySelector("code")?.getBoundingClientRect(); const button = row.querySelector("button")?.getBoundingClientRect(); return block && rect.right <= block.right + 1 && code && button && code.right <= button.left - 6 && button.right <= block.right + 1; }); return [rows.length, visible].join("|"); })()');
-    check('Log file rows keep paths and buttons inside the Diagnose panel', logPathLayout === '4|true');
+    check('Log file rows keep paths and buttons inside the Diagnose panel', logPathLayout === '5|true');
 
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'remote\\']")?.click()');
     const remoteSettingsSpacing = await wc.executeJavaScript('(() => { const grid = document.querySelector("[data-subpage=remote] .settings-grid-mini")?.getBoundingClientRect(); const port = document.getElementById("remotePortInput")?.closest(".settings-row")?.getBoundingClientRect(); return grid && port ? Math.round(port.top - grid.bottom) : -1; })()');
@@ -1438,14 +1500,13 @@ setTimeout(async () => {
     releaseBlockedWrite?.();
     for (let attempt = 0; attempt < 100 && !finalImportQueueStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     const importStateDuringFinalQueuePersist = await wc.executeJavaScript('({ gateClosed: configImportInProgress, webhookUrl: config.globalSettings.webhookUrl, accountId: config.hosters["byse.sx"]?.[0]?.id })');
-    const staleImportSettings = wc.executeJavaScript('saveGlobalSettingsTracked({ ...(config.globalSettings || {}), webhookUrl: "https://import-epoch.invalid/stale-after-commit" }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }))');
-    const staleImportAccounts = wc.executeJavaScript('saveConfigTracked({ hosters: { ...(config.hosters || {}), "byse.sx": [{ id: "ui-stale-account", enabled: true, authType: "api", apiKey: "stale" }] } }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code }))');
+    const staleImportWriteStart = await wc.executeJavaScript('(() => { const settings = saveGlobalSettingsTracked({ ...(config.globalSettings || {}), webhookUrl: "https://import-epoch.invalid/stale-after-commit" }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code })); const accounts = saveConfigTracked({ hosters: { ...(config.hosters || {}), "byse.sx": [{ id: "ui-stale-account", enabled: true, authType: "api", apiKey: "stale" }] } }).then(() => ({ ok: true }), error => ({ ok: false, code: error.code })); window.__uiStaleImportWrites = Promise.all([settings, accounts]); return { gateClosed: configImportInProgress }; })()');
     releaseFinalImportQueue?.();
-    const [staleImportSettingsResult, staleImportAccountsResult] = await Promise.all([staleImportSettings, staleImportAccounts]);
+    const [staleImportSettingsResult, staleImportAccountsResult] = await wc.executeJavaScript('window.__uiStaleImportWrites.then(results => { delete window.__uiStaleImportWrites; return results; })');
     await pendingImportEpoch;
     const configAfterImportEpoch = await wc.executeJavaScript('window.api.getConfig()');
     check('Import keeps its gate closed through apply and final queue persistence', importStateDuringFinalQueuePersist.gateClosed === true && importStateDuringFinalQueuePersist.webhookUrl === 'https://import-epoch.invalid/imported' && importStateDuringFinalQueuePersist.accountId === 'ui-import-epoch-account');
-    check('Import rejects stale settings and account writes until the full transition finishes', staleImportSettingsResult.code === 'CONFIG_WRITE_SUPERSEDED' && staleImportAccountsResult.code === 'CONFIG_WRITE_SUPERSEDED' && configAfterImportEpoch.hosters['byse.sx']?.[0]?.id === 'ui-import-epoch-account' && configAfterImportEpoch.globalSettings.webhookUrl === 'https://import-epoch.invalid/imported');
+    check('Import rejects stale settings and account writes until the full transition finishes', staleImportWriteStart.gateClosed === true && staleImportSettingsResult.code === 'CONFIG_WRITE_SUPERSEDED' && staleImportAccountsResult.code === 'CONFIG_WRITE_SUPERSEDED' && configAfterImportEpoch.hosters['byse.sx']?.[0]?.id === 'ui-import-epoch-account' && configAfterImportEpoch.globalSettings.webhookUrl === 'https://import-epoch.invalid/imported');
 
     restoreInitialIpcHandler('save-pending-queue');
     const importPersistFailureConfig = structuredClone(configAfterImportEpoch);
