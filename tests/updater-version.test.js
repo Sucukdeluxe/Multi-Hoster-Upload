@@ -190,7 +190,7 @@ test('release plan keeps product artifacts separate from the transport tag', asy
   }, {
     version: '2.0.7',
     transportTag: 'v3.3.115',
-    releaseTitle: 'Multi-Hoster-Upload v2.0.7',
+    releaseTitle: 'Multi Hoster Uploader v2.0.7',
     releaseBody: 'Update visibility',
     expectedArtifacts: [
       'Multi-Hoster-Upload Setup 2.0.7.exe',
@@ -208,7 +208,7 @@ test('compatible existing release preserves the recovery id', async () => {
   const release = {
     id: 81,
     tag_name: 'v3.3.109',
-    name: 'Multi-Hoster-Upload v2.0.1',
+    name: 'Multi Hoster Uploader v2.0.1',
     body: 'Bridge notes',
     draft: false,
     prerelease: false,
@@ -233,6 +233,6 @@ test('incompatible existing release title fails closed', async () => {
 
   assert.throws(
     () => resolveExistingReleaseId(plan, release),
-    /Refusing recovery for v3\.3\.109: existing release title "Multi-Hoster-Upload v3\.3\.109" does not match "Multi-Hoster-Upload v2\.0\.1"/
+    /Refusing recovery for v3\.3\.109: existing release title "Multi-Hoster-Upload v3\.3\.109" does not match "Multi Hoster Uploader v2\.0\.1"/
   );
 });

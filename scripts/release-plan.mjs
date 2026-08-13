@@ -1,4 +1,5 @@
-const PRODUCT_NAME = 'Multi-Hoster-Upload';
+const PRODUCT_NAME = 'Multi Hoster Uploader';
+const ARTIFACT_NAME = 'Multi-Hoster-Upload';
 
 export function parseReleaseArgs(args) {
   const version = Array.isArray(args) ? args[0] : '';
@@ -19,8 +20,8 @@ export function parseReleaseArgs(args) {
 
 export function createReleasePlan(options) {
   const releaseTitle = `${PRODUCT_NAME} v${options.version}`;
-  const setupName = `${PRODUCT_NAME} Setup ${options.version}.exe`;
-  const portableName = `${PRODUCT_NAME} ${options.version}.exe`;
+  const setupName = `${ARTIFACT_NAME} Setup ${options.version}.exe`;
+  const portableName = `${ARTIFACT_NAME} ${options.version}.exe`;
   const blockmapName = `${setupName}.blockmap`;
   return {
     ...options,
