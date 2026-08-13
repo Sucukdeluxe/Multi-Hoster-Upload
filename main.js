@@ -45,7 +45,7 @@ const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
-const { buildTerminalJobSnapshots } = require('./lib/upload-recovery');
+const { buildFailedUploadSummary, buildTerminalJobSnapshots } = require('./lib/upload-recovery');
 const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
 const { createBatchMutationGate } = require('./lib/batch-mutation-gate');
 const { createUploadStartReservation } = require('./lib/upload-start-reservation');
@@ -2348,19 +2348,31 @@ async function executeReservedUploadStart(payload, startLease) {
     _thisManager.startBatch(tasks, {
       primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
-    }).catch((err) => {
+    }).catch(async (err) => {
       debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
-      const errorSummary = {
-        id: 'error',
-        timestamp: new Date().toISOString(),
-        total: tasks.length,
-        succeeded: 0,
-        failed: tasks.length,
-        files: [],
-        error: err ? err.message : 'Unbekannter Fehler'
+      await batchMutationGate.sealAndDrain();
+      const errorSummary = buildFailedUploadSummary(tasks, 'Upload konnte nicht gestartet werden');
+      let historyPersisted = true;
+      try { await configStore.appendHistory(errorSummary); } catch (historyError) {
+        historyPersisted = false;
+        debugLog(`appendHistory after start failure failed: ${historyError.message}`);
+      }
+      const terminalRecovery = {
+        ...recovery,
+        settledAt: new Date().toISOString(),
+        terminalJobs: buildTerminalJobSnapshots(errorSummary)
       };
-      safeSend('upload-batch-done', errorSummary);
-      configStore.saveUploadRecovery(null).catch(error => debugLog(`upload recovery state could not be cleared after start failure: ${error.message}`));
+      let terminalRecoveryPersisted = true;
+      try { await configStore.saveUploadRecovery(terminalRecovery); } catch (recoveryError) {
+        terminalRecoveryPersisted = false;
+        debugLog(`upload recovery outcomes could not be saved after start failure: ${recoveryError.message}`);
+      }
+      const queuePersisted = await requestUploadFinalization(errorSummary, historyPersisted);
+      if (queuePersisted && terminalRecoveryPersisted) {
+        try { await configStore.saveUploadRecovery(null); } catch (clearError) {
+          debugLog(`upload recovery state could not be cleared after start failure: ${clearError.message}`);
+        }
+      }
       _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }

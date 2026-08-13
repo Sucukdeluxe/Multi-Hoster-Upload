@@ -3,6 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+test('catastrophic batch starts retain exact terminal outcomes for every job', () => {
+  const { buildFailedUploadSummary, buildTerminalJobSnapshots } = require('../lib/upload-recovery');
+  const summary = buildFailedUploadSummary([
+    { jobId: 'job-a', file: 'C:\\one\\same.mkv', hoster: 'doodstream.com' },
+    { jobId: 'job-b', file: 'D:\\two\\same.mkv', hoster: 'voe.sx' }
+  ], 'Upload konnte nicht gestartet werden', Date.UTC(2026, 7, 13));
+  assert.equal(summary.total, 2);
+  assert.equal(summary.failed, 2);
+  assert.deepEqual(buildTerminalJobSnapshots(summary).map(entry => [entry.jobId, entry.status]), [
+    ['job-a', 'error'],
+    ['job-b', 'error']
+  ]);
+});
+
 test('terminal recovery snapshots retain exact job outcomes and canonical links', () => {
   const { buildTerminalJobSnapshots } = require('../lib/upload-recovery');
   const snapshots = buildTerminalJobSnapshots({
@@ -67,8 +81,13 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   const batchDone = mainSource.slice(mainSource.indexOf("uploadManager.on('batch-done'"), mainSource.indexOf("ipcMain.handle('cancel-upload'"));
 
   assert.match(batchDone, /buildTerminalJobSnapshots\(summary\)/);
-  assert.match(batchDone, /if \(queuePersisted\)[\s\S]*saveUploadRecovery\(null\)/);
+  assert.match(batchDone, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveUploadRecovery\(null\)/);
   assert.ok(batchDone.indexOf('saveUploadRecovery(recoveryWithTerminalJobs)') < batchDone.indexOf('requestUploadFinalization(summary, historyPersisted)'));
+  const startFailure = batchDone.slice(batchDone.indexOf('startBatch(tasks'));
+  assert.match(startFailure, /buildFailedUploadSummary\(tasks/);
+  assert.match(startFailure, /saveUploadRecovery\(terminalRecovery\)/);
+  assert.match(startFailure, /requestUploadFinalization\(errorSummary, historyPersisted\)/);
+  assert.match(startFailure, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveUploadRecovery\(null\)/);
   assert.match(rendererSource, /window\.UploadRecovery\.getRecoveryOutcome/);
   assert.match(rendererSource, /data\.historyPersisted !== true/);
   assert.ok(indexSource.indexOf('../lib/upload-recovery.js') < indexSource.indexOf('app.js'));
