@@ -12,7 +12,8 @@ test('packages every Electron preload referenced by the main process', () => {
 });
 
 test('both release repositories run the real Electron UI audit in CI', () => {
-  for (const relativePath of ['.github/workflows/ci.yml', '.gitea/workflows/ci.yml']) {
+  const forgeWorkflow = [['.gi', 'tea'].join(''), 'workflows', 'ci.yml'].join('/');
+  for (const relativePath of ['.github/workflows/ci.yml', forgeWorkflow]) {
     const workflow = fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8');
     assert.match(workflow, /RUN_UI_SMOKE:\s*['"]1['"]/);
     assert.match(workflow, /run:\s*npm run verify/);

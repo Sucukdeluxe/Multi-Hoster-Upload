@@ -179,7 +179,9 @@ const binaryExtensions = new Set(['.ico', '.png']);
 const expectedScripts = {
   start: 'electron .',
   dev: 'node scripts/dev-runner.cjs',
-  test: 'node --test tests/*.test.js tests/ui-smoke.js',
+  test: 'npm run test:unit && npm run test:ui',
+  'test:unit': 'node --test tests/*.test.js',
+  'test:ui': 'node --test tests/ui-smoke.js',
   'test:backup-api': 'npm --prefix services/backup-api test',
   verify: 'npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev',
   lint: 'eslint .',
