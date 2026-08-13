@@ -1,5 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const { createAgent } = require('../lib/diagnostics-agent');
 const { valueScrub } = require('../lib/support-bundle');
 
@@ -96,4 +98,13 @@ test('agent fails closed when response redaction fails', () => {
   const result = agent.handle('get_system_info', {});
   assert.deepEqual(result, { ok: false, error: 'diagnostic response could not be safely returned' });
   assert.ok(!JSON.stringify(result).includes('must-not-leak'));
+});
+
+test('main process keeps diagnostics local and fails closed at its final reply boundary', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(source, /function _diagBindHost\(\)\s*{\s*return '127\.0\.0\.1'/);
+  assert.match(source, /function _diagPublicHost\(\)\s*{\s*return '127\.0\.0\.1'/);
+  assert.match(source, /function _diagAllowlist\(\)\s*{\s*return \[\]/);
+  assert.match(source, /bindMode: 'local'/);
+  assert.match(source, /catch\s*{\s*result = { ok: false, error: 'diagnostic response could not be safely returned' }/);
 });

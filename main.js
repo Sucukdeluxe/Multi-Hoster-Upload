@@ -3206,13 +3206,13 @@ function _buildDiagnosticHandler() {
   return (msg, _client, reply) => {
     let result;
     try { result = agent.handle(msg.op, msg.args); }
-    catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
+    catch { result = { ok: false, error: 'diagnostic response could not be safely returned' }; }
     reply(result);
   };
 }
 
-function _diagAllowlist(diag) {
-  return Array.isArray(diag && diag.allowlist) ? diag.allowlist.map((x) => String(x).trim()).filter(Boolean) : [];
+function _diagAllowlist() {
+  return [];
 }
 
 function _diagBindHost() {
@@ -3320,10 +3320,10 @@ ipcMain.handle('diagnostics:status', () => {
   return {
     running: !!diagnosticAgent,
     port: diagnosticAgent ? diagnosticAgent.getPort() : (diag.port || 9110),
-    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
+    bindMode: 'local',
     bindAddress: _diagBindHost(diag),
     publicHost: _diagPublicHost(diag),
-    allowlistCount: _diagAllowlist(diag).length,
+    allowlistCount: 0,
     clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
     lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
   };
