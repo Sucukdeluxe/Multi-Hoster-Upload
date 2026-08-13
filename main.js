@@ -1458,6 +1458,7 @@ function createWindow() {
   clearCloseFlushTimer();
   const currentStartupRevealGate = createStartupRevealGate(mainWindow, {
     onBlock: () => {
+      startupExternalRevealBindings.rendererBlocked(startupWindow.window);
       closeHandshakeReady = false;
       restoreClosePreparation(closePreparationAttempt);
     }
@@ -1525,6 +1526,7 @@ function createWindow() {
       debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
     },
     onReady: () => {
+      startupExternalRevealBindings.rendererReady(startupWindow.window);
       closeHandshakeReady = true;
     },
     onInitializationFailed: (details) => {
@@ -1536,6 +1538,7 @@ function createWindow() {
   const currentStartupRendererHandlers = startupRendererHandlers;
   const currentStartupRecoveryCoordinator = startupRecoveryCoordinator;
   mainWindow.once('closed', () => {
+    startupExternalRevealBindings.windowClosed(startupWindow.window);
     currentStartupRendererHandlers.dispose();
     if (startupRevealGate === currentStartupRevealGate) startupRevealGate = null;
     if (startupRendererHandlers === currentStartupRendererHandlers) startupRendererHandlers = null;

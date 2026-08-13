@@ -214,12 +214,139 @@ test('all production external reveal paths wait for an authorized startup surfac
     invoke(bindings);
 
     assert.deepEqual(window.events, [], name);
-    assert.deepEqual(droppedFiles, name === 'drop target files' ? [['queued.mkv']] : [], name);
+    assert.deepEqual(droppedFiles, [], name);
 
     revealGate.reveal();
 
     assert.deepEqual(window.events, ['restore', 'show', 'focus'], name);
+    assert.deepEqual(droppedFiles, [], name);
+
+    bindings.rendererReady(window);
+
+    assert.deepEqual(droppedFiles, name === 'drop target files' ? [['queued.mkv']] : [], name);
   }
+});
+
+test('drop payloads wait through recovery and a safe failure reveal until renderer Ready', () => {
+  const window = createRevealWindow({ minimized: false, visible: true });
+  const droppedFiles = [];
+  let bindings;
+  const revealGate = createStartupRevealGate(window, {
+    onBlock() {
+      bindings.rendererBlocked(window);
+    }
+  });
+  bindings = createStartupExternalRevealBindings({
+    getWindow: () => window,
+    getRevealGate: () => revealGate,
+    sendDroppedFiles: paths => droppedFiles.push(paths)
+  });
+  const ipcMain = new EventEmitter();
+  bindings.bindDropTargetFiles(ipcMain);
+  bindings.rendererReady(window);
+
+  ipcMain.emit('drop-target:files', {}, ['ready.mkv']);
+  revealGate.navigate(() => {});
+  ipcMain.emit('drop-target:files', {}, ['recovering.mkv']);
+  revealGate.reveal();
+
+  assert.deepEqual(droppedFiles, [['ready.mkv']]);
+
+  bindings.rendererReady(window);
+
+  assert.deepEqual(droppedFiles, [['ready.mkv'], ['recovering.mkv']]);
+});
+
+test('multiple pending drop payloads flush once in order and ready drops stay immediate', () => {
+  const window = createRevealWindow();
+  const revealGate = createStartupRevealGate(window);
+  const droppedFiles = [];
+  const bindings = createStartupExternalRevealBindings({
+    getWindow: () => window,
+    getRevealGate: () => revealGate,
+    sendDroppedFiles: paths => droppedFiles.push(paths)
+  });
+  const ipcMain = new EventEmitter();
+  bindings.bindDropTargetFiles(ipcMain);
+
+  ipcMain.emit('drop-target:files', {}, ['first.mkv']);
+  ipcMain.emit('drop-target:files', {}, ['second.mkv']);
+  ipcMain.emit('drop-target:files', {}, ['third.mkv']);
+
+  assert.deepEqual(droppedFiles, []);
+
+  revealGate.reveal();
+  bindings.rendererReady(window);
+  bindings.rendererReady(window);
+
+  assert.deepEqual(droppedFiles, [
+    ['first.mkv'],
+    ['second.mkv'],
+    ['third.mkv']
+  ]);
+
+  ipcMain.emit('drop-target:files', {}, ['fourth.mkv']);
+
+  assert.deepEqual(droppedFiles, [
+    ['first.mkv'],
+    ['second.mkv'],
+    ['third.mkv'],
+    ['fourth.mkv']
+  ]);
+});
+
+test('pending drop payloads stay bounded while retaining delivery order', () => {
+  const window = createRevealWindow();
+  const revealGate = createStartupRevealGate(window);
+  const droppedFiles = [];
+  const bindings = createStartupExternalRevealBindings({
+    getWindow: () => window,
+    getRevealGate: () => revealGate,
+    sendDroppedFiles: paths => droppedFiles.push(paths),
+    maxPendingDropPayloads: 2
+  });
+  const ipcMain = new EventEmitter();
+  bindings.bindDropTargetFiles(ipcMain);
+
+  ipcMain.emit('drop-target:files', {}, ['first.mkv']);
+  ipcMain.emit('drop-target:files', {}, ['second.mkv']);
+  ipcMain.emit('drop-target:files', {}, ['third.mkv']);
+  bindings.rendererReady(window);
+
+  assert.deepEqual(droppedFiles, [
+    ['second.mkv'],
+    ['third.mkv']
+  ]);
+});
+
+test('pending drop payloads are cleared for destroyed and replaced windows', () => {
+  const firstWindow = createRevealWindow();
+  let activeWindow = firstWindow;
+  const droppedFiles = [];
+  const bindings = createStartupExternalRevealBindings({
+    getWindow: () => activeWindow,
+    getRevealGate: () => ({ request() {} }),
+    sendDroppedFiles: paths => droppedFiles.push(paths)
+  });
+  const ipcMain = new EventEmitter();
+  bindings.bindDropTargetFiles(ipcMain);
+
+  ipcMain.emit('drop-target:files', {}, ['replaced.mkv']);
+  activeWindow = createRevealWindow();
+  bindings.rendererReady(firstWindow);
+  bindings.rendererReady(activeWindow);
+
+  assert.deepEqual(droppedFiles, []);
+
+  ipcMain.emit('drop-target:files', {}, ['ready.mkv']);
+  bindings.rendererBlocked(activeWindow);
+  ipcMain.emit('drop-target:files', {}, ['destroyed.mkv']);
+  activeWindow.isDestroyed = () => true;
+  bindings.rendererReady(activeWindow);
+  activeWindow = createRevealWindow();
+  bindings.rendererReady(activeWindow);
+
+  assert.deepEqual(droppedFiles, [['ready.mkv']]);
 });
 
 test('renderer Ready and the safe failure surface can authorize the gated window', async () => {
@@ -891,6 +1018,94 @@ test('production event wiring rejects an old document Ready and exposes the fail
     attempt: 2,
     details: { timeoutMs: 25 }
   }]);
+  handlers.dispose();
+});
+
+test('production recovery wiring flushes pending drops only for the current document Ready', async () => {
+  const ipcMain = new EventEmitter();
+  const webContents = new EventEmitter();
+  const initialFrame = createRendererFrame('drop-initial');
+  const recoveryFrame = createRendererFrame('drop-recovery');
+  const window = createRevealWindow({ minimized: false, visible: true });
+  window.webContents = webContents;
+  const droppedFiles = [];
+  let bindings;
+  const revealGate = createStartupRevealGate(window, {
+    onBlock() {
+      bindings.rendererBlocked(window);
+    }
+  });
+  bindings = createStartupExternalRevealBindings({
+    getWindow: () => window,
+    getRevealGate: () => revealGate,
+    sendDroppedFiles: paths => droppedFiles.push(paths)
+  });
+  bindings.bindDropTargetFiles(ipcMain);
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      webContents.mainFrame = recoveryFrame;
+      webContents.emit('did-start-navigation', {
+        isMainFrame: true,
+        isSameDocument: false,
+        url: recoveryFrame.url,
+        frame: recoveryFrame
+      });
+      webContents.emit('did-finish-load');
+    },
+    reveal: revealGate.reveal,
+    close() {}
+  });
+  const handlers = createStartupRendererHandlers({
+    window,
+    ipcMain,
+    coordinator,
+    onDocumentLoadStarted: revealGate.block,
+    onReady() {
+      bindings.rendererReady(window);
+    },
+    onInitializationFailed() {}
+  });
+
+  webContents.mainFrame = initialFrame;
+  webContents.emit('did-start-navigation', {
+    isMainFrame: true,
+    isSameDocument: false,
+    url: initialFrame.url,
+    frame: initialFrame
+  });
+  webContents.emit('did-finish-load');
+  ipcMain.emit('app:close-handshake-ready', {
+    sender: webContents,
+    senderFrame: initialFrame
+  });
+  ipcMain.emit('drop-target:files', {}, ['ready.mkv']);
+  webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+  await new Promise(resolve => setImmediate(resolve));
+
+  ipcMain.emit('drop-target:files', {}, ['first-recovery.mkv']);
+  ipcMain.emit('drop-target:files', {}, ['second-recovery.mkv']);
+  ipcMain.emit('app:close-handshake-ready', {
+    sender: webContents,
+    senderFrame: initialFrame
+  });
+
+  assert.deepEqual(droppedFiles, [['ready.mkv']]);
+
+  ipcMain.emit('app:close-handshake-ready', {
+    sender: webContents,
+    senderFrame: recoveryFrame
+  });
+  ipcMain.emit('app:close-handshake-ready', {
+    sender: webContents,
+    senderFrame: recoveryFrame
+  });
+
+  assert.deepEqual(droppedFiles, [
+    ['ready.mkv'],
+    ['first-recovery.mkv'],
+    ['second-recovery.mkv']
+  ]);
   handlers.dispose();
 });
 
