@@ -1820,7 +1820,8 @@ function buildRowHtml(job) {
   const elapsed = formatTime(job.elapsed);
   const remaining = formatTime(job.remaining);
   const speed = job.speedKbs > 0 ? `${formatSpeed(job.speedKbs)}` : '';
-  const pct = Math.min(100, Math.round((job.progress || 0) * 100));
+  const progress = Math.min(1, Math.max(0, Number(job.progress) || 0));
+  const pct = Math.round(progress * 100);
   const link = job.result ? (job.result.download_url || job.result.embed_url || '') : '';
 
   return `<tr class="${rowClass}" data-job-id="${job.id}" data-link="${escapeAttr(link)}" tabindex="0" aria-selected="${selectedJobIds.has(job.id)}" style="height:${VIRTUAL_ROW_HEIGHT}px">
@@ -1834,7 +1835,7 @@ function buildRowHtml(job) {
     <td class="col-progress">
       <div class="progress-cell">
         <div class="progress-bar-bg">
-          <div class="progress-bar-fill ${statusClass}" style="width:${pct}%"></div>
+          <div class="progress-bar-fill ${statusClass}" style="transform:scaleX(${progress})"></div>
         </div>
         <span class="progress-pct">${job.status === 'preview' ? '' : pct + '%'}</span>
       </div>
@@ -1850,7 +1851,8 @@ function _updateRowInPlace(tr, job) {
   const elapsed = formatTime(job.elapsed);
   const remaining = formatTime(job.remaining);
   const speed = job.speedKbs > 0 ? `${formatSpeed(job.speedKbs)}` : '';
-  const pct = Math.min(100, Math.round((job.progress || 0) * 100));
+  const progress = Math.min(1, Math.max(0, Number(job.progress) || 0));
+  const pct = Math.round(progress * 100);
   const link = job.result ? (job.result.download_url || job.result.embed_url || '') : '';
 
   // Write DOM only when the target value actually changes — a no-op progress
@@ -1881,8 +1883,8 @@ function _updateRowInPlace(tr, job) {
 
   const fill = cells[7].querySelector('.progress-bar-fill');
   if (fill) {
-    const pctStr = pct + '%';
-    if (fill.style.width !== pctStr) fill.style.width = pctStr;
+    const progressTransform = `scaleX(${progress})`;
+    if (fill.style.transform !== progressTransform) fill.style.transform = progressTransform;
     const fillClass = `progress-bar-fill ${statusClass}`;
     if (fill.className !== fillClass) fill.className = fillClass;
   }

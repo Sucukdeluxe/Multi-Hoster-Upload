@@ -27,6 +27,7 @@ describe('RemoteServer', () => {
 
     await server.start({
       port: 0, // random available port
+      host: '127.0.0.1',
       token: 'test-token-123',
       allowInput: true,
       mainWindow: mockMainWindow,
