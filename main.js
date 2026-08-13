@@ -9,6 +9,7 @@ const {
   configureStartupRenderer,
   createStartupFailureDocument,
   createStartupRecoveryCoordinator,
+  createStartupRendererHandlers,
   createStartupWindow,
   resolveStartupLanguage
 } = require('./lib/startup-renderer');
@@ -135,7 +136,9 @@ const uploadBatchMutationGates = new WeakMap();
 const uploadRecoveryStates = new WeakMap();
 let lastSessionSummary = null;
 let startupRecoveryCoordinator = null;
+let startupRendererHandlers = null;
 let sourceDeleteJournal = null;
+const RENDERER_READY_TIMEOUT_MS = 15000;
 const pendingUploadFinalizations = new Map();
 
 function requestUploadFinalization(summary, historyPersisted) {
@@ -1462,6 +1465,11 @@ function createWindow() {
     if (isInPlace || !isMainFrame) return;
     closeHandshakeReady = false;
     restoreClosePreparation(closePreparationAttempt);
+    if (startupRendererHandlers) startupRendererHandlers.documentLoadStarted();
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (startupRendererHandlers) startupRendererHandlers.documentLoaded();
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
@@ -1509,7 +1517,27 @@ function createWindow() {
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show();
     },
     showFailure: () => mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupFailureDocument(startupLanguage))}`),
-    close: () => app.exit(1)
+    close: () => app.exit(1),
+    readyTimeoutMs: RENDERER_READY_TIMEOUT_MS
+  });
+  startupRendererHandlers = createStartupRendererHandlers({
+    window: mainWindow,
+    coordinator: startupRecoveryCoordinator,
+    onReady: () => {
+      closeHandshakeReady = true;
+    },
+    onInitializationFailed: (details) => {
+      const message = details && typeof details.message === 'string' ? details.message : 'Renderer initialization failed';
+      _writeCrashLog('RENDERER INITIALIZATION FAILED', new Error(message), details);
+      debugLog(`RENDERER INITIALIZATION FAILED: ${message}`);
+    }
+  });
+  const currentStartupRendererHandlers = startupRendererHandlers;
+  const currentStartupRecoveryCoordinator = startupRecoveryCoordinator;
+  mainWindow.once('closed', () => {
+    currentStartupRendererHandlers.dispose();
+    if (startupRendererHandlers === currentStartupRendererHandlers) startupRendererHandlers = null;
+    if (startupRecoveryCoordinator === currentStartupRecoveryCoordinator) startupRecoveryCoordinator = null;
   });
   void startupRecoveryCoordinator.loadInitial(rendererTarget, rendererOptions);
 }
@@ -2985,18 +3013,11 @@ ipcMain.handle('app:quit', () => {
 });
 
 ipcMain.on('app:close-handshake-ready', (event) => {
-  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
-    closeHandshakeReady = true;
-    if (startupRecoveryCoordinator) startupRecoveryCoordinator.rendererReady();
-  }
+  if (startupRendererHandlers) startupRendererHandlers.rendererReady(event);
 });
 
 ipcMain.on('app:renderer-initialization-failed', (event, details) => {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
-  const message = details && typeof details.message === 'string' ? details.message : 'Renderer initialization failed';
-  _writeCrashLog('RENDERER INITIALIZATION FAILED', new Error(message), details);
-  debugLog(`RENDERER INITIALIZATION FAILED: ${message}`);
-  if (startupRecoveryCoordinator) void startupRecoveryCoordinator.rendererInitializationFailed(details);
+  if (startupRendererHandlers) void startupRendererHandlers.rendererInitializationFailed(event, details);
 });
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {
@@ -3481,11 +3502,13 @@ ipcMain.on('remote:capture-log', (_event, msg) => {
 // IPC: Input events from capture window
 ipcMain.on('remote:input-event', (_event, data) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
 
   const config = configStore.load();
   const remote = config.globalSettings && config.globalSettings.remote;
   if (!remote || !remote.allowInput) return;
   if (data.role !== 'admin') return;
+  if ((data.type === 'keydown' || data.type === 'keyup') && (typeof data.key !== 'string' || data.key.length === 0)) return;
 
   // Capture includes window frame (title bar) but NOT invisible DWM borders
   // sendInputEvent coordinates are relative to web content area

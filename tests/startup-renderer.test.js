@@ -7,6 +7,7 @@ const {
   configureStartupRenderer,
   createStartupFailureDocument,
   createStartupRecoveryCoordinator,
+  createStartupRendererHandlers,
   createStartupWindow,
   resolveStartupLanguage
 } = require('../lib/startup-renderer');
@@ -28,8 +29,11 @@ test('main process wires bounded startup recovery into real load and crash paths
   assert.match(source, /createStartupRecoveryCoordinator/);
   assert.match(source, /startupRecoveryCoordinator\.loadInitial/);
   assert.match(source, /startupRecoveryCoordinator\.rendererCrashed/);
-  assert.match(source, /startupRecoveryCoordinator\.rendererInitializationFailed/);
-  assert.match(source, /startupRecoveryCoordinator\.rendererReady/);
+  assert.match(source, /createStartupRendererHandlers/);
+  assert.match(source, /startupRendererHandlers\.documentLoadStarted/);
+  assert.match(source, /startupRendererHandlers\.documentLoaded/);
+  assert.match(source, /startupRendererHandlers\.rendererInitializationFailed/);
+  assert.match(source, /startupRendererHandlers\.rendererReady/);
   assert.match(source, /createStartupFailureDocument/);
 });
 
@@ -57,6 +61,35 @@ class TestBrowserWindow extends EventEmitter {
     this.loadOptions = options;
     return this.loadError ? Promise.reject(this.loadError) : Promise.resolve('loaded');
   }
+}
+
+function createManualScheduler() {
+  let nextId = 1;
+  const pending = new Map();
+
+  return {
+    schedule(callback, delay) {
+      const handle = { id: nextId++, unref() {} };
+      pending.set(handle, { callback, delay });
+      return handle;
+    },
+    cancel(handle) {
+      pending.delete(handle);
+    },
+    count() {
+      return pending.size;
+    },
+    delays() {
+      return Array.from(pending.values(), entry => entry.delay);
+    },
+    async fireNext() {
+      const entry = pending.entries().next().value;
+      assert.ok(entry);
+      const [handle, timer] = entry;
+      pending.delete(handle);
+      await timer.callback();
+    }
+  };
 }
 
 test('configureStartupRenderer leaves hardware acceleration enabled for a local Windows session', () => {
@@ -309,6 +342,174 @@ test('renderer initialization failures share the bounded recovery path', async (
     attempt: 2,
     details: { message: 'second failure' }
   }]);
+});
+
+test('production startup handlers route renderer initialization failure through bounded recovery', async () => {
+  const failures = [];
+  let reloadCalls = 0;
+  let reportedFailure;
+  const webContents = {};
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {}
+  });
+  const handlers = createStartupRendererHandlers({
+    window: { isDestroyed: () => false, webContents },
+    coordinator,
+    onReady() {},
+    onInitializationFailed(details) {
+      reportedFailure = details;
+    }
+  });
+  const details = { message: 'top-level initialization failed' };
+
+  await handlers.rendererInitializationFailed({ sender: webContents }, details);
+  await handlers.rendererInitializationFailed({ sender: webContents }, details);
+
+  assert.equal(reloadCalls, 1);
+  assert.equal(reportedFailure, details);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-initialization',
+    attempt: 2,
+    details
+  }]);
+});
+
+test('production startup handlers enforce the Ready deadline after every main document load', async () => {
+  const scheduler = createManualScheduler();
+  const failures = [];
+  let reloadCalls = 0;
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    async showFailure(failure) {
+      failures.push(failure);
+    },
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+  const handlers = createStartupRendererHandlers({
+    window: { isDestroyed: () => false, webContents: {} },
+    coordinator,
+    onReady() {},
+    onInitializationFailed() {}
+  });
+
+  handlers.documentLoadStarted();
+  handlers.documentLoaded();
+
+  assert.deepEqual(scheduler.delays(), [25]);
+  await scheduler.fireNext();
+  assert.equal(reloadCalls, 1);
+
+  handlers.documentLoadStarted();
+  handlers.documentLoaded();
+  await scheduler.fireNext();
+
+  assert.equal(reloadCalls, 1);
+  assert.deepEqual(failures, [{
+    phase: 'renderer-ready-timeout',
+    attempt: 2,
+    details: { timeoutMs: 25 }
+  }]);
+});
+
+test('production startup handlers cancel the Ready deadline after a valid Ready signal', async () => {
+  const scheduler = createManualScheduler();
+  let reloadCalls = 0;
+  let readyCalls = 0;
+  const webContents = {};
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    async reload() {
+      reloadCalls++;
+    },
+    reveal() {},
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+  const handlers = createStartupRendererHandlers({
+    window: { isDestroyed: () => false, webContents },
+    coordinator,
+    onReady() {
+      readyCalls++;
+    },
+    onInitializationFailed() {}
+  });
+
+  handlers.documentLoadStarted();
+  handlers.documentLoaded();
+  const ready = handlers.rendererReady({ sender: webContents });
+
+  assert.equal(ready, true);
+  assert.equal(readyCalls, 1);
+  assert.equal(scheduler.count(), 0);
+  assert.equal(reloadCalls, 0);
+});
+
+test('Ready before did-finish-load prevents a stale deadline', () => {
+  const scheduler = createManualScheduler();
+  const webContents = {};
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    reload() {},
+    reveal() {},
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+  const handlers = createStartupRendererHandlers({
+    window: { isDestroyed: () => false, webContents },
+    coordinator,
+    onReady() {},
+    onInitializationFailed() {}
+  });
+
+  handlers.documentLoadStarted();
+  handlers.rendererReady({ sender: webContents });
+  handlers.documentLoaded();
+
+  assert.equal(scheduler.count(), 0);
+});
+
+test('disposing startup handlers cancels a pending Ready deadline', () => {
+  const scheduler = createManualScheduler();
+  const coordinator = createStartupRecoveryCoordinator({
+    load() {},
+    reload() {},
+    reveal() {},
+    close() {},
+    readyTimeoutMs: 25,
+    scheduleReadyDeadline: scheduler.schedule,
+    cancelReadyDeadline: scheduler.cancel
+  });
+  const handlers = createStartupRendererHandlers({
+    window: { isDestroyed: () => false, webContents: {} },
+    coordinator,
+    onReady() {},
+    onInitializationFailed() {}
+  });
+
+  handlers.documentLoadStarted();
+  handlers.documentLoaded();
+  handlers.dispose();
+
+  assert.equal(scheduler.count(), 0);
 });
 
 test('a successful renderer ready event reveals content and resets crash recovery', async () => {
