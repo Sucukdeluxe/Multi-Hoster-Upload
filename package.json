@@ -27,7 +27,7 @@
   },
   "build": {
     "appId": "com.multihoster.uploader",
-    "productName": "Multi-Hoster-Upload",
+    "productName": "Multi Hoster Uploader",
     "directories": {
       "buildResources": "assets",
       "output": "release"
@@ -47,13 +47,18 @@
         "portable"
       ],
       "icon": "assets/app_icon.ico",
+      "executableName": "Multi Hoster Uploader",
       "signAndEditExecutable": false
     },
     "nsis": {
+      "artifactName": "Multi-Hoster-Upload Setup ${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
+    },
+    "portable": {
+      "artifactName": "Multi-Hoster-Upload ${version}.${ext}"
     },
     "afterPack": "scripts/afterPack.cjs"
   }

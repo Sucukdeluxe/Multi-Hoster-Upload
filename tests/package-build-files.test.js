@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
+const fs = require('node:fs');
 const path = require('node:path');
 const packageJson = require('../package.json');
 
@@ -8,6 +9,19 @@ test('packages every Electron preload referenced by the main process', () => {
   assert.ok(packageJson.build.files.includes('preload.js'));
   assert.ok(packageJson.build.files.includes('preload-drop-target.js'));
   assert.equal(packageJson.build.win.signAndEditExecutable, false);
+});
+
+test('packaged identity is exact while public artifact routing remains stable', () => {
+  assert.equal(packageJson.build.productName, 'Multi Hoster Uploader');
+  assert.equal(packageJson.build.win.executableName, 'Multi Hoster Uploader');
+  assert.equal(packageJson.build.nsis.artifactName, 'Multi-Hoster-Upload Setup ${version}.${ext}');
+  assert.equal(packageJson.build.portable.artifactName, 'Multi-Hoster-Upload ${version}.${ext}');
+
+  const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(source, /app\.setPath\('userData', path\.join\(app\.getPath\('appData'\), 'multi-hoster-uploader'\)\)/);
+  assert.match(source, /app\.setName\('Multi Hoster Uploader'\)/);
+  assert.match(source, /app\.setAppUserModelId\('com\.multihoster\.uploader'\)/);
+  assert.doesNotMatch(source, /updateTrayTooltip\('Multi-Hoster-Upload'\)/);
 });
 
 test('floating drop target resolves native paths through Electron webUtils', () => {
@@ -57,23 +71,43 @@ test('afterPack brands the executable metadata shown by Windows', async () => {
     const afterPack = require(afterPackPath);
     await afterPack({
       appOutDir: 'C:\\release',
-      packager: { appInfo: { productFilename: 'Multi-Hoster-Upload', version: '9.8.7' } }
+      packager: { appInfo: { productFilename: 'Multi Hoster Uploader', version: '9.8.7' } }
     });
   } finally {
     Module._load = originalLoad;
     delete require.cache[afterPackPath];
   }
 
-  assert.equal(editCall.exePath, path.join('C:\\release', 'Multi-Hoster-Upload.exe'));
+  assert.equal(editCall.exePath, path.join('C:\\release', 'Multi Hoster Uploader.exe'));
   assert.equal(editCall.options['file-version'], '9.8.7');
   assert.equal(editCall.options['product-version'], '9.8.7');
   assert.deepEqual(editCall.options['version-string'], {
     CompanyName: 'Sucukdeluxe',
     FileDescription: 'Multi Hoster Uploader',
-    InternalName: 'Multi-Hoster-Upload',
-    OriginalFilename: 'Multi-Hoster-Upload.exe',
+    InternalName: 'Multi Hoster Uploader',
+    OriginalFilename: 'Multi Hoster Uploader.exe',
     ProductName: 'Multi Hoster Uploader'
   });
+});
+
+test('afterPack fails the build when executable branding fails', async () => {
+  const originalLoad = Module._load;
+  const afterPackPath = require.resolve('../scripts/afterPack.cjs');
+  delete require.cache[afterPackPath];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'rcedit') return async () => { throw new Error('branding failed'); };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const afterPack = require(afterPackPath);
+    await assert.rejects(afterPack({
+      appOutDir: 'C:\\release',
+      packager: { appInfo: { productFilename: 'Multi Hoster Uploader', version: '9.8.7' } }
+    }), /branding failed/);
+  } finally {
+    Module._load = originalLoad;
+    delete require.cache[afterPackPath];
+  }
 });
 
 test('close readiness is signaled only after the renderer explicitly finishes initialization', () => {

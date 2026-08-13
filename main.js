@@ -1,10 +1,13 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
+const path = require('path');
+app.setPath('userData', path.join(app.getPath('appData'), 'multi-hoster-uploader'));
+app.setName('Multi Hoster Uploader');
+app.setAppUserModelId('com.multihoster.uploader');
 const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('./lib/startup-renderer');
 configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
-const path = require('path');
 const fs = require('fs');
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
@@ -2187,7 +2190,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
         updateTrayTooltip(`Upload: ${data.activeJobs} aktiv - ${speedMb} MB/s`);
         _maybeLogEventLoopDelay(data.activeJobs);
       } else {
-        updateTrayTooltip('Multi-Hoster-Upload');
+        updateTrayTooltip('Multi Hoster Uploader');
       }
     } catch (e) { debugLog(`stats listener error: ${e && e.message}`); }
   });
@@ -3373,6 +3376,7 @@ async function startRemoteServer() {
   try {
     await remoteServer.start({
       port: remote.port || 9100,
+      host: '127.0.0.1',
       token,
       allowInput: remote.allowInput !== false,
       mainWindow,
