@@ -86,6 +86,62 @@ test('getHistory falls back to loadConfig().history when loadHistory is absent (
   assert.equal(c.getHistory({ limit: 10 }).totalBatches, 1, 'legacy path reads load().history when loadHistory not injected');
 });
 
+test('getHistory, listErrors and serverHealth share loadHistory after migration', () => {
+  let historyRevision = 0;
+  const c = createCollectors({
+    loadConfig: () => ({ hosters: {}, globalSettings: {}, history: [] }),
+    loadHistory: () => {
+      historyRevision++;
+      const timestamp = `2026-01-${String(historyRevision).padStart(2, '0')}T00:00:00.000Z`;
+      return [{ timestamp, files: [{ name: `failed-${historyRevision}.mkv`, results: [{ hoster: 'voe.sx', status: 'error', error: 'Not video file format' }] }] }];
+    },
+    getAllLogPaths: () => ({ logDir: os.tmpdir() }),
+    support, stats,
+    appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
+  });
+  const health = c.serverHealth({ errorLimit: 5 });
+  const history = c.getHistory({ limit: 5 });
+  const errors = c.listErrors({ limit: 5 });
+  assert.deepEqual({
+    historyBatches: history.totalBatches,
+    listedErrors: errors.total,
+    healthBatches: health.recentBatches.length,
+    healthErrors: health.errors.total
+  }, {
+    historyBatches: 1,
+    listedErrors: 1,
+    healthBatches: 1,
+    healthErrors: 1
+  });
+  assert.equal(health.recentBatches[0].timestamp, health.errors.errors[0].ts, 'serverHealth must summarize one history snapshot');
+});
+
+test('history commands fail closed instead of reading stale config history', () => {
+  const c = createCollectors({
+    loadConfig: () => ({
+      hosters: {},
+      globalSettings: {},
+      history: [{ timestamp: '2025-12-31T00:00:00.000Z', files: [{ name: 'stale.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'stale error' }] }] }]
+    }),
+    loadHistory: () => null,
+    getAllLogPaths: () => ({ logDir: os.tmpdir() }),
+    support, stats,
+    appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
+  });
+  const health = c.serverHealth({ errorLimit: 5 });
+  assert.deepEqual({
+    historyBatches: c.getHistory({ limit: 5 }).totalBatches,
+    listedErrors: c.listErrors({ limit: 5 }).total,
+    healthBatches: health.recentBatches.length,
+    healthErrors: health.errors.total
+  }, {
+    historyBatches: 0,
+    listedErrors: 0,
+    healthBatches: 0,
+    healthErrors: 0
+  });
+});
+
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
   const { collectors, dir, paths } = makeFixture();
   const dbg = collectors.readLog({ name: 'debug', tailKb: 64 });
