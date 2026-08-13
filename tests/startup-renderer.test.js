@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
-const { configureStartupRenderer, createStartupWindow } = require('../lib/startup-renderer');
+const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('../lib/startup-renderer');
 
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
@@ -12,6 +12,7 @@ class TestBrowserWindow extends EventEmitter {
     this.showCalls = 0;
     this.startupEvents = [];
     this.loadError = new Error('renderer load failed');
+    this.loadOptions = null;
   }
 
   once(eventName, listener) {
@@ -23,8 +24,9 @@ class TestBrowserWindow extends EventEmitter {
     this.showCalls++;
   }
 
-  loadFile(target) {
+  loadFile(target, options) {
     this.startupEvents.push(`load:${target}`);
+    this.loadOptions = options;
     return Promise.reject(this.loadError);
   }
 }
@@ -39,6 +41,13 @@ test('configureStartupRenderer disables hardware acceleration for a Windows Remo
   let calls = 0;
   configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'RDP-Tcp#12' }, 'win32');
   assert.equal(calls, 1);
+});
+
+test('resolveStartupLanguage accepts only the supported persisted language', () => {
+  assert.equal(resolveStartupLanguage({ globalSettings: { language: 'de' } }), 'de');
+  assert.equal(resolveStartupLanguage({ globalSettings: { language: 'en' } }), 'en');
+  assert.equal(resolveStartupLanguage({ globalSettings: { language: 'fr' } }), 'en');
+  assert.equal(resolveStartupLanguage(null), 'en');
 });
 
 test('createStartupWindow forces the main window to start hidden', () => {
@@ -84,4 +93,13 @@ test('startup load forwards a rejected navigation to the error handler', async (
   });
 
   assert.equal(handledError, startup.window.loadError);
+});
+
+test('startup load forwards navigation options before the renderer becomes visible', async () => {
+  const startup = createStartupWindow(TestBrowserWindow, {});
+  const options = { query: { language: 'de' } };
+
+  await startup.load('renderer/index.html', () => {}, options);
+
+  assert.deepEqual(startup.window.loadOptions, options);
 });

@@ -682,6 +682,7 @@
           [/^(\d+) Verlaufseintrag wird dauerhaft entfernt\.$/, '$1 history entry will be permanently removed.'],
           [/^(\d+) Verlaufseinträge werden dauerhaft entfernt\.$/, '$1 history entries will be permanently removed.'],
           [/^Aktives Ziel: (.+)$/, 'Active destination: $1'],
+          [/^Erfolgsrate aus den letzten (\d+) Uploads dieses Hosters$/, 'Success rate across this host\'s last $1 uploads'],
           [/^(\d+) Fehler$/, '$1 errors'],
           [/^Gesamt (\d+)$/, 'Total $1'],
           [/^Verbindungen (\d+)$/, 'Connections $1'],
@@ -747,6 +748,7 @@
           [/^Active on port (\d+) — 1 client connected$/, 'Aktiv auf Port $1 — 1 Client verbunden'],
           [/^Active on port (\d+) — (\d+) clients connected$/, 'Aktiv auf Port $1 — $2 Clients verbunden'],
           [/^Active destination: (.+)$/, 'Aktives Ziel: $1'],
+          [/^Success rate across this host's last (\d+) uploads$/, 'Erfolgsrate aus den letzten $1 Uploads dieses Hosters'],
           [/^Running (\d+)$/, 'Läuft $1'],
           [/^Failed (\d+)$/, 'Fehler $1'],
           [/^Update v(.+) available\. Click to install\.$/, 'Update v$1 verfügbar. Klicken zum Installieren.']

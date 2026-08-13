@@ -1,7 +1,7 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
-const { configureStartupRenderer, createStartupWindow } = require('./lib/startup-renderer');
+const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('./lib/startup-renderer');
 configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
 const path = require('path');
@@ -1441,7 +1441,8 @@ function createWindow() {
 
   mainWindow.webContents.setBackgroundThrottling(false);
 
-  mainWindow.webContents.on('did-start-loading', () => {
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isInPlace || !isMainFrame) return;
     closeHandshakeReady = false;
     restoreClosePreparation(closePreparationAttempt);
   });
@@ -1490,10 +1491,12 @@ function createWindow() {
     debugLog(`CHILD PROCESS GONE: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
   });
 
+  let startupLanguage = 'en';
+  try { startupLanguage = resolveStartupLanguage(configStore.load()); } catch {}
   startupWindow.load(path.join(__dirname, 'renderer', 'index.html'), (err) => {
     _writeCrashLog('LOAD FILE FAILED', err);
     debugLog(`LOAD FILE FAILED: ${err && err.stack ? err.stack : err}`);
-  });
+  }, { query: { language: startupLanguage } });
 }
 
 function createTray() {

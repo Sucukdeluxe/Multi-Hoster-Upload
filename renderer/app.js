@@ -1,6 +1,6 @@
 const HOSTERS = ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx', 'clouddrop.cc'];
 const uiLocalizer = window.I18n.createDomLocalizer(document);
-uiLocalizer.start('en');
+uiLocalizer.start(new URLSearchParams(window.location.search).get('language'));
 
 function setUiLanguage(value) {
   const language = uiLocalizer.setLanguage(window.I18n.normalizeLanguage(value));
@@ -24,6 +24,9 @@ function formatRemoteClientStatus(port, count) {
 function refreshLocalizedRuntimeUi() {
   renderQueueTable();
   renderAccounts();
+  sessionFilesData.forEach(row => {
+    if (Number.isFinite(row.dateTs)) row.date = formatDateTime(row.dateTs).text;
+  });
   renderRecentUploadsPanel();
   historyRowsData.forEach(row => {
     if (row.rawTimestamp !== undefined) {
@@ -115,6 +118,8 @@ function _maybeLogRendererPerf(activeJobs) {
   _resetRendererPerf();
 }
 let accountStatuses = {}; // { accountId: { status: 'ok'|'warn'|'error'|'checking'|'unchecked', message: '' } }
+let accountStatusGenerationSequence = 0;
+const accountStatusGenerations = new Map();
 let editingAccountId = null; // null = adding, string = editing account by ID
 let autoHealthCheckEnabled = true;
 const queuePersistThrottle = (window.ThrottleTimer && window.ThrottleTimer.makeThrottleTimer)
@@ -571,6 +576,7 @@ async function init() {
 // --- Tab switching ---
 let _historyDirty = false;
 let _historyEverLoaded = false;
+let clampRecentPanelHeight = () => {};
 function _isHistoryTabActive() {
   const tab = document.querySelector('.tab.active');
   return !!(tab && tab.dataset.view === 'history');
@@ -601,6 +607,7 @@ function _isHistoryTabActive() {
     tab.tabIndex = 0;
     const nextView = viewsById[`${tab.dataset.view}-view`];
     if (nextView) nextView.classList.add('active');
+    if (tab.dataset.view === 'upload') requestAnimationFrame(clampRecentPanelHeight);
     activeTab = tab;
     syncTabIndicator(tab);
     const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation > .settings-nav-button.active');
@@ -993,12 +1000,35 @@ function maskCredential(value, keep = 4) {
 
 function ensureAccountStatusEntries() {
   const nextStatuses = {};
+  const activeIds = new Set();
   for (const { account } of getAllAccountsFlat()) {
     if (account.id) {
+      activeIds.add(account.id);
       nextStatuses[account.id] = accountStatuses[account.id] || { status: 'unchecked', message: '' };
     }
   }
+  for (const accountId of accountStatusGenerations.keys()) {
+    if (!activeIds.has(accountId)) accountStatusGenerations.delete(accountId);
+  }
   accountStatuses = nextStatuses;
+}
+
+function _nextAccountStatusGeneration(accountId) {
+  const generation = ++accountStatusGenerationSequence;
+  accountStatusGenerations.set(accountId, generation);
+  return generation;
+}
+
+function _isCurrentAccountStatusGeneration(accountId, generation) {
+  return accountStatusGenerations.get(accountId) === generation;
+}
+
+function _finishAccountStatusGeneration(accountId, generation) {
+  if (_isCurrentAccountStatusGeneration(accountId, generation)) accountStatusGenerations.delete(accountId);
+}
+
+function _invalidateAccountStatusGeneration(accountId) {
+  accountStatusGenerations.delete(accountId);
 }
 
 // Returns flat array of all accounts: [{ name, account, index }]
@@ -1969,7 +1999,8 @@ function renderQueueTable() {
   if (totalRows < 200) {
     // Try in-place update if row count matches (fast path)
     const existingRows = tbody.querySelectorAll('.queue-row');
-    if (existingRows.length === totalRows && totalRows > 0) {
+    const hasVirtualSpacers = Boolean(tbody.querySelector('.virtual-spacer'));
+    if (!hasVirtualSpacers && existingRows.length === totalRows && totalRows > 0) {
       // In-place update – no DOM destruction
       for (let i = 0; i < totalRows; i++) {
         const tr = existingRows[i];
@@ -2464,6 +2495,8 @@ function applyImportedConfig(importedConfig, message) {
     }
   };
   hosterSettings = config.hosterSettings || {};
+  accountStatusGenerations.clear();
+  accountStatuses = {};
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
@@ -2709,7 +2742,7 @@ document.addEventListener('keydown', (e) => {
     cancelHosterModal();
     if (accountModal && accountModal.style.display !== 'none') closeAccountModal();
   }
-  if (e.target.closest('input, textarea, select')) return;
+  if (e.target instanceof window.Element && e.target.closest('input, textarea, select')) return;
   const activeView = document.querySelector('.view.active');
   // Ctrl+A
   if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
@@ -3412,9 +3445,10 @@ function _handleStatsImpl(data) {
         if (el) el.textContent = formatDuration(Math.round((Date.now() - statsStartTime) / 1000));
       }, 1000);
     }
-  } else if (data.state === 'idle' && statsRunTimer) {
-    clearInterval(statsRunTimer);
+  } else if (data.state === 'idle') {
+    if (statsRunTimer) clearInterval(statsRunTimer);
     statsRunTimer = null;
+    statsStartTime = 0;
   }
 }
 
@@ -3934,7 +3968,15 @@ function _setRollingUploadMetric(id, value) {
   const nextText = numericValue.toLocaleString(getUiLocale());
   const previousValue = Number(element.dataset.numericValue) || 0;
   if (previousValue === numericValue) {
+    const previousText = element.getAttribute('aria-label');
     element.setAttribute('aria-label', nextText);
+    if (previousText !== null && previousText !== nextText) {
+      element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
+      const settled = document.createElement('span');
+      settled.textContent = nextText;
+      element.replaceChildren(settled);
+      element.dataset.direction = 'none';
+    }
     return;
   }
 
@@ -4056,7 +4098,7 @@ function updateStatusBar() {
   _setRollingUploadMetric('uploadTelemetryRemaining', stats.remaining);
   _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
   _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
-  _setRollingUploadMetric('uploadTelemetryFailed', _sessionErrorCount);
+  _setRollingUploadMetric('uploadTelemetryFailed', Math.max(_sessionErrorCount, stats.errors));
   updateUploadSpeedDisplays();
   _setUploadTelemetryText('uploadTelemetryEta', etaSeconds > 0 ? formatTime(etaSeconds) : '--:--');
   updateUploadSidebarSummary(stats);
@@ -4141,12 +4183,17 @@ function showAppChoice({ message, title, confirmText, alternateText, cancelText 
   return showAppDialog({ message, title, confirmText, alternateText, cancelText, showCancel: true });
 }
 
-async function executeHealthCheck(hosters, _mode) {
+async function executeHealthCheck(hosters, _mode, generations) {
   renderHealthCheckResults([]);
   const result = await window.api.runHealthCheck({ hosters });
   const rows = result && Array.isArray(result.results) ? result.results : [];
-  rows.forEach((row) => {
-    if (!row) return;
+  const currentRows = rows.filter((row) => {
+    if (!row) return false;
+    const key = row.accountId || row.hoster;
+    const generation = generations?.get(key);
+    return generation === undefined || _isCurrentAccountStatusGeneration(key, generation);
+  });
+  currentRows.forEach((row) => {
     const key = row.accountId || row.hoster;
     if (key) {
     accountStatuses[key] = {
@@ -4156,10 +4203,10 @@ async function executeHealthCheck(hosters, _mode) {
       };
     }
   });
-  renderHealthCheckResults(rows);
+  renderHealthCheckResults(currentRows);
   renderAccounts();
   renderHosterModal();
-  return rows;
+  return currentRows;
 }
 
 async function runHealthCheck(mode = 'manual', requestedHosters = null) {
@@ -4180,18 +4227,21 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
     return [];
   }
   healthCheckRunning = true;
+  const generations = new Map();
   // Mark all accounts as checking
   for (const h of hosters) {
     const key = typeof h === 'string' ? h : (h.accountId || h.hoster);
+    generations.set(key, _nextAccountStatusGeneration(key));
     accountStatuses[key] = { status: 'checking', message: '', checkedAt: null };
   }
   renderAccounts();
   try {
-    return await executeHealthCheck(hosters, mode);
+    return await executeHealthCheck(hosters, mode, generations);
   } catch (err) {
     renderHealthCheckResults([{ hoster: 'System', status: 'error', message: err.message }]);
     return [];
   } finally {
+    for (const [key, generation] of generations) _finishAccountStatusGeneration(key, generation);
     healthCheckRunning = false;
     renderAccounts();
   }
@@ -4808,6 +4858,7 @@ function renderSettings() {
     const issuedEl = document.getElementById('diagCodeIssued');
     const badgeEl = document.getElementById('diagStatusBadge');
     if (!enabledEl) return;
+    const diagnosticsEditedFields = new Set();
 
     const fmtIssued = (ts) => {
       if (!ts) return '';
@@ -4828,7 +4879,7 @@ function renderSettings() {
           const b = document.createElement('button');
           b.className = 'btn btn-xs btn-secondary';
           b.textContent = h;
-          b.addEventListener('click', () => { publicHostEl.value = h; markSettingsDirty(); });
+          b.addEventListener('click', () => { diagnosticsEditedFields.add(publicHostEl.id); publicHostEl.value = h; markSettingsDirty(); });
           suggestChips.appendChild(b);
         }
       } else {
@@ -4838,18 +4889,18 @@ function renderSettings() {
     let lastSuggested = [];
     const applySettings = (s) => {
       if (!s) return;
-      enabledEl.checked = !!s.enabled;
-      portEl.value = s.port || 9110;
-      modeEl.value = s.bindMode === 'network' ? 'network' : 'local';
-      publicHostEl.value = s.publicHost || '';
-      allowlistEl.value = Array.isArray(s.allowlist) ? s.allowlist.join('\n') : '';
+      if (!diagnosticsEditedFields.has(enabledEl.id)) enabledEl.checked = !!s.enabled;
+      if (!diagnosticsEditedFields.has(portEl.id)) portEl.value = s.port || 9110;
+      if (!diagnosticsEditedFields.has(modeEl.id)) modeEl.value = s.bindMode === 'network' ? 'network' : 'local';
+      if (!diagnosticsEditedFields.has(publicHostEl.id)) publicHostEl.value = s.publicHost || '';
+      if (!diagnosticsEditedFields.has(allowlistEl.id)) allowlistEl.value = Array.isArray(s.allowlist) ? s.allowlist.join('\n') : '';
       lastSuggested = Array.isArray(s.suggestedHosts) ? s.suggestedHosts : [];
       codeEl.value = s.code || '';
       issuedEl.textContent = fmtIssued(s.codeIssuedAt);
       renderModeUi(lastSuggested);
       if (badgeEl) {
-        badgeEl.textContent = s.enabled ? 'Aktiv' : 'Inaktiv';
-        badgeEl.className = 'panel-status' + (s.enabled ? ' active' : '');
+        badgeEl.textContent = enabledEl.checked ? 'Aktiv' : 'Inaktiv';
+        badgeEl.className = 'panel-status' + (enabledEl.checked ? ' active' : '');
       }
     };
     const refreshStatus = () => {
@@ -4876,6 +4927,11 @@ function renderSettings() {
       return true;
     };
 
+    [enabledEl, portEl, modeEl, publicHostEl, allowlistEl].forEach(element => {
+      const markEdited = () => diagnosticsEditedFields.add(element.id);
+      element.addEventListener('input', markEdited);
+      element.addEventListener('change', markEdited);
+    });
     window.api.diagnosticsGetSettings().then(applySettings).catch(() => {});
     refreshStatus();
 
@@ -5153,6 +5209,9 @@ async function performSaveSettings(options = {}) {
   config.hosterSettings = newHosterSettings;
   config.globalSettings = globalSettings;
   hosterSettings = newHosterSettings;
+  const startupUrl = new URL(window.location.href);
+  startupUrl.searchParams.set('language', globalSettings.language);
+  window.history.replaceState(null, '', startupUrl.href);
   clearTimeout(settingsSaveTimer);
   settingsSaveTimer = null;
 
@@ -5545,8 +5604,8 @@ function _buildAccountHosterGroupHtml(name, accounts) {
   accounts.forEach((account, idx) => { cardsHtml += _buildAccountCardHtml(name, account, idx); });
   const lifeStat = _hosterLifetimeStat(name);
   const lifeMeta = lifeStat && lifeStat.total > 0
-    ? `<span class="account-hoster-group-meta" title="Erfolgsrate aus den letzten ${lifeStat.total} Uploads dieses Hosters">${Math.round(lifeStat.rate * 100)}% ok (${lifeStat.total})</span>`
-    : '';
+    ? `<span class="account-hoster-group-meta account-hoster-lifetime-meta" data-hoster-lifetime="${escapeAttr(name)}" title="${escapeAttr(localizeUiText(`Erfolgsrate aus den letzten ${lifeStat.total} Uploads dieses Hosters`))}">${Math.round(lifeStat.rate * 100)}% ok (${lifeStat.total})</span>`
+    : `<span class="account-hoster-group-meta account-hoster-lifetime-meta" data-hoster-lifetime="${escapeAttr(name)}" hidden></span>`;
   return `<div class="account-hoster-group" data-hoster-group="${name}">
     <div class="account-hoster-group-header" data-hoster-toggle="${name}" role="button" tabindex="0" aria-expanded="${isOpen}">
       <span class="panel-arrow">&#9654;</span>
@@ -5572,6 +5631,22 @@ function _hosterLifetimeStat(name) {
   return _hosterLifetimeCache ? _hosterLifetimeCache[name] : null;
 }
 function _invalidateHosterLifetimeCache() { _hosterLifetimeCache = null; }
+
+function _refreshAccountHosterLifetimeStats() {
+  document.querySelectorAll('[data-hoster-lifetime]').forEach(meta => {
+    const name = meta.dataset.hosterLifetime;
+    const lifeStat = _hosterLifetimeStat(name);
+    if (!lifeStat || lifeStat.total <= 0) {
+      meta.hidden = true;
+      meta.textContent = '';
+      meta.removeAttribute('title');
+      return;
+    }
+    meta.hidden = false;
+    meta.textContent = `${Math.round(lifeStat.rate * 100)}% ok (${lifeStat.total})`;
+    meta.title = localizeUiText(`Erfolgsrate aus den letzten ${lifeStat.total} Uploads dieses Hosters`);
+  });
+}
 
 function _allAccountGroupsOpen() {
   const bodies = document.querySelectorAll('#accountsList .account-hoster-group-body');
@@ -5777,20 +5852,25 @@ async function checkSingleAccount(accountId) {
   if (!accountId || healthCheckRunning) return;
   const found = findAccountById(accountId);
   if (!found) return;
+  const generation = _nextAccountStatusGeneration(accountId);
   healthCheckRunning = true;
   accountStatuses[accountId] = { status: 'checking', message: '' };
   updateAccountCard(accountId);
+  let nextStatus = null;
   try {
     const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId }] });
     const rows = result && Array.isArray(result.results) ? result.results : [];
     const row = rows.find(r => r.accountId === accountId);
-    if (row) accountStatuses[accountId] = { status: row.status || 'error', message: row.message || '' };
+    if (row) nextStatus = { status: row.status || 'error', message: row.message || '' };
   } catch (err) {
-    accountStatuses[accountId] = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen' };
+    nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen' };
   } finally {
     healthCheckRunning = false;
   }
+  if (!_isCurrentAccountStatusGeneration(accountId, generation) || !findAccountById(accountId)) return;
+  if (nextStatus) accountStatuses[accountId] = nextStatus;
   updateAccountCard(accountId);
+  _finishAccountStatusGeneration(accountId, generation);
 }
 
 async function submitAccountOtp(accountId) {
@@ -5809,6 +5889,7 @@ async function submitAccountOtp(accountId) {
     return;
   }
   const submitButton = card?.querySelector('[data-account-otp-submit]');
+  const generation = _nextAccountStatusGeneration(accountId);
   healthCheckRunning = true;
   accountStatuses[accountId] = { status: 'checking', message: 'OTP wird geprüft…' };
   if (otpInput) otpInput.disabled = true;
@@ -5816,21 +5897,25 @@ async function submitAccountOtp(accountId) {
     submitButton.disabled = true;
     submitButton.textContent = 'Prüfe…';
   }
+  let nextStatus;
   try {
     const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId, otp }] });
     const row = result && Array.isArray(result.results)
       ? result.results.find(item => item.accountId === accountId)
       : null;
-    accountStatuses[accountId] = row
+    nextStatus = row
       ? { status: row.status || 'error', message: row.message || '' }
       : { status: 'error', message: 'Keine Antwort vom Hoster erhalten' };
   } catch (err) {
-    accountStatuses[accountId] = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen' };
+    nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen' };
   } finally {
     healthCheckRunning = false;
-    updateAccountCard(accountId);
-    renderHosterModal();
   }
+  if (!_isCurrentAccountStatusGeneration(accountId, generation) || !findAccountById(accountId)) return;
+  accountStatuses[accountId] = nextStatus;
+  updateAccountCard(accountId);
+  renderHosterModal();
+  _finishAccountStatusGeneration(accountId, generation);
 }
 
 // Per-hoster overrides for the login form. VOE only accepts emails — the
@@ -5972,6 +6057,7 @@ async function deleteAccount(accountId) {
   if (Array.isArray(accounts)) {
     config.hosters[found.name] = accounts.filter(a => a.id !== accountId);
   }
+  _invalidateAccountStatusGeneration(accountId);
   delete accountStatuses[accountId];
   // saveConfig is async — close the modal immediately so the UI feels
   // responsive instead of waiting for the atomic write + safeStorage encrypt.
@@ -6190,6 +6276,7 @@ async function _persistAccount(ctx, creds) {
 function _applyCommittedAccount(persisted, validation) {
   const { accountId, candidateHosters, isEdit } = persisted;
   config.hosters = candidateHosters;
+  _invalidateAccountStatusGeneration(accountId);
   accountStatuses[accountId] = { status: validation.status, message: validation.message || '' };
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
@@ -6327,13 +6414,16 @@ async function confirmHistoryClear() {
   }
 }
 
+let _historyLoadGeneration = 0;
 async function loadHistory() {
+  const generation = ++_historyLoadGeneration;
   const container = document.getElementById('historyContainer');
   if (container) container.innerHTML = `<p class="empty-state history-loading-state">${localizeUiText('Wird geladen…')}</p>`;
   let history;
   try {
     history = await window.api.getHistory();
   } catch (error) {
+    if (generation !== _historyLoadGeneration) return;
     historyRowsData = [];
     historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
     updateHistorySidebarSummary();
@@ -6342,10 +6432,12 @@ async function loadHistory() {
     container?.querySelector('[data-retry-history]')?.addEventListener('click', loadHistory);
     return;
   }
+  if (generation !== _historyLoadGeneration) return;
   window._historyForStats = history || [];
   _historyEverLoaded = true;
   _historyDirty = false;
   _invalidateHosterLifetimeCache();
+  _refreshAccountHosterLifetimeStats();
   const retSel = document.getElementById('historyRetentionSelect');
   if (retSel) {
     retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
@@ -6498,6 +6590,7 @@ function _renderRecentVirtualRows() {
 function renderRecentUploadsPanel(_appendOnly = false) {
   const tbody = document.getElementById('recentFilesBody');
   if (!tbody) return;
+  const pendingAppends = _recentPendingAppends;
   _recentPendingAppends = 0;
   const wrap = tbody.closest('.recent-files-table-wrap');
 
@@ -6511,7 +6604,7 @@ function renderRecentUploadsPanel(_appendOnly = false) {
     _recentLastRange = { start: -1, end: -1 };
     const sig = `${recentSortState.key}|${recentSortState.direction}`;
     if (wrap) {
-      const added = _recentWorking.length - prevLen;
+      const added = Math.max(_recentWorking.length - prevLen, pendingAppends);
       if (sig === 'date|desc' && wrap.scrollTop <= 48) wrap.scrollTop = 0;
       else if (sig === 'date|desc' && added > 0) wrap.scrollTop += added * VIRTUAL_ROW_HEIGHT;
     }
@@ -7779,6 +7872,44 @@ function showCopyToast(msg, durationMs) {
   if (resizer && panel) {
     let startY = 0;
     let startH = 0;
+    let resizeFrame = 0;
+
+    const maxPanelHeight = () => {
+      if (!document.getElementById('upload-view')?.classList.contains('active')) return null;
+      const shell = panel.closest('.queue-shell');
+      const queue = document.getElementById('queueContainer');
+      if (!shell || !queue) return window.innerHeight * 0.7;
+      const shellRect = shell.getBoundingClientRect();
+      const queueRect = queue.getBoundingClientRect();
+      if (shellRect.width <= 0 || shellRect.height <= 0 || queueRect.width <= 0) return null;
+      let betweenHeight = 0;
+      let afterQueue = false;
+      for (const element of shell.children) {
+        if (element === queue) {
+          afterQueue = true;
+          continue;
+        }
+        if (element === panel) break;
+        if (afterQueue) betweenHeight += element.getBoundingClientRect().height;
+      }
+      const shellBottom = Math.min(shellRect.bottom, window.innerHeight);
+      const availableHeight = Math.max(0, shellBottom - queueRect.top - betweenHeight);
+      return Math.max(60, Math.min(window.innerHeight * 0.7, availableHeight - 120));
+    };
+
+    clampRecentPanelHeight = () => {
+      const requestedHeight = Number.parseFloat(panel.style.flexBasis);
+      if (!Number.isFinite(requestedHeight)) return;
+      const maximumHeight = maxPanelHeight();
+      if (!Number.isFinite(maximumHeight)) return;
+      const nextHeight = Math.max(60, Math.min(requestedHeight, maximumHeight));
+      if (Math.abs(nextHeight - requestedHeight) > 0.5) panel.style.flex = `0 0 ${nextHeight}px`;
+    };
+
+    window.addEventListener('resize', () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(clampRecentPanelHeight);
+    });
 
     resizer.addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -7790,7 +7921,9 @@ function showCopyToast(msg, durationMs) {
 
       const onMove = (e2) => {
         const delta = startY - e2.clientY;
-        const newH = Math.max(60, Math.min(window.innerHeight * 0.7, startH + delta));
+        const maximumHeight = maxPanelHeight();
+        if (!Number.isFinite(maximumHeight)) return;
+        const newH = Math.max(60, Math.min(maximumHeight, startH + delta));
         panel.style.flex = `0 0 ${newH}px`;
       };
 

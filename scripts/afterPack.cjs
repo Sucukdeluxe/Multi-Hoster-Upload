@@ -31,6 +31,7 @@ module.exports = async function afterPack(context) {
       "file-version": version,
       "product-version": version,
       "version-string": {
+        CompanyName: "Sucukdeluxe",
         FileDescription: "Multi Hoster Uploader",
         InternalName: productFilename,
         OriginalFilename: `${productFilename}.exe`,
