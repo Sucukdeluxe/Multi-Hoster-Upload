@@ -2968,6 +2968,11 @@ document.getElementById('contextMenu').addEventListener('click', (e) => {
   handleContextAction(action);
 });
 
+function removeSourceCleanupRequirements(jobs) {
+  if (!window.SourceCleanupPolicy || !Array.isArray(jobs)) return;
+  for (const job of jobs) window.SourceCleanupPolicy.removeRequirement(queueJobs, job, 'win32');
+}
+
 async function handleContextAction(action) {
   _normalizeQueueSelectionToVisible();
   if (action === 'start-selected') {
@@ -2987,6 +2992,8 @@ async function handleContextAction(action) {
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
     });
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
+    const removedJobs = queueJobs.filter(j => selectedJobIds.has(j.id));
+    removeSourceCleanupRequirements(removedJobs);
     const _deletedKeys = [];
     queueJobs = queueJobs.filter(j => {
       if (selectedJobIds.has(j.id)) {
@@ -3014,6 +3021,7 @@ async function handleContextAction(action) {
       await window.api.cancelUpload();
       uploading = false;
     }
+    removeSourceCleanupRequirements(queueJobs);
     queueJobs.forEach(j => removeJobFromIndex(j));
     queueJobs = [];
     selectedJobIds.clear();
@@ -3036,6 +3044,7 @@ async function handleContextAction(action) {
       .filter(j => j.hoster === hoster && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server' || j.status === 'preview'))
       .map(j => j.id);
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
+    removeSourceCleanupRequirements(queueJobs.filter(j => j.hoster === hoster));
     // Remove ALL jobs for this hoster
     queueJobs = queueJobs.filter(j => {
       if (j.hoster === hoster) { removeJobFromIndex(j); return false; }
@@ -3111,12 +3120,19 @@ async function completeSourceCleanupFinalization(data) {
   const persist = async () => {
     if (!writesReady) {
       try {
-        await window.api.completeUploadFinalization({ finalizationId: data.finalizationId, ready: false });
+        await window.api.completeUploadFinalization({
+          finalizationId: data.finalizationId,
+          deliveryId: data.deliveryId,
+          historyPersisted: data.historyPersisted === true,
+          ready: false
+        });
       } catch {}
       return false;
     }
     return window.api.completeUploadFinalization({
       finalizationId: data.finalizationId,
+      deliveryId: data.deliveryId,
+      historyPersisted: data.historyPersisted === true,
       pendingQueue: data.historyPersisted !== true || queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
         ? buildPersistedQueueState({ historyPersisted: data.historyPersisted === true })
         : null
@@ -3195,7 +3211,7 @@ async function startUpload(opts) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
-    persistQueueStateSoon();
+    if (result?.finalized !== true) persistQueueStateSoon();
 
     if (result && result.error) {
       await showAppAlert(getLocalizedErrorDetail(result.error), 'Upload-Start fehlgeschlagen');
@@ -3319,7 +3335,7 @@ async function startSelectedUpload(explicitJobs) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
-    persistQueueStateSoon();
+    if (result?.finalized !== true) persistQueueStateSoon();
 
     if (result && result.error) {
       await showAppAlert(getLocalizedErrorDetail(result.error), 'Upload-Start fehlgeschlagen');

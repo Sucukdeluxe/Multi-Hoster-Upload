@@ -79,17 +79,20 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   const rendererSource = fs.readFileSync(path.join(root, 'renderer', 'app.js'), 'utf8');
   const indexSource = fs.readFileSync(path.join(root, 'renderer', 'index.html'), 'utf8');
   const batchDone = mainSource.slice(mainSource.indexOf("uploadManager.on('batch-done'"), mainSource.indexOf("ipcMain.handle('cancel-upload'"));
+  const barrier = mainSource.slice(mainSource.indexOf('function createUploadFinalizationBarrier'), mainSource.indexOf('function requestUploadFinalization'));
 
-  assert.match(batchDone, /buildTerminalJobSnapshots\(summary\)/);
-  assert.match(batchDone, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveUploadRecovery\(null\)/);
-  assert.ok(batchDone.indexOf('saveUploadRecovery(recoveryWithTerminalJobs)') < batchDone.indexOf('requestUploadFinalization(summary, historyPersisted)'));
+  assert.match(mainSource, /buildTerminalSnapshots: buildTerminalJobSnapshots/);
+  assert.ok(barrier.indexOf('appendHistory(summary)') < barrier.indexOf('saveRecovery(terminalRecovery)'));
+  assert.ok(barrier.indexOf('saveRecovery(terminalRecovery)') < barrier.indexOf('requestFinalization(summary, historyPersisted)'));
+  assert.match(barrier, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveRecovery\(null\)/);
+  assert.match(batchDone, /uploadFinalizationBarrier\.finalize\(summary, recovery\)/);
   const startFailure = batchDone.slice(batchDone.indexOf('startBatch(tasks'));
   assert.match(startFailure, /buildFailedUploadSummary\(tasks/);
-  assert.match(startFailure, /saveUploadRecovery\(terminalRecovery\)/);
-  assert.match(startFailure, /requestUploadFinalization\(errorSummary, historyPersisted\)/);
-  assert.match(startFailure, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveUploadRecovery\(null\)/);
+  assert.match(startFailure, /uploadFinalizationBarrier\.finalize\(errorSummary, recovery\)/);
   const startHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('start-upload'"), mainSource.indexOf("ipcMain.handle('cancel-upload'"));
   assert.match(startHandler, /await configStore\.saveUploadRecovery\(recovery\)/);
+  assert.match(startHandler, /uploadFinalizationBarrier\.finalize\(skippedSummary/);
+  assert.match(startHandler, /finalized: true/);
   assert.ok(startHandler.indexOf('sourceCleanup.registerGroups(sourceCleanupGroups)') < startHandler.indexOf('saveUploadRecovery(recovery)'));
   assert.match(startHandler, /catch \(error\)[\s\S]*return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' }/);
   const addHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'"), mainSource.indexOf("ipcMain.handle('finish-after-active'"));
@@ -97,5 +100,6 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   assert.ok(addHandler.indexOf('saveUploadRecovery(nextRecovery)') < addHandler.indexOf('batchManager.addJobs(tasks)'));
   assert.match(rendererSource, /window\.UploadRecovery\.getRecoveryOutcome/);
   assert.match(rendererSource, /data\.historyPersisted !== true/);
+  assert.match(rendererSource, /deliveryId: data\.deliveryId/);
   assert.ok(indexSource.indexOf('../lib/upload-recovery.js') < indexSource.indexOf('app.js'));
 });

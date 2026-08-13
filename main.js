@@ -149,25 +149,184 @@ const startupExternalRevealBindings = createStartupExternalRevealBindings({
   getRevealGate: () => startupRevealGate,
   sendDroppedFiles: paths => safeSend('drop-target:files', paths)
 });
-const pendingUploadFinalizations = new Map();
+
+function createUploadFinalizationCoordinator({
+  send,
+  saveQueue,
+  schedule = setTimeout,
+  cancelSchedule = clearTimeout,
+  createFinalizationId = () => `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  createDeliveryId = () => `delivery-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  timeoutMs = 15000
+}) {
+  const pending = new Map();
+  let rendererGeneration = 0;
+  let rendererIsReady = false;
+
+  function settle(entry, value) {
+    if (!entry || entry.settled) return;
+    entry.settled = true;
+    if (entry.timer) cancelSchedule(entry.timer);
+    pending.delete(entry.finalizationId);
+    entry.resolve(value);
+  }
+
+  function armTimeout(entry) {
+    if (entry.timer) cancelSchedule(entry.timer);
+    entry.timer = schedule(() => settle(entry, false), timeoutMs);
+  }
+
+  function deliver(entry) {
+    if (!rendererIsReady || entry.settled || entry.completing || entry.deliveredGeneration === rendererGeneration) return false;
+    const deliveryId = createDeliveryId();
+    const delivered = send({
+      summary: entry.summary,
+      finalizationId: entry.finalizationId,
+      deliveryId,
+      historyPersisted: entry.historyPersisted
+    });
+    if (delivered === false) return false;
+    entry.deliveryId = deliveryId;
+    entry.deliveredGeneration = rendererGeneration;
+    return true;
+  }
+
+  function request(summary, historyPersisted) {
+    const finalizationId = createFinalizationId();
+    return new Promise((resolve) => {
+      const entry = {
+        finalizationId,
+        summary,
+        historyPersisted: historyPersisted === true,
+        deliveryId: null,
+        deliveredGeneration: 0,
+        completing: false,
+        settled: false,
+        timer: null,
+        resolve
+      };
+      pending.set(finalizationId, entry);
+      armTimeout(entry);
+      deliver(entry);
+    });
+  }
+
+  function rendererBlocked() {
+    rendererIsReady = false;
+    for (const entry of pending.values()) armTimeout(entry);
+  }
+
+  function rendererReady() {
+    if (rendererIsReady) return rendererGeneration;
+    rendererIsReady = true;
+    rendererGeneration += 1;
+    for (const entry of pending.values()) deliver(entry);
+    return rendererGeneration;
+  }
+
+  async function complete(payload) {
+    const entry = payload?.finalizationId && pending.get(payload.finalizationId);
+    if (!entry || entry.settled || entry.completing || !payload.deliveryId || payload.deliveryId !== entry.deliveryId) return false;
+    entry.completing = true;
+    if (payload.ready === false) {
+      settle(entry, false);
+      return false;
+    }
+    try {
+      await saveQueue(payload.pendingQueue ?? null);
+      settle(entry, true);
+      return true;
+    } catch {
+      settle(entry, false);
+      return false;
+    }
+  }
+
+  return { request, rendererBlocked, rendererReady, complete };
+}
+
+function createUploadFinalizationBarrier({
+  appendHistory,
+  saveRecovery,
+  requestFinalization,
+  buildTerminalSnapshots,
+  now = () => new Date().toISOString(),
+  onError = () => {}
+}) {
+  async function finalize(summary, recovery) {
+    let historyPersisted = true;
+    try {
+      await appendHistory(summary);
+    } catch (error) {
+      historyPersisted = false;
+      onError('history', error);
+    }
+
+    const terminalRecovery = {
+      ...recovery,
+      settledAt: now(),
+      terminalJobs: buildTerminalSnapshots(summary)
+    };
+    let terminalRecoveryPersisted = true;
+    try {
+      await saveRecovery(terminalRecovery);
+    } catch (error) {
+      terminalRecoveryPersisted = false;
+      onError('recovery', error);
+    }
+
+    let queuePersisted = false;
+    try {
+      queuePersisted = (await requestFinalization(summary, historyPersisted)) === true;
+    } catch (error) {
+      onError('queue', error);
+    }
+
+    let recoveryCleared = false;
+    if (queuePersisted && terminalRecoveryPersisted) {
+      try {
+        await saveRecovery(null);
+        recoveryCleared = true;
+      } catch (error) {
+        onError('recovery-clear', error);
+      }
+    }
+
+    return {
+      historyPersisted,
+      queuePersisted,
+      terminalRecoveryPersisted,
+      recoveryCleared,
+      terminalRecovery
+    };
+  }
+
+  return { finalize };
+}
 
 function requestUploadFinalization(summary, historyPersisted) {
-  const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      pendingUploadFinalizations.delete(finalizationId);
-      resolve(false);
-    }, 15000);
-    pendingUploadFinalizations.set(finalizationId, {
-      resolve(value) {
-        clearTimeout(timer);
-        pendingUploadFinalizations.delete(finalizationId);
-        resolve(value);
-      }
-    });
-    safeSend('upload-batch-done', { summary, finalizationId, historyPersisted: historyPersisted === true });
-  });
+  return uploadFinalizationCoordinator.request(summary, historyPersisted);
 }
+
+const uploadFinalizationCoordinator = createUploadFinalizationCoordinator({
+  send: payload => safeSend('upload-batch-done', payload),
+  saveQueue: async pendingQueue => {
+    try {
+      await configStore.savePendingQueue(pendingQueue);
+    } catch (error) {
+      debugLog(`upload finalization queue save failed: ${error.message}`);
+      throw error;
+    }
+  },
+  timeoutMs: RENDERER_READY_TIMEOUT_MS * 3
+});
+const uploadFinalizationBarrier = createUploadFinalizationBarrier({
+  appendHistory: summary => configStore.appendHistory(summary),
+  saveRecovery: recovery => configStore.saveUploadRecovery(recovery),
+  requestFinalization: requestUploadFinalization,
+  buildTerminalSnapshots: buildTerminalJobSnapshots,
+  onError: (phase, error) => debugLog(`upload finalization ${phase} failed: ${error.message}`)
+});
 const activeUploadProducerTrackers = new Set();
 const uploadStartReservation = createUploadStartReservation();
 const settingsImportGate = createSettingsImportGate(() => !!uploadManager || uploadStartReservation.isActive());
@@ -1520,12 +1679,17 @@ function createWindow() {
     window: mainWindow,
     ipcMain,
     coordinator: startupRecoveryCoordinator,
-    onDocumentLoadStarted: currentStartupRevealGate.block,
+    onDocumentLoadStarted: () => {
+      currentStartupRevealGate.block();
+      uploadFinalizationCoordinator.rendererBlocked();
+    },
     onRendererCrashed: (details) => {
+      uploadFinalizationCoordinator.rendererBlocked();
       _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
       debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
     },
     onReady: () => {
+      uploadFinalizationCoordinator.rendererReady();
       startupExternalRevealBindings.rendererReady(startupWindow.window);
       closeHandshakeReady = true;
     },
@@ -2106,11 +2270,21 @@ async function executeReservedUploadStart(payload, startLease) {
       skipped: 0,
       files: []
     }, skippedJobs);
-    try { await configStore.appendHistory(skippedSummary); } catch (error) {
-      debugLog(`appendHistory for skipped jobs failed: ${error.message}`);
-    }
-    setImmediate(() => safeSend('upload-batch-done', skippedSummary));
-    return { started: true, taskCount: 0, skippedJobs };
+    lastSessionSummary = skippedSummary;
+    const finalization = await uploadFinalizationBarrier.finalize(skippedSummary, {
+      id: `skipped-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      startedAt: new Date().toISOString(),
+      jobIds: skippedJobs.map(job => job.jobId).filter(Boolean)
+    });
+    if (!finalization.queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
+    if (!finalization.terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
+    return {
+      started: true,
+      taskCount: 0,
+      skippedJobs,
+      finalized: true,
+      historyPersisted: finalization.historyPersisted
+    };
   }
 
   uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
@@ -2319,11 +2493,6 @@ async function executeReservedUploadStart(payload, startLease) {
     const _batchDurationSec = _thisManager && _thisManager.startTime
       ? Math.round((Date.now() - _thisManager.startTime) / 1000)
       : 0;
-    let historyPersisted = true;
-    try { await configStore.appendHistory(summary); } catch (err) {
-      historyPersisted = false;
-      debugLog(`appendHistory failed: ${err.message}`);
-    }
     if (_progressFlushTimer) {
       clearTimeout(_progressFlushTimer);
       _progressFlushTimer = null;
@@ -2332,20 +2501,8 @@ async function executeReservedUploadStart(payload, startLease) {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
-    const recoveryWithTerminalJobs = {
-      ...recovery,
-      settledAt: new Date().toISOString(),
-      terminalJobs: buildTerminalJobSnapshots(summary)
-    };
-    let terminalRecoveryPersisted = true;
-    try { await configStore.saveUploadRecovery(recoveryWithTerminalJobs); } catch (error) {
-      terminalRecoveryPersisted = false;
-      debugLog(`upload recovery outcomes could not be saved: ${error.message}`);
-    }
-    const queuePersisted = await requestUploadFinalization(summary, historyPersisted);
-    if (queuePersisted && terminalRecoveryPersisted) {
-      try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
-    }
+    const finalization = await uploadFinalizationBarrier.finalize(summary, recovery);
+    const { historyPersisted, queuePersisted, terminalRecoveryPersisted } = finalization;
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     if (!terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
     if (hadActiveBatchMutation) debugLog('source cleanup blocked: batch mutation overlapped finalization');
@@ -2394,27 +2551,7 @@ async function executeReservedUploadStart(payload, startLease) {
       debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
       await batchMutationGate.sealAndDrain();
       const errorSummary = buildFailedUploadSummary(tasks, 'Upload konnte nicht gestartet werden');
-      let historyPersisted = true;
-      try { await configStore.appendHistory(errorSummary); } catch (historyError) {
-        historyPersisted = false;
-        debugLog(`appendHistory after start failure failed: ${historyError.message}`);
-      }
-      const terminalRecovery = {
-        ...recovery,
-        settledAt: new Date().toISOString(),
-        terminalJobs: buildTerminalJobSnapshots(errorSummary)
-      };
-      let terminalRecoveryPersisted = true;
-      try { await configStore.saveUploadRecovery(terminalRecovery); } catch (recoveryError) {
-        terminalRecoveryPersisted = false;
-        debugLog(`upload recovery outcomes could not be saved after start failure: ${recoveryError.message}`);
-      }
-      const queuePersisted = await requestUploadFinalization(errorSummary, historyPersisted);
-      if (queuePersisted && terminalRecoveryPersisted) {
-        try { await configStore.saveUploadRecovery(null); } catch (clearError) {
-          debugLog(`upload recovery state could not be cleared after start failure: ${clearError.message}`);
-        }
-      }
+      await uploadFinalizationBarrier.finalize(errorSummary, recovery);
       _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
@@ -3085,22 +3222,7 @@ ipcMain.handle('save-pending-queue', async (_event, pendingQueue) => {
 });
 
 ipcMain.handle('complete-upload-finalization', async (_event, payload) => {
-  const finalizationId = payload && payload.finalizationId;
-  const pending = finalizationId && pendingUploadFinalizations.get(finalizationId);
-  if (!pending) return false;
-  if (payload.ready === false) {
-    pending.resolve(false);
-    return false;
-  }
-  try {
-    await configStore.savePendingQueue(payload.pendingQueue ?? null);
-    pending.resolve(true);
-    return true;
-  } catch (error) {
-    debugLog(`upload finalization queue save failed: ${error.message}`);
-    pending.resolve(false);
-    return false;
-  }
+  return uploadFinalizationCoordinator.complete(payload);
 });
 
 ipcMain.handle('save-global-settings', async (_event, globalSettings) => {

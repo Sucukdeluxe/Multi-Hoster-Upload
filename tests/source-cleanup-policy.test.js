@@ -178,6 +178,47 @@ test('markCompleted keeps successful hosters provisional for the current round',
   }
 });
 
+test('removeRequirement never relaxes requirements for started or interrupted jobs', () => {
+  for (const candidate of [
+    { status: 'queued' },
+    { status: 'getting-server' },
+    { status: 'uploading' },
+    { status: 'retrying' },
+    { status: 'preview', interrupted: true }
+  ]) {
+    const queueJobs = [
+      {
+        id: 'job-complete',
+        file: 'C:\\Uploads\\Protected.mkv',
+        hoster: 'doodstream.com',
+        status: 'done',
+        sourceCleanupMetadataVersion: 2,
+        sourceCleanupToken: 'cleanup-protected',
+        sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'],
+        sourceCleanupConfirmedHosters: ['doodstream.com']
+      },
+      {
+        id: 'job-candidate',
+        file: 'C:\\Uploads\\Protected.mkv',
+        hoster: 'voe.sx',
+        sourceCleanupMetadataVersion: 2,
+        sourceCleanupToken: 'cleanup-protected',
+        sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'],
+        sourceCleanupConfirmedHosters: ['doodstream.com'],
+        ...candidate
+      }
+    ];
+
+    const touchedJobs = policy.removeRequirement(queueJobs, queueJobs[1], 'win32');
+
+    assert.deepEqual(touchedJobs, []);
+    assert.deepEqual(queueJobs.map(job => job.sourceCleanupRequiredHosters), [
+      ['doodstream.com', 'voe.sx'],
+      ['doodstream.com', 'voe.sx']
+    ]);
+  }
+});
+
 test('applyFingerprints attaches Main fingerprints by token and includes them in payloads', () => {
   const queueJobs = queueFixture();
   policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-1', 'win32');
