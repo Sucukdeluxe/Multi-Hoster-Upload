@@ -59,7 +59,7 @@ function routeWith(uploadBody, listBodies = []) {
     if (opts && opts.body && typeof opts.body[Symbol.asyncIterator] === 'function') {
       for await (const chunk of opts.body) { if (chunk && chunk.length === -1) break; }
     }
-    return { statusCode: uploadBody.status, headers: { 'content-type': 'application/json' }, body: { text: async () => uploadBody.body } };
+    return { statusCode: uploadBody.status, headers: { 'content-type': uploadBody.contentType || 'application/json' }, body: { text: async () => uploadBody.body } };
   };
 }
 
@@ -99,6 +99,98 @@ test('doodstream API upload: codeless + file never appears → throws hosterTran
     () => uploadFile('doodstream.com', tmpFile, 'VALIDKEY', null, null, null),
     (err) => {
       assert.equal(err.hosterTransient, true, 'codeless result must be tagged hosterTransient');
+      return true;
+    }
+  );
+});
+
+test('doodstream API upload never recovers an old file after a failed baseline', async () => {
+  stubUploadServer();
+  const abort = new AbortController();
+  const fileName = path.basename(tmpFile);
+  let listCalls = 0;
+  requestRouter = async (url, opts) => {
+    if (/\/api\/file\/list/.test(String(url))) {
+      listCalls++;
+      if (listCalls === 1) {
+        return {
+          statusCode: 503,
+          headers: { 'content-type': 'text/html' },
+          body: { text: async () => '<html>baseline-token=SYNTHETIC_BASELINE_SECRET</html>' }
+        };
+      }
+      abort.abort();
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json' },
+        body: { text: async () => JSON.stringify({ status: 200, result: { files: [{ file_code: 'OLD_DOOD_123', title: fileName }] } }) }
+      };
+    }
+    if (opts && opts.body && typeof opts.body[Symbol.asyncIterator] === 'function') {
+      for await (const chunk of opts.body) { if (chunk && chunk.length === -1) break; }
+    }
+    return {
+      statusCode: 200,
+      headers: { 'content-type': 'application/json' },
+      body: { text: async () => JSON.stringify({ status: 200, msg: 'OK' }) }
+    };
+  };
+
+  await assert.rejects(
+    () => uploadFile('doodstream.com', tmpFile, 'VALIDKEY', null, abort.signal, null),
+    (err) => {
+      assert.doesNotMatch(err.message, /SYNTHETIC_BASELINE_SECRET/);
+      assert.equal(err.diagnostic.phase, 'recovery-baseline');
+      assert.equal(err.diagnostic.http, 503);
+      return true;
+    }
+  );
+  assert.equal(listCalls, 1);
+});
+
+test('doodstream API recovery rejects ambiguous same-title candidates', async () => {
+  stubUploadServer();
+  const fileName = path.basename(tmpFile);
+  requestRouter = routeWith(
+    { status: 200, body: JSON.stringify({ status: 200, msg: 'OK' }) },
+    [
+      '{"status":200,"result":{"files":[]}}',
+      JSON.stringify({
+        status: 200,
+        result: {
+          files: [
+            { file_code: 'PARALLEL_A', title: fileName },
+            { file_code: 'PARALLEL_B', title: fileName }
+          ]
+        }
+      })
+    ]
+  );
+
+  await assert.rejects(
+    () => uploadFile('doodstream.com', tmpFile, 'VALIDKEY', null, null, null),
+    (err) => err.hosterTransient === true
+  );
+});
+
+test('doodstream API upload errors expose safe structured diagnostics', async () => {
+  stubUploadServer();
+  requestRouter = routeWith({
+    status: 502,
+    contentType: 'text/html; charset=utf-8',
+    body: '<html>upstream-token=SYNTHETIC_UPLOAD_SECRET https://node.invalid/upload?session=SYNTHETIC_SESSION</html>'
+  });
+
+  await assert.rejects(
+    () => uploadFile('doodstream.com', tmpFile, 'VALIDKEY', null, null, null),
+    (err) => {
+      assert.equal(err.transientNetwork, true);
+      assert.doesNotMatch(err.message, /SYNTHETIC_UPLOAD_SECRET|SYNTHETIC_SESSION|<html>/);
+      assert.equal(err.diagnostic.phase, 'upload-response');
+      assert.equal(err.diagnostic.http, 502);
+      assert.equal(err.diagnostic.contentType, 'text/html; charset=utf-8');
+      assert.equal(err.diagnostic.responseKind, 'html');
+      assert.doesNotMatch(err.diagnostic.payloadSnippet, /SYNTHETIC_UPLOAD_SECRET|SYNTHETIC_SESSION/);
       return true;
     }
   );

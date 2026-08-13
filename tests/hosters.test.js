@@ -46,12 +46,13 @@ describe('hosters helpers', () => {
   it('parseDoodstreamResult handles result-as-array and result-as-object', () => {
     const arr = __test.parseDoodstreamResult({ result: [{ filecode: 'AB1', protected_dl: 'https://x/1', protected_embed: 'https://x/e/1' }] });
     assert.equal(arr.file_code, 'AB1');
-    assert.equal(arr.download_url, 'https://x/1');
-    assert.equal(arr.embed_url, 'https://x/e/1');
+    assert.equal(arr.download_url, 'https://doodstream.com/d/AB1');
+    assert.equal(arr.embed_url, 'https://doodstream.com/e/AB1');
 
     const obj = __test.parseDoodstreamResult({ result: { filecode: 'OBJ1', download_url: 'https://x/2' } });
     assert.equal(obj.file_code, 'OBJ1');
-    assert.equal(obj.download_url, 'https://x/2');
+    assert.equal(obj.download_url, 'https://doodstream.com/d/OBJ1');
+    assert.equal(obj.embed_url, 'https://doodstream.com/e/OBJ1');
   });
 
   it('parseByseResult tolerates null/non-object payload without throwing', () => {
