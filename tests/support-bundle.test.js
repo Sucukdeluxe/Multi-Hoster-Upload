@@ -239,7 +239,7 @@ test('buildSupportBundleText produces structured output with header + config + f
       sanitizedConfig: { hosters: { 'voe.sx': [{ apiKey: '<redacted>' }] } },
       files: [{ label: 'debug.log', path: tmp }]
     });
-    assert.match(text, /^=== Multi-Hoster-Upload Support Bundle ===/);
+    assert.match(text, /^=== Multi Hoster Uploader Support Bundle ===/);
     assert.match(text, /Version: 3\.3\.41/);
     assert.match(text, /Platform: win32/);
     assert.match(text, /=== Config \(sanitized/);
@@ -253,7 +253,7 @@ test('buildSupportBundleText produces structured output with header + config + f
 
 test('buildSupportBundleText handles empty file list and missing header', () => {
   const text = buildSupportBundleText({ sanitizedConfig: {}, files: [] });
-  assert.match(text, /=== Multi-Hoster-Upload Support Bundle ===/);
+  assert.match(text, /=== Multi Hoster Uploader Support Bundle ===/);
   assert.match(text, /=== Config/);
 });
 

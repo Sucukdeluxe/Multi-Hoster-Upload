@@ -1,8 +1,8 @@
-# Multi-Hoster-Upload
+# Multi Hoster Uploader
 
-Multi-Hoster-Upload is a Windows desktop application for sending file batches to several supported video hosts from one queue. Add files or folders, choose one or more destinations, manage multiple accounts, and follow every upload from preparation to its final link.
+Multi Hoster Uploader is a Windows desktop application for sending file batches to several supported video hosts from one queue. Add files or folders, choose one or more destinations, manage multiple accounts, and follow every upload from preparation to its final link.
 
-![Multi-Hoster-Upload product overview](assets/product-overview.png)
+![Multi Hoster Uploader product overview](assets/product-overview.png)
 
 ## Download
 
