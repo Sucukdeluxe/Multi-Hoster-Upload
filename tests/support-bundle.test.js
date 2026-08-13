@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { sanitizeConfig, collectFile, buildSupportBundleText, redactLogText, REDACTED } = require('../lib/support-bundle');
+const { sanitizeConfig, collectSecretValues, collectFile, buildSupportBundleText, redactLogText, REDACTED } = require('../lib/support-bundle');
 
 test('sanitizeConfig redacts known credential keys at any nesting depth', () => {
   const input = {
@@ -83,6 +83,38 @@ test('redactLogText scrubs Basic auth, JWTs and bare session= values (defense in
 test('redactLogText leaves a normal "session" word in prose alone', () => {
   const benign = 'the session was idle for a while';
   assert.equal(redactLogText(benign, []), benign);
+});
+
+test('redactLogText removes complete authorization, cookie, session, HTML credential, and query values', () => {
+  const authorization = 'Digest username="private-user", realm="private-realm", response="private-response"';
+  const cookie = 'sid=private-cookie; preferences=private-preferences';
+  const sessionId = 's3';
+  const htmlPassword = 'private-html-password';
+  const htmlToken = 'private-html-token';
+  const queryToken = 'q1';
+  const input = [
+    `Authorization: ${authorization}`,
+    `Cookie: ${cookie}`,
+    `session_id=${sessionId}`,
+    `<input type="password" name="password" value="${htmlPassword}">`,
+    `<input value="${htmlToken}" name="api_token" type="text">`,
+    `https://example.invalid/upload?token=${queryToken}&next=ok`
+  ].join('\n');
+  const out = redactLogText(input, []);
+  for (const value of [authorization, 'private-user', 'private-realm', 'private-response', cookie, 'private-cookie', 'private-preferences', sessionId, htmlPassword, htmlToken, queryToken]) {
+    assert.ok(!out.includes(value), `sensitive value survived: ${value}`);
+  }
+  assert.ok((out.match(/<redacted>/g) || []).length >= 6);
+});
+
+test('redactLogText masks a one-character configured secret only as a complete sensitive value', () => {
+  const out = redactLogText('status=diagnostics available\npassword=x\nfile=xylophone.mkv\nmarker=x', ['x']);
+  assert.ok(out.includes('status=diagnostics available'));
+  assert.ok(out.includes('file=xylophone.mkv'));
+  assert.ok(!out.includes('password=x'));
+  assert.ok(!out.includes('marker=x'));
+  assert.ok(out.includes(`password=${REDACTED}`));
+  assert.ok(out.includes(`marker=${REDACTED}`));
 });
 
 test('redactLogText removes complete local paths from structured and free-form log text', () => {
@@ -172,6 +204,18 @@ test('buildSupportBundleText handles empty file list and missing header', () => 
   assert.match(text, /=== Config/);
 });
 
+test('buildSupportBundleText never uses an absolute source path as a section label', () => {
+  const tmp = path.join(os.tmpdir(), `mhu-bundle-unlabeled-${Date.now()}.log`);
+  fs.writeFileSync(tmp, 'safe content\n');
+  try {
+    const text = buildSupportBundleText({ sanitizedConfig: {}, files: [{ path: tmp }], secrets: [] });
+    assert.ok(!text.includes(tmp));
+    assert.ok(text.includes('=== log (size='));
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
 test('buildSupportBundleText redacts configured and pattern-detected secrets from included logs', () => {
   const tmp = path.join(os.tmpdir(), `mhu-bundle-secrets-${Date.now()}.log`);
   const configuredSecret = ['configured', 'Secret', '123456'].join('');
@@ -196,6 +240,47 @@ test('buildSupportBundleText redacts configured and pattern-detected secrets fro
     assert.ok(!text.includes('episode.pending-delete'));
     assert.ok(!text.includes(tmp));
     assert.match(text, /<redacted>/);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
+test('buildSupportBundleText removes configured secrets of every non-empty length', () => {
+  const tmp = path.join(os.tmpdir(), `mhu-bundle-short-secrets-${Date.now()}.log`);
+  const config = {
+    hosters: { 'voe.sx': [{ password: 'p1', apiKey: 'k2' }] },
+    globalSettings: { diagnostics: { token: 't3' }, cookie: '', sessionId: null }
+  };
+  fs.writeFileSync(tmp, 'password=p1\napiKey=k2\ntoken=t3\n');
+  try {
+    const secrets = collectSecretValues(config);
+    assert.deepEqual(new Set(secrets), new Set(['p1', 'k2', 't3']));
+    const text = buildSupportBundleText({
+      header: { Marker: 'p1-k2-t3' },
+      sanitizedConfig: sanitizeConfig(config),
+      secrets,
+      files: [{ label: 'short-secrets.log', path: tmp }]
+    });
+    for (const secret of ['p1', 'k2', 't3']) assert.ok(!text.includes(secret), `configured secret survived: ${secret}`);
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+});
+
+test('buildSupportBundleText removes a one-character configured secret', () => {
+  const tmp = path.join(os.tmpdir(), `mhu-bundle-one-character-secret-${Date.now()}.log`);
+  const config = { hosters: { 'voe.sx': [{ password: 'x' }] } };
+  fs.writeFileSync(tmp, 'password=x\n');
+  try {
+    const text = buildSupportBundleText({
+      header: { Marker: 'secret:x' },
+      sanitizedConfig: sanitizeConfig(config),
+      secrets: collectSecretValues(config),
+      files: [{ label: 'one-character.log', path: tmp }]
+    });
+    assert.ok(!text.includes('secret:x'));
+    assert.ok(!text.includes('password=x'));
+    assert.ok(text.includes('one-character.log'));
   } finally {
     fs.unlinkSync(tmp);
   }

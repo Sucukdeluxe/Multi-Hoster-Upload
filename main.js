@@ -27,8 +27,8 @@ const { walkFolderAsync } = require('./lib/file-discovery');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
-const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
-const { getUploadAuditLogPath, createUploadAuditWriter } = require('./lib/upload-audit');
+const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan } = require('./lib/upload-log');
+const { getUploadAuditLogPath, createUploadAuditWriter, createUploadAuditEvents, runAfterDurableAudit, getUploadAuditFailureMessage } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
@@ -778,13 +778,14 @@ function _invalidateUploadLogTargetCache() {
   _cachedUploadLogKey = '';
 }
 
-function _resolveUploadLogTarget(excludedPath) {
+function _resolveUploadLogTarget(excluded) {
+  const excludedPaths = excluded instanceof Set ? excluded : new Set(excluded ? [excluded] : []);
   const primary = getLogFilePath();
   // The primary path already encodes the mode + date/session, so it changes
   // when the user toggles mode, daily rolls at midnight, or this is a new
   // process — cache invalidates naturally on path change.
   const key = primary;
-  if (_cachedUploadLogKey === key && _cachedUploadLogTarget && _cachedUploadLogTarget.path !== excludedPath) return _cachedUploadLogTarget;
+  if (_cachedUploadLogKey === key && _cachedUploadLogTarget && !excludedPaths.has(_cachedUploadLogTarget.path)) return _cachedUploadLogTarget;
 
   const commit = (t) => {
     _cachedUploadLogTarget = t;
@@ -793,7 +794,7 @@ function _resolveUploadLogTarget(excludedPath) {
   };
 
   // Try primary → desktop → userData, mirror the original fallback ladder.
-  if (primary !== excludedPath) {
+  if (!excludedPaths.has(primary)) {
     try {
       fs.mkdirSync(path.dirname(primary), { recursive: true });
       return commit({ path: primary, isFallback: false });
@@ -805,7 +806,7 @@ function _resolveUploadLogTarget(excludedPath) {
   if (desktop) {
     try {
       const p = buildFallbackLogName(desktop);
-      if (p !== excludedPath) {
+      if (!excludedPaths.has(p)) {
         fs.mkdirSync(path.dirname(p), { recursive: true });
         return commit({ path: p, isFallback: true });
       }
@@ -813,7 +814,7 @@ function _resolveUploadLogTarget(excludedPath) {
   }
   try {
     const p = buildFallbackLogName(app.getPath('userData'));
-    if (p === excludedPath) return null;
+    if (excludedPaths.has(p)) return null;
     fs.mkdirSync(path.dirname(p), { recursive: true });
     return commit({ path: p, isFallback: true });
   } catch (err) {
@@ -836,6 +837,7 @@ const _uploadAuditWriter = createUploadAuditWriter({
   persistFallbackLogPath: _persistFallbackLogPath,
   reportError: (label, error) => debugLog(`${label} audit append failed: ${error.message}`)
 });
+const _uploadAuditEvents = createUploadAuditEvents(_uploadAuditWriter);
 
 function _flushUploadLog() {
   if (_uploadLogWriting || _uploadLogBuffer.length === 0) return;
@@ -936,19 +938,8 @@ function appendUploadLog(hoster, link, fileName) {
   }
 }
 
-async function appendUploadAuditLine(line, label) {
-  return _uploadAuditWriter.append(line, label);
-}
-
-async function appendSourceCleanupAudit(event) {
-  debugLog(`source-cleanup: ${event.outcome} ${event.file} trigger=${event.trigger || '-'}`);
-  return appendUploadAuditLine(`# SOURCE-CLEANUP ${JSON.stringify(event)}\r\n`, 'source-cleanup');
-}
-
-async function appendUploadPlanAudit(plan, mode) {
-  debugLog(`upload-plan: mode=${mode} files=${plan.fileCount} destinations=${plan.destinationCount} uploads=${plan.plannedUploadCount}`);
-  return appendUploadAuditLine(formatUploadPlanLogLine(new Date(), plan, mode), 'upload-plan');
-}
+const appendSourceCleanupAudit = _uploadAuditEvents.appendSourceCleanup;
+const appendUploadPlanAudit = _uploadAuditEvents.appendUploadPlan;
 
 function flattenHistoryForExport(history) {
   const rows = [];
@@ -2032,7 +2023,6 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   const tasks = jobs.length > 0
     ? buildUploadTasksFromJobs(config, jobs, pick)
     : buildUploadTasks(config, files, hosters, pick);
-  persistRotation(pick);
 
   // Identify jobs that were skipped (no account/credentials)
   const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
@@ -2050,8 +2040,16 @@ ipcMain.handle('start-upload', async (_event, payload) => {
 
   debugLog(`  tasks built: ${tasks.length}`);
 
+  const auditedStart = await runAfterDurableAudit(
+    () => appendUploadPlanAudit(batchPlan, 'start'),
+    () => tasks.length > 0 ? new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config)) : null
+  );
+  if (!auditedStart.ok) {
+    return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
+  }
+  persistRotation(pick);
+
   if (tasks.length === 0) {
-    await appendUploadPlanAudit(batchPlan, 'start');
     const skippedSummary = stats.mergeSkippedIntoSummary({
       id: `skipped-${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -2068,11 +2066,9 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     return { started: true, taskCount: 0, skippedJobs };
   }
 
-  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
+  uploadManager = auditedStart.value;
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
-
-  await appendUploadPlanAudit(batchPlan, 'start');
 
   const recovery = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2376,11 +2372,18 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
   const pick = makeAccountPicker(config);
   const tasks = buildUploadTasksFromJobs(config, jobs, pick);
-  persistRotation(pick);
   const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
   const skippedJobs = jobs
     .filter(j => j && j.id && !taskJobIds.has(j.id))
     .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
+  if (jobs.length > 0) {
+    const auditedAdd = await runAfterDurableAudit(
+      () => appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add'),
+      () => true
+    );
+    if (!auditedAdd.ok) return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
+  }
+  persistRotation(pick);
   const sourceCleanupFingerprints = batchManager.sourceFileCleanup
     ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
     : {};
@@ -2393,7 +2396,6 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
 
   if (tasks.length === 0) {
     debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
-    if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
     return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
   }
 
@@ -2406,7 +2408,6 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   debugLog(
     `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
   );
-  if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
   return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
 });
 

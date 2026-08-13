@@ -25,7 +25,7 @@ function makeFixture() {
     crashLog: path.join(dir, 'crash.log'),
     logDir: dir
   };
-  fs.writeFileSync(paths.debug, `boot ok\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
+  fs.writeFileSync(paths.debug, `boot ok\nsource ${path.join(dir, 'private-source.mkv')}\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
   fs.writeFileSync(paths.uploadAudit, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
   fs.writeFileSync(paths.doodstreamDebug, `api_key=${fixtureGamma} sess=abc\n`);
   fs.writeFileSync(paths.crashLog, 'CRASH at 12:00\n');
@@ -88,7 +88,7 @@ test('getHistory falls back to loadConfig().history when loadHistory is absent (
 });
 
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
-  const { collectors } = makeFixture();
+  const { collectors, dir, paths } = makeFixture();
   const dbg = collectors.readLog({ name: 'debug', tailKb: 64 });
   const audit = collectors.readLog({ name: 'uploadAudit', tailKb: 64 });
   assert.ok(!dbg.content.includes('SECRETTOKEN123456'), 'value-scrub removes the live diag token from logs');
@@ -97,6 +97,10 @@ test('readLog redacts a planted token and a Bearer line; doodstream is NOT reada
   assert.ok(!audit.content.includes('SECRETTOKEN123456'), 'source cleanup audit is readable only through the redacted diagnostics path');
   assert.equal(collectors.readLog({ name: 'doodstreamDebug' }).ok, false, 'doodstream-debug.log is not in the readable allowlist');
   assert.equal(collectors.readLog({ name: '../../etc/passwd' }).ok, false, 'arbitrary names are rejected (no path traversal)');
+  assert.ok(!JSON.stringify(dbg).includes(dir), 'read log content and metadata must not expose its absolute directory');
+  const rejectedAbsolutePath = collectors.readLog({ name: paths.debug });
+  assert.ok(!rejectedAbsolutePath.error.includes(paths.debug), 'rejected log identifiers must not be echoed as absolute paths');
+  assert.ok(!rejectedAbsolutePath.error.includes(path.basename(paths.debug)), 'rejected log identifiers must not echo path components');
   assert.equal(collectors.readLog({ name: 'crash' }).name, 'crash');
 });
 
@@ -104,11 +108,21 @@ test('rotated audit backups are listed and readable with the rotation naming con
   const { collectors, paths, fixtureAlpha } = makeFixture();
   const backupPath = path.join(path.dirname(paths.uploadAudit), 'upload-audit.1.log');
   fs.writeFileSync(backupPath, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
-  const listed = collectors.listLogs().files.find(file => file.name === 'uploadAudit');
+  const logList = collectors.listLogs();
+  const listed = logList.files.find(file => file.name === 'uploadAudit');
+  assert.equal(logList.dir, undefined);
+  assert.equal(listed.id, 'uploadAudit');
+  assert.equal(listed.fileName, 'upload-audit.log');
+  assert.equal(listed.path, undefined);
   assert.ok(listed.variants.some(variant => variant.backup === 1));
+  assert.ok(listed.variants.every(variant => variant.fileName && !Object.hasOwn(variant, 'path')));
   assert.ok(!collectors.listLogs().otherLogs.some(file => file.name === 'upload-audit.1.log'));
   const backup = collectors.readLog({ name: 'uploadAudit', backup: 1, tailKb: 64 });
-  assert.equal(backup.path, backupPath);
+  assert.equal(backup.id, 'uploadAudit');
+  assert.equal(backup.name, 'uploadAudit');
+  assert.equal(backup.fileName, 'upload-audit.1.log');
+  assert.equal(backup.path, undefined);
+  assert.ok(!JSON.stringify({ logList, backup }).includes(path.dirname(paths.uploadAudit)));
   assert.ok(!backup.content.includes(fixtureAlpha));
 });
 
@@ -171,9 +185,10 @@ test('listErrors classifies via stats.classifyErrorCategory and redacts error te
 });
 
 test('serverHealth assembles the one-shot hub without leaking secrets', () => {
-  const { collectors } = makeFixture();
+  const { collectors, dir, paths } = makeFixture();
   const h = collectors.serverHealth({});
   const json = JSON.stringify(h);
   assert.ok(h.server && h.queue && h.errors && h.logs, 'hub has all sections');
   assert.ok(!json.includes('HUNTER2SECRET') && !json.includes('SECRETTOKEN123456') && !json.includes('WBHOOKSECRETTOKEN'), 'no secret leaks in server_health');
+  assert.ok(!json.includes(dir) && !json.includes(paths.debug), 'server_health must not expose absolute log paths');
 });
