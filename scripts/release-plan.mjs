@@ -23,6 +23,9 @@ export function createReleasePlan(options) {
   const setupName = `${ARTIFACT_NAME} Setup ${options.version}.exe`;
   const portableName = `${ARTIFACT_NAME} ${options.version}.exe`;
   const blockmapName = `${setupName}.blockmap`;
+  const githubSetupName = setupName.replaceAll(' ', '.');
+  const githubPortableName = portableName.replaceAll(' ', '.');
+  const githubBlockmapName = blockmapName.replaceAll(' ', '.');
   return {
     ...options,
     tag: options.transportTag,
@@ -31,7 +34,11 @@ export function createReleasePlan(options) {
     setupName,
     portableName,
     blockmapName,
-    expectedArtifacts: [setupName, portableName, blockmapName, 'latest.yml']
+    githubSetupName,
+    githubPortableName,
+    githubBlockmapName,
+    expectedArtifacts: [setupName, portableName, blockmapName, 'latest.yml'],
+    githubExpectedArtifacts: [githubSetupName, githubPortableName, githubBlockmapName, 'latest.yml']
   };
 }
 
@@ -43,6 +50,6 @@ export function resolveExistingReleaseId(plan, release) {
   return release.id;
 }
 
-export function renderLatestYml(plan, sha, size, releaseDate = new Date().toISOString()) {
-  return `version: ${plan.version}\nfiles:\n  - url: ${plan.setupName}\n    sha512: ${sha}\n    size: ${size}\npath: ${plan.setupName}\nsha512: ${sha}\nreleaseDate: '${releaseDate}'\n`;
+export function renderLatestYml(plan, sha, size, releaseDate = new Date().toISOString(), setupName = plan.setupName) {
+  return `version: ${plan.version}\nfiles:\n  - url: ${setupName}\n    sha512: ${sha}\n    size: ${size}\npath: ${setupName}\nsha512: ${sha}\nreleaseDate: '${releaseDate}'\n`;
 }

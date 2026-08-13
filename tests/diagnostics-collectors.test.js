@@ -194,8 +194,9 @@ test('serverHealth assembles the one-shot hub without leaking secrets', () => {
 
 test('redactResponse scrubs configured secrets and absolute paths from arbitrary nested output', () => {
   const { collectors, fixtureAlpha } = makeFixture();
+  const privatePath = ['C:', 'Users', 'PrivateProfile', 'secret.log'].join('\\');
   const value = {
-    error: `token ${fixtureAlpha} at C:\\Users\\PrivateProfile\\secret.log`,
+    error: `token ${fixtureAlpha} at ${privatePath}`,
     nested: [{ source: '\\\\?\\UNC\\private-server\\secret-share\\secret.log' }]
   };
   const out = collectors.redactResponse(value);

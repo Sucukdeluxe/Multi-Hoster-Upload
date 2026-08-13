@@ -202,6 +202,22 @@ test('release plan keeps product artifacts separate from the transport tag', asy
   });
 });
 
+test('GitHub release metadata uses the normalized uploaded asset name', async () => {
+  const { createReleasePlan, parseReleaseArgs, renderLatestYml } = await import(releasePlanUrl);
+  const plan = createReleasePlan(parseReleaseArgs(['2.1.20', '--transport-tag', 'v2.1.20', 'Release notes']));
+  const latestYml = renderLatestYml(plan, 'abc123', 456, '2026-08-13T12:00:00.000Z', plan.githubSetupName);
+
+  assert.deepEqual(plan.githubExpectedArtifacts, [
+    'Multi-Hoster-Upload.Setup.2.1.20.exe',
+    'Multi-Hoster-Upload.2.1.20.exe',
+    'Multi-Hoster-Upload.Setup.2.1.20.exe.blockmap',
+    'latest.yml'
+  ]);
+  assert.match(latestYml, /url: Multi-Hoster-Upload\.Setup\.2\.1\.20\.exe/);
+  assert.match(latestYml, /path: Multi-Hoster-Upload\.Setup\.2\.1\.20\.exe/);
+  assert.doesNotMatch(latestYml, /Multi-Hoster-Upload Setup/);
+});
+
 test('compatible existing release preserves the recovery id', async () => {
   const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(releasePlanUrl);
   const plan = createReleasePlan(parseReleaseArgs(['2.0.1', '--transport-tag', 'v3.3.109', 'Bridge notes']));

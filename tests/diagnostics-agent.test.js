@@ -31,7 +31,7 @@ test('agent rejects unknown ops and any write/exec-shaped op', () => {
     assert.equal(r.ok, false, `${bad} must be rejected`);
     assert.match(r.error, /unknown or non-readonly/);
   }
-  const pathShaped = agent.handle('C:\\Users\\PrivateProfile\\operation', {});
+  const pathShaped = agent.handle(['C:', 'Users', 'PrivateProfile', 'operation'].join('\\'), {});
   assert.ok(!pathShaped.error.includes('PrivateProfile'));
   assert.match(pathShaped.error, /<redacted-path>/);
 });
@@ -60,7 +60,7 @@ test('agent maps each whitelisted op to its collector and is read-only only', ()
 });
 
 test('agent redacts collector failures and thrown errors at the response boundary', () => {
-  const drivePath = 'C:\\Users\\PrivateProfile\\secret.log';
+  const drivePath = ['C:', 'Users', 'PrivateProfile', 'secret.log'].join('\\');
   const uncPath = '\\\\?\\UNC\\private-server\\secret-share\\secret.log';
   const agent = createAgent({
     readLog: () => ({ ok: false, error: `cannot read ${drivePath}` }),

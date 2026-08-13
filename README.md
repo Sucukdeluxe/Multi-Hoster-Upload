@@ -194,7 +194,7 @@ Treat the generated key like a password: anyone with it can restore the encrypte
 
 Open **Settings > General** or **Help** and select **Check for updates**. When a newer version is available, the application shows the installed and available versions, download progress, and release notes. The update dialog requests the changelog for the matching version from the public GitHub release and uses the release's fallback description if that changelog is unavailable.
 
-The downloaded Setup executable is checked as a Windows executable. When `latest.yml` contains a SHA-512 value, the downloaded file is also checked against it before installation starts.
+Installation is refused unless `latest.yml` contains the matching version, installer name, file size, and a valid SHA-512 checksum. The downloaded Setup executable must match those values and contain a valid Windows executable header before it can be launched.
 
 You can always install manually from the [GitHub releases page](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases).
 

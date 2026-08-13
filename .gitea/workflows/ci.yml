@@ -17,4 +17,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+        env:
+          RUN_UI_SMOKE: '1'
       - run: npm run dist

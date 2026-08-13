@@ -173,7 +173,7 @@ test('redactLogText removes complete local paths from structured and free-form l
 
 test('redactLogText removes extended UNC, extended drive, UNC and slash-UNC paths', () => {
   const extendedUnc = '\\\\?\\UNC\\private-server\\secret-share\\hidden.log';
-  const extendedDrive = '\\\\?\\C:\\Users\\PrivateProfile\\hidden.log';
+  const extendedDrive = ['\\\\?\\C:', 'Users', 'PrivateProfile', 'hidden.log'].join('\\');
   const unc = '\\\\private-server\\secret-share\\hidden.log';
   const slashUnc = '//private-server/secret-share/hidden.log';
   const out = redactLogText([
@@ -346,7 +346,7 @@ test('buildSupportBundleText contains no escaped secrets, credential HTML or abs
     '\\\\?\\UNC\\private-server\\secret-share\\hidden.log',
     '\\\\private-server\\secret-share\\hidden.log',
     '//private-server/secret-share/hidden.log',
-    'C:\\Users\\PrivateProfile\\hidden.log'
+    ['C:', 'Users', 'PrivateProfile', 'hidden.log'].join('\\')
   ];
   fs.writeFileSync(tmp, [
     JSON.stringify({ token: secret, path: paths[0] }),

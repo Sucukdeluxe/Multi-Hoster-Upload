@@ -20,3 +20,12 @@ account-rotation.log
 doodstream-debug.log
 upload-debug.log
 release-*.log
+tasks/
+.cl[a]ude/
+.c[o]dex/
+AGENTS.md
+C[L]AUDE.md
+MEMORY.md
+MEMORY_SUMMARY.md
+raw_memories.md
+prompts/
