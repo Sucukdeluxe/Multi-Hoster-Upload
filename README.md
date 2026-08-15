@@ -8,20 +8,22 @@ Multi Hoster Uploader is a Windows desktop application for sending file batches 
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.20. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.21. Use the release page for the executables and the full English changelog.
 
 ## Features
 
 ### Upload workspace
 
 - Add individual files, complete folders, or files by drag and drop.
+- Filter new imports by file name with reusable include or exclude conditions before upload jobs are created.
+- Review how many selected files were accepted or excluded before choosing upload destinations.
 - Build one job per selected file and destination.
 - Upload to several supported hosts from the same queue.
 - Filter the workspace by all, active, queued, completed, or failed jobs.
 - Search and filter queue entries by file name, host, and status.
 - Open per-upload diagnostics with the selected account, retry count, and safe error details.
 - Track status, smoothly interpolated progress, transferred size, speed, and the selected host account.
-- Read total, remaining, running, completed, and failed upload activity from the persistent sidebar telemetry.
+- Read remaining, total, running, connection, completed, and failed upload activity from the persistent sidebar telemetry.
 - Follow current upload speed in the sidebar and the synchronized header graph.
 - Reorder selected jobs, start selected jobs, retry finished jobs, or stop active work.
 - Copy completed links individually or together.

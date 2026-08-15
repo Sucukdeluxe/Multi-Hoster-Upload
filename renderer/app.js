@@ -651,12 +651,14 @@ async function init() {
         const name = p.split('\\').pop().split('/').pop();
         newFiles.push({ path: p, name, size: null });
       }
-      if (newFiles.length > 0) {
-        const newPaths = new Set(newFiles.map(f => f.path));
+      const admitted = admitFilenameFilter(newFiles);
+      if (admitted.accepted.length > 0) {
+        const newPaths = new Set(admitted.accepted.map(f => f.path));
         clearDedupKeysForPaths(newPaths);
-        selectedFiles.push(...newFiles);
+        selectedFiles.push(...admitted.accepted);
         buildQueuePreview();
         updateUploadView();
+        if (admitted.active && admitted.excluded.length > 0) showFilenameFilterResult(admitted);
         if (fm.autoStart && !uploading && !healthCheckRunning) {
           startUpload();
         } else if (uploading) {
@@ -666,6 +668,8 @@ async function init() {
             await startSelectedUpload(newJobs);
           }
         }
+      } else if (admitted.active && admitted.total > 0) {
+        showFilenameFilterResult(admitted);
       }
     } else {
       // No pre-selected hosters: open modal
@@ -1260,6 +1264,12 @@ function renderHosterModal() {
 function openHosterModal() {
   syncSelectedUploadHosters();
   renderHosterModal();
+  const description = document.getElementById('hosterModalDescription');
+  if (description) {
+    description.textContent = _pendingImportSummary
+      ? formatFilenameFilterResult(_pendingImportSummary)
+      : localizeUiText('Dateien wurden hinzugefügt. Wähle jetzt die Hoster für den Upload.');
+  }
   modalController.open('hosterModal', {
     initialFocus: '#cancelHosterModalBtn',
     fallbackFocus: '#addFilesBtn',
@@ -1298,10 +1308,12 @@ async function applyHosterSelection() {
   updateUploadView();
   persistQueueStateSoon(true); // immediate persist after adding files
   closeHosterModal();
+  _pendingImportSummary = null;
 }
 
 function cancelHosterModal() {
   _pendingFiles = [];
+  _pendingImportSummary = null;
   closeHosterModal();
 }
 
@@ -1538,8 +1550,36 @@ function setupDragDrop() {
 }
 
 let _pendingFiles = []; // Files waiting for hoster modal confirmation
+let _pendingImportSummary = null;
 
 let _addingDropped = false;
+
+function admitFilenameFilter(files) {
+  return window.FilenameFilter.applyFilenameFilter(files, config?.globalSettings?.filenameFilter);
+}
+
+function mergePendingImportSummary(result) {
+  if (!result.active) {
+    if (!_pendingImportSummary) _pendingImportSummary = null;
+    return;
+  }
+  const current = _pendingImportSummary || { total: 0, accepted: 0, excluded: 0 };
+  _pendingImportSummary = {
+    total: current.total + result.total,
+    accepted: current.accepted + result.accepted.length,
+    excluded: current.excluded + result.excluded.length
+  };
+}
+
+function formatFilenameFilterResult(result) {
+  const accepted = Array.isArray(result.accepted) ? result.accepted.length : Number(result.accepted) || 0;
+  const excluded = Array.isArray(result.excluded) ? result.excluded.length : Number(result.excluded) || 0;
+  return localizeUiText(`${accepted} von ${result.total} Dateien werden hinzugefügt. ${excluded} durch den Dateinamenfilter ausgeschlossen.`);
+}
+
+function showFilenameFilterResult(result) {
+  showCopyToast(formatFilenameFilterResult(result), 6500);
+}
 
 async function addDropTargetEntries(entries) {
   const files = [];
@@ -1563,12 +1603,7 @@ async function addDroppedFiles(fileList) {
   _addingDropped = true;
   try {
     const files = Array.from(fileList);
-    const existingPaths = new Set([
-      ...selectedFiles.map(f => f.path),
-      ..._pendingFiles.map(f => f.path)
-    ]);
-    const newFiles = [];
-    let duplicateCount = 0;
+    const entries = [];
 
     for (const file of files) {
       let filePath = '';
@@ -1583,14 +1618,9 @@ async function addDroppedFiles(fileList) {
             for (const fp of folderFiles) {
               const p = typeof fp === 'string' ? fp : (fp && fp.path);
               if (!p) continue;
-              if (existingPaths.has(p)) {
-                duplicateCount++;
-                continue;
-              }
               const name = typeof fp === 'string' ? p.split('\\').pop().split('/').pop() : (fp.name || p.split('\\').pop().split('/').pop());
               const size = typeof fp === 'string' ? null : (fp.size || 0);
-              newFiles.push({ path: p, name, size });
-              existingPaths.add(p);
+              entries.push({ path: p, name, size });
             }
             continue;
           }
@@ -1599,20 +1629,9 @@ async function addDroppedFiles(fileList) {
 
       // Regular file
       const fileName = file.name || '';
-      if (!existingPaths.has(filePath)) {
-        newFiles.push({ path: filePath, name: fileName, size: file.size });
-        existingPaths.add(filePath);
-      } else {
-        duplicateCount++;
-      }
+      entries.push({ path: filePath, name: fileName, size: file.size });
     }
-
-    if (newFiles.length > 0) {
-      _pendingFiles.push(...newFiles);
-      openHosterModal();
-    } else if (duplicateCount > 0) {
-      showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
-    }
+    addPathsToQueue(entries);
   } finally {
     _addingDropped = false;
   }
@@ -1648,11 +1667,15 @@ function addPathsToQueue(paths) {
     newFiles.push({ path: p, name, size });
     if (size === null || size === undefined || size === 0) pendingSizeFetch.push(p);
   }
-  if (newFiles.length > 0) {
-    _pendingFiles.push(...newFiles);
+  const admitted = admitFilenameFilter(newFiles);
+  if (admitted.accepted.length > 0) {
+    const acceptedPaths = new Set(admitted.accepted.map(file => file.path));
+    const acceptedSizeFetch = pendingSizeFetch.filter(filePath => acceptedPaths.has(filePath));
+    _pendingFiles.push(...admitted.accepted);
+    mergePendingImportSummary(admitted);
     openHosterModal();
-    if (pendingSizeFetch.length > 0 && window.api.getFileSizes) {
-      window.api.getFileSizes(pendingSizeFetch).then((sizeMap) => {
+    if (acceptedSizeFetch.length > 0 && window.api.getFileSizes) {
+      window.api.getFileSizes(acceptedSizeFetch).then((sizeMap) => {
         if (!sizeMap || typeof sizeMap !== 'object') return;
         let changed = false;
         for (const f of _pendingFiles) {
@@ -1671,6 +1694,10 @@ function addPathsToQueue(paths) {
         }
       }).catch(() => {});
     }
+  } else if (admitted.active && admitted.total > 0) {
+    showFilenameFilterResult(admitted);
+  } else if (Array.isArray(paths) && paths.length > 0) {
+    showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
   }
 }
 
@@ -4605,6 +4632,79 @@ async function _renderLogPathsList(el) {
   }
 }
 
+function filenameFilterConditionRowHtml(condition = {}) {
+  const operator = condition.operator === 'notContains' ? 'notContains' : 'contains';
+  return `
+    <div class="filename-filter-condition" data-filename-filter-condition>
+      <div class="filename-filter-rule-field">
+        <span class="filename-filter-rule-label" data-filename-filter-value-label>Dateiname filtern</span>
+        <input type="text" class="key-input settings-autosave" data-filename-filter-value value="${escapeAttr(condition.value || '')}" placeholder="z. B. 720p" aria-label="Dateiname filtern">
+      </div>
+      <div class="filename-filter-rule-field">
+        <span class="filename-filter-rule-label" data-filename-filter-operator-label>Vergleich</span>
+        <select class="hs-input settings-autosave" data-filename-filter-operator aria-label="Dateinamen-Bedingung">
+          <option value="contains" ${operator === 'contains' ? 'selected' : ''}>enthält</option>
+          <option value="notContains" ${operator === 'notContains' ? 'selected' : ''}>enthält nicht</option>
+        </select>
+      </div>
+      <button type="button" class="btn btn-xs btn-danger" data-filename-filter-remove aria-label="Bedingung entfernen">Entfernen</button>
+    </div>`;
+}
+
+function readFilenameFilterSettings() {
+  const conditions = Array.from(document.querySelectorAll('[data-filename-filter-condition]')).map(row => ({
+    operator: row.querySelector('[data-filename-filter-operator]')?.value || 'contains',
+    value: row.querySelector('[data-filename-filter-value]')?.value || ''
+  }));
+  return window.FilenameFilter.normalizeFilenameFilter({
+    enabled: document.getElementById('filenameFilterEnabledInput')?.checked === true,
+    action: document.getElementById('filenameFilterActionInput')?.value,
+    matchMode: document.getElementById('filenameFilterMatchModeInput')?.value,
+    conditions
+  });
+}
+
+function syncFilenameFilterControls() {
+  const enabled = document.getElementById('filenameFilterEnabledInput')?.checked === true;
+  const panel = document.getElementById('filenameFilterBuilder');
+  if (panel) panel.classList.toggle('disabled', !enabled);
+  const rows = Array.from(document.querySelectorAll('[data-filename-filter-condition]'));
+  document.querySelectorAll('#filenameFilterBuilder select, #filenameFilterBuilder input, #addFilenameFilterConditionBtn').forEach(control => {
+    control.disabled = !enabled;
+  });
+  rows.forEach(row => {
+    const remove = row.querySelector('[data-filename-filter-remove]');
+    if (remove) remove.disabled = !enabled || rows.length === 1;
+  });
+}
+
+function wireFilenameFilterConditionRow(row) {
+  if (!row || row.dataset.wired === 'true') return;
+  row.dataset.wired = 'true';
+  row.querySelectorAll('.settings-autosave').forEach(control => {
+    const eventName = control.tagName === 'SELECT' ? 'change' : 'input';
+    control.addEventListener(eventName, markSettingsDirty);
+  });
+  row.querySelector('[data-filename-filter-remove]')?.addEventListener('click', () => {
+    row.remove();
+    syncFilenameFilterControls();
+    markSettingsDirty();
+  });
+}
+
+function appendFilenameFilterCondition(condition = {}) {
+  const list = document.getElementById('filenameFilterConditions');
+  if (!list) return;
+  const template = document.createElement('template');
+  template.innerHTML = filenameFilterConditionRowHtml(condition).trim();
+  const row = template.content.firstElementChild;
+  list.appendChild(row);
+  wireFilenameFilterConditionRow(row);
+  syncFilenameFilterControls();
+  row.querySelector('[data-filename-filter-value]')?.focus();
+  markSettingsDirty();
+}
+
 function renderSettings() {
   const container = document.getElementById('settingsHosters');
   container.innerHTML = '';
@@ -4613,10 +4713,14 @@ function renderSettings() {
   const configuredAccounts = getAvailableHosters();
   const fm = globalSettings.folderMonitor || {};
   const remoteSettings = globalSettings.remote || {};
+  const filenameFilter = window.FilenameFilter.normalizeFilenameFilter(globalSettings.filenameFilter);
+  const filenameFilterConditions = filenameFilter.conditions.length > 0
+    ? filenameFilter.conditions
+    : [{ operator: 'contains', value: '' }];
 
   const pageDefinitions = [
     { id: 'allgemein', label: 'Allgemein', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
-    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
+    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster dateiname filename filter enthält contains ausschließen exclude' },
     { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
@@ -4747,6 +4851,41 @@ function renderSettings() {
           <span class="settings-option-description">Startet wartende Uploads nach einem sichtbaren, abbrechbaren Countdown. Fehler und übersprungene Einträge bleiben unangetastet.</span>
         </div>
         <input type="checkbox" class="settings-autosave" id="autoStartRestoredQueueInput" ${globalSettings.autoStartRestoredQueue ? 'checked' : ''}>
+      </div>
+      <div class="settings-section-label">Dateinamenfilter</div>
+      <div class="filename-filter-panel">
+        <div class="settings-option filename-filter-toggle">
+          <div class="settings-option-copy">
+            <label for="filenameFilterEnabledInput">Dateinamen beim Hinzufügen filtern</label>
+            <span class="settings-option-description">Prüft neue Dateien aus Auswahl, Ordnern, Drag-and-drop und Ordnerüberwachung, bevor sie in die Upload-Liste gelangen.</span>
+          </div>
+          <input type="checkbox" class="settings-autosave" id="filenameFilterEnabledInput" ${filenameFilter.enabled ? 'checked' : ''}>
+        </div>
+        <div class="filename-filter-builder" id="filenameFilterBuilder">
+          <div class="filename-filter-conditions" id="filenameFilterConditions">
+            ${filenameFilterConditions.map(filenameFilterConditionRowHtml).join('')}
+          </div>
+          <div class="filename-filter-footer">
+            <button type="button" class="btn btn-xs btn-secondary" id="addFilenameFilterConditionBtn">+ Bedingung</button>
+            <span class="hint">Groß- und Kleinschreibung werden ignoriert. Leere Bedingungen werden nicht gespeichert.</span>
+          </div>
+          <div class="filename-filter-policy">
+            <div class="filename-filter-field">
+              <label for="filenameFilterMatchModeInput">Bedingungen</label>
+              <select class="hs-input settings-autosave" id="filenameFilterMatchModeInput">
+                <option value="all" ${filenameFilter.matchMode === 'all' ? 'selected' : ''}>alle müssen passen</option>
+                <option value="any" ${filenameFilter.matchMode === 'any' ? 'selected' : ''}>mindestens eine muss passen</option>
+              </select>
+            </div>
+            <div class="filename-filter-field">
+              <label for="filenameFilterActionInput">Wenn passend</label>
+              <select class="hs-input settings-autosave" id="filenameFilterActionInput">
+                <option value="include" ${filenameFilter.action === 'include' ? 'selected' : ''}>Dateien hinzufügen</option>
+                <option value="exclude" ${filenameFilter.action === 'exclude' ? 'selected' : ''}>Dateien nicht hinzufügen</option>
+              </select>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="settings-section-label">Quelldateien</div>
       <div class="settings-option source-delete-option">
@@ -5247,6 +5386,10 @@ function renderSettings() {
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
   document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
+  container.querySelectorAll('[data-filename-filter-condition]').forEach(wireFilenameFilterConditionRow);
+  document.getElementById('addFilenameFilterConditionBtn')?.addEventListener('click', () => appendFilenameFilterCondition());
+  document.getElementById('filenameFilterEnabledInput')?.addEventListener('change', syncFilenameFilterControls);
+  syncFilenameFilterControls();
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
@@ -5393,6 +5536,7 @@ async function performSaveSettings(options = {}) {
     scaleParallelUploads: elChk('scaleParallelUploadsInput', !!cur.scaleParallelUploads),
     removeFromQueueOnDone: elChk('removeFromQueueOnDoneInput', !!cur.removeFromQueueOnDone),
     deleteSourceAfterSuccessfulUpload: elChk('deleteSourceAfterSuccessfulUploadInput', !!cur.deleteSourceAfterSuccessfulUpload),
+    filenameFilter: readFilenameFilterSettings(),
     showDropTarget: elChk('showDropTargetInput', !!cur.showDropTarget),
     globalMaxSpeedKbs: (() => {
       const el = document.getElementById('globalMaxSpeedMbsInput');

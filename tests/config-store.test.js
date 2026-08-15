@@ -120,6 +120,12 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.scaleParallelUploads, false);
     assert.equal(config.globalSettings.lastBrowseDirectory, '');
     assert.equal(config.globalSettings.pendingQueue, null);
+    assert.deepEqual(config.globalSettings.filenameFilter, {
+      enabled: false,
+      action: 'include',
+      matchMode: 'all',
+      conditions: []
+    });
     assert.deepEqual(config.history, []);
   });
 

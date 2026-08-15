@@ -74,6 +74,17 @@ test('translates duplicate desktop drop feedback to English', () => {
   assert.equal(translateText('Auswahl ist bereits in den Upload-Aufträgen.', 'en'), 'The selection is already in the upload jobs.');
 });
 
+test('translates filename filter controls and import counts in both directions', () => {
+  const german = '1 von 3 Dateien werden hinzugefügt. 2 durch den Dateinamenfilter ausgeschlossen.';
+  const english = '1 of 3 files will be added. 2 excluded by the filename filter.';
+
+  assert.equal(translateText('Dateinamen beim Hinzufügen filtern', 'en'), 'Filter filenames when adding files');
+  assert.equal(translateText('Dateiname filtern', 'en'), 'Filter file name');
+  assert.equal(translateText('enthält nicht', 'en'), 'does not contain');
+  assert.equal(translateText(german, 'en'), english);
+  assert.equal(translateText(english, 'de'), german);
+});
+
 test('rare account, backup, update, and confirmation states translate in both directions', () => {
   const cases = [
     ['Einstellungen konnten vor dem Update nicht gespeichert werden', 'Settings could not be saved before the update'],
