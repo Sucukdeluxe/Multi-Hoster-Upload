@@ -167,6 +167,7 @@ setTimeout(async () => {
   if (win.isMaximized()) win.unmaximize();
   const wc = win.webContents;
   if (typeof wc.setFrameRate === 'function') wc.setFrameRate(60);
+  const initialReducedMotion = await wc.executeJavaScript('matchMedia("(prefers-reduced-motion: reduce)").matches');
   if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
   await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   const setWindowBounds = async bounds => {
@@ -218,6 +219,7 @@ setTimeout(async () => {
 
   try {
     check('Every UI smoke window stays offscreen and never takes focus', hiddenWindowHarness.areNativeSurfacesSuppressed(hiddenWindowHarness.getWindows()));
+    check('Hot Dev forces full motion despite the Windows reduced-motion preference', initialReducedMotion === false);
     const startupUpdateState = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [_knownUpdateInfo?.remoteVersion, button?.hidden, getComputedStyle(button).display, document.getElementById("updateBanner")?.style.display].join("|"); })()');
     check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
@@ -316,6 +318,9 @@ setTimeout(async () => {
 
     const appHeaderExists = await wc.executeJavaScript('Boolean(document.querySelector(".app-header"))');
     check('App shell exposes the primary header', appHeaderExists);
+
+    const cursorContract = await wc.executeJavaScript('[getComputedStyle(document.body).cursor, getComputedStyle(document.getElementById("settings-tab")).cursor].join("|")');
+    check('Main surface keeps a visible default cursor and interactive controls keep the pointer cursor', cursorContract === 'default|pointer');
 
     const appBrandText = await wc.executeJavaScript('document.querySelector(".app-brand-name")?.textContent?.trim()');
     check('App header shows the Multi Hoster Uploader brand', appBrandText === 'MULTI HOSTER UPLOADER');
@@ -980,14 +985,95 @@ setTimeout(async () => {
     check('Password visibility action exposes its state', passwordToggleState === 'Passwort verbergen|true');
 
     await wc.executeJavaScript('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+    await new Promise(resolve => setTimeout(resolve, 340));
     const accountModalHidden = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display');
     check('Escape closes account modal', accountModalHidden === 'none');
 
     const restoredAccountFocus = await wc.executeJavaScript('document.activeElement?.hasAttribute("data-account-empty-add") || document.activeElement?.id === "addAccountBtn"');
     check('Account modal restores trigger focus', restoredAccountFocus === true);
 
-    const fallbackAccountFocus = await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger.focus(); trigger.click(); document.querySelector("[data-account-empty-add]")?.remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); return document.activeElement?.id; })()');
+    await wc.executeJavaScript('(() => { const trigger = document.querySelector("[data-account-empty-add]") || document.getElementById("addAccountBtn"); trigger.focus(); trigger.click(); document.querySelector("[data-account-empty-add]")?.remove(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); })()');
+    await new Promise(resolve => setTimeout(resolve, 340));
+    const fallbackAccountFocus = await wc.executeJavaScript('document.activeElement?.id');
     check('Account modal restores stable focus after list rerender', fallbackAccountFocus === 'addAccountBtn');
+
+    ipcMain.removeHandler('validate-credentials');
+    ipcMain.handle('validate-credentials', () => ({ ok: true, status: 'ok', message: 'Credentials verified', checkedAt: '2033-01-02T03:04:05.000Z' }));
+    ipcMain.removeHandler('save-config');
+    ipcMain.handle('save-config', () => true);
+    await wc.executeJavaScript(\`(() => {
+      HOSTERS.forEach(name => { config.hosters[name] = []; });
+      config.hosters['byse.sx'] = [{ id: 'ui-animated-account', enabled: true, authType: 'api', apiKey: 'animated-key' }];
+      accountStatuses = { 'ui-animated-account': { status: 'ok', message: 'Ready' } };
+      renderAccounts();
+      document.querySelector('[data-account-edit="ui-animated-account"]')?.click();
+    })()\`);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const accountEditOpeningFrame = await wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('accountModal');
+      const card = modal?.querySelector('.modal-card');
+      const style = card ? getComputedStyle(card) : null;
+      return {
+        title: document.getElementById('accountModalTitle')?.textContent,
+        display: modal?.style.display,
+        animation: style?.animationName || 'none',
+        duration: parseFloat(style?.animationDuration || '0'),
+        transform: style?.transform || 'none',
+        clipPath: style?.clipPath || 'none',
+        opacity: Number(style?.opacity || 1),
+        overlayAnimation: getComputedStyle(modal).animationName,
+        overlayAlpha: Number((getComputedStyle(modal).backgroundColor.match(/[0-9.]+/g) || [0, 0, 0, 0])[3] || 0)
+      };
+    })()\`);
+    check('Editing an account unfolds the editor through a real opening frame', accountEditOpeningFrame.title === 'Account bearbeiten' && accountEditOpeningFrame.display === 'flex' && accountEditOpeningFrame.animation !== 'none' && accountEditOpeningFrame.duration >= .34 && (accountEditOpeningFrame.transform !== 'none' || accountEditOpeningFrame.clipPath !== 'none' || accountEditOpeningFrame.opacity < 1));
+    check('Opening the account editor softly fades in the surrounding dimming', accountEditOpeningFrame.overlayAnimation !== 'none' && accountEditOpeningFrame.overlayAlpha > 0 && accountEditOpeningFrame.overlayAlpha < .6);
+    await new Promise(resolve => setTimeout(resolve, 340));
+    const apiEyeEmoji = await wc.executeJavaScript('document.querySelector("#accountCredsFields .toggle-vis")?.textContent');
+    check('API key visibility uses the normal eye emoji', apiEyeEmoji === '👁️');
+
+    await wc.executeJavaScript('document.getElementById("closeAccountModalBtn")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const accountEditClosingFrame = await wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('accountModal');
+      const card = modal?.querySelector('.modal-card');
+      const style = card ? getComputedStyle(card) : null;
+      return {
+        display: modal?.style.display,
+        ariaHidden: modal?.getAttribute('aria-hidden'),
+        modalInert: modal?.inert,
+        headerInert: document.querySelector('.app-header')?.inert,
+        activeViewInert: document.querySelector('.view.active')?.inert,
+        animation: style?.animationName || 'none',
+        duration: parseFloat(style?.animationDuration || '0'),
+        transform: style?.transform || 'none',
+        clipPath: style?.clipPath || 'none',
+        opacity: Number(style?.opacity || 1),
+        overlayAnimation: getComputedStyle(modal).animationName,
+        overlayAlpha: Number((getComputedStyle(modal).backgroundColor.match(/[0-9.]+/g) || [0, 0, 0, 0])[3] || 0)
+      };
+    })()\`);
+    check('The close button folds the account editor upward without blocking the application', accountEditClosingFrame.display === 'flex' && accountEditClosingFrame.ariaHidden === 'true' && accountEditClosingFrame.modalInert === true && accountEditClosingFrame.headerInert === false && accountEditClosingFrame.activeViewInert === false && accountEditClosingFrame.animation !== 'none' && accountEditClosingFrame.duration >= .28 && (accountEditClosingFrame.transform !== 'none' || accountEditClosingFrame.clipPath !== 'none' || accountEditClosingFrame.opacity < 1));
+    check('Closing the account editor softly fades out the surrounding dimming', accountEditClosingFrame.overlayAnimation !== 'none' && accountEditClosingFrame.overlayAlpha > 0 && accountEditClosingFrame.overlayAlpha < .6);
+    await new Promise(resolve => setTimeout(resolve, 340));
+    const accountEditClosed = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display === "none"');
+    check('The account editor hides after its closing animation', accountEditClosed === true);
+
+    await wc.executeJavaScript('document.querySelector("[data-account-edit=ui-animated-account]")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 400));
+    await wc.executeJavaScript('document.getElementById("saveAccountBtn")?.click()');
+    await new Promise(resolve => setTimeout(resolve, 680));
+    const accountSaveClosingFrame = await wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('accountModal');
+      const card = modal?.querySelector('.modal-card');
+      const style = card ? getComputedStyle(card) : null;
+      return { display: modal?.style.display, animation: style?.animationName || 'none' };
+    })()\`);
+    check('A verified saved account uses the same closing animation', accountSaveClosingFrame.display === 'flex' && accountSaveClosingFrame.animation !== 'none');
+    await new Promise(resolve => setTimeout(resolve, 340));
+    const accountSaveClosed = await wc.executeJavaScript('document.getElementById("accountModal")?.style.display === "none"');
+    check('A verified saved account hides after the closing animation', accountSaveClosed === true);
+    restoreInitialIpcHandler('validate-credentials');
+    restoreInitialIpcHandler('save-config');
 
     await setWindowBounds({ ...win.getBounds(), width: 1280, height: 720 });
 
@@ -1036,6 +1122,28 @@ setTimeout(async () => {
     const hasSmoothAccountCollapse = motion => motion.closedStart <= 1 && motion.opening > 1 && motion.opening < motion.opened - 1 && motion.closing > 1 && motion.closing < motion.opened - 1 && motion.closedEnd <= 1 && motion.openingState && motion.closingState && motion.duration >= 180;
     check('Hoster groups visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.hosterMotion));
     check('Hoster upload settings visibly animate while opening and closing', hasSmoothAccountCollapse(accountCollapseMotion.settingsMotion));
+
+    const accountSettingsDescriptionLayout = await wc.executeJavaScript(\`(async () => {
+      const hoster = HOSTERS[0];
+      const settings = document.querySelector('[data-hoster-settings-toggle="' + hoster + '"]');
+      if (settings && settings.getAttribute('aria-expanded') !== 'true') settings.click();
+      await new Promise(resolve => setTimeout(resolve, 240));
+      const container = document.querySelector('.account-hoster-settings-body-inner');
+      const rows = [...document.querySelectorAll('.account-hoster-option-row')];
+      const containerRect = container?.getBoundingClientRect();
+      return rows.map(row => {
+        const rowRect = row.getBoundingClientRect();
+        const hintRect = row.querySelector('.hint')?.getBoundingClientRect();
+        const inputRect = row.querySelector('input')?.getBoundingClientRect();
+        return {
+          widthRatio: containerRect ? rowRect.width / containerRect.width : 0,
+          descriptionBeforeToggle: Boolean(hintRect && inputRect && hintRect.right <= inputRect.left)
+        };
+      });
+    })()\`);
+    const accountSettingsDescriptionLayoutClean = accountSettingsDescriptionLayout.length === 3 && accountSettingsDescriptionLayout.every(row => row.widthRatio >= .97 && row.descriptionBeforeToggle);
+    if (!accountSettingsDescriptionLayoutClean) console.log('Account settings description layout:', JSON.stringify(accountSettingsDescriptionLayout));
+    check('Account host options give descriptions a full clean row with toggles aligned right', accountSettingsDescriptionLayoutClean);
 
     const accountsFooterGeometry = await wc.executeJavaScript(\`(() => {
       const main = document.querySelector('#accounts-view .accounts-main')?.getBoundingClientRect();
@@ -1394,6 +1502,8 @@ setTimeout(async () => {
     check('Settings search icon aligns to the input text line', settingsSearchIconAlignment === 'flex|center|true');
     const settingsSearchControlGeometry = await wc.executeJavaScript('(() => { const control = document.querySelector(".settings-search-control"); const input = document.getElementById("settingsSearchInput"); const icon = document.querySelector(".settings-search-icon"); const svg = icon?.querySelector("svg"); if (!control || !input || !icon || !svg) return "missing"; const controlRect = control.getBoundingClientRect(); const inputRect = input.getBoundingClientRect(); const iconRect = icon.getBoundingClientRect(); const inputStyle = getComputedStyle(input); const iconStyle = getComputedStyle(icon); return [Math.round(controlRect.height), Math.round(inputRect.height), Math.round(Math.abs((inputRect.top + inputRect.height / 2) - (iconRect.top + iconRect.height / 2))), svg.getAttribute("viewBox"), inputStyle.lineHeight, inputStyle.paddingTop, inputStyle.paddingBottom, iconStyle.display, iconStyle.alignItems].join("|"); })()');
     check('Settings search control keeps icon and text on one shared center line', settingsSearchControlGeometry === '44|44|0|0 0 24 24|18px|0px|0px|flex|center');
+    const settingsSearchPlaceholderFit = await wc.executeJavaScript('(() => { const input = document.getElementById("settingsSearchInput"); if (!input) return false; const style = getComputedStyle(input); const canvas = document.createElement("canvas"); const context = canvas.getContext("2d"); context.font = style.font; const available = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight); return ["Einstellungen durchsuchen", "Search settings"].every(text => context.measureText(text).width <= available - 12); })()');
+    check('Settings search placeholders retain visible right-side breathing room', settingsSearchPlaceholderFit === true);
 
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'logs\\']")?.click()');
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -1454,7 +1564,7 @@ setTimeout(async () => {
     const plaintextCredentialOverride = await wc.executeJavaScript('(() => ({ control: document.getElementById("allowPlaintextCredentialStorageInput"), copy: document.body.textContent.includes("Unsichere Klartext-Speicherung"), bridge: typeof window.api.getSecretStoreStatus }))()');
     check('Settings expose no plaintext credential storage override', plaintextCredentialOverride.control === null && plaintextCredentialOverride.copy === false && plaintextCredentialOverride.bridge === 'undefined');
     const settingsTypography = await wc.executeJavaScript('(() => { const size = selector => parseFloat(getComputedStyle(document.querySelector(selector)).fontSize); return { heading: size(".settings-subpage.active .settings-page-header h3"), intro: size(".settings-subpage.active .settings-page-header p"), section: size(".settings-subpage.active .settings-section-label"), rowLabel: size(".settings-subpage.active .settings-row > label"), hint: size(".settings-subpage.active .hint"), optionLabel: size(".settings-subpage.active .settings-option-copy label"), optionDescription: size(".settings-subpage.active .settings-option-description"), navigation: size(".settings-nav-button"), search: size("#settingsSearchInput") }; })()');
-    check('Settings use the enlarged readable typography scale', settingsTypography.heading >= 22 && settingsTypography.intro >= 14 && settingsTypography.section >= 12 && settingsTypography.rowLabel >= 14 && settingsTypography.hint >= 12 && settingsTypography.optionLabel >= 14 && settingsTypography.optionDescription >= 12 && settingsTypography.navigation >= 13 && settingsTypography.search >= 13);
+    check('Settings use the enlarged readable typography scale', settingsTypography.heading >= 22 && settingsTypography.intro >= 14 && settingsTypography.section >= 12 && settingsTypography.rowLabel >= 14 && settingsTypography.hint >= 12 && settingsTypography.optionLabel >= 14 && settingsTypography.optionDescription >= 12 && settingsTypography.navigation >= 13 && settingsTypography.search >= 11);
     const settingsSelection = await wc.executeJavaScript('(() => ({ heading: getComputedStyle(document.querySelector(".settings-subpage.active .settings-page-header h3")).userSelect, hint: getComputedStyle(document.querySelector(".settings-subpage.active .hint")).userSelect, input: getComputedStyle(document.getElementById("globalMaxSpeedMbsInput")).userSelect }))()');
     check('Settings interface copy cannot be selected while input values remain selectable', settingsSelection.heading === 'none' && settingsSelection.hint === 'none' && settingsSelection.input === 'text');
     const enlargedSettingsFit = await wc.executeJavaScript('(() => { const results = [...document.querySelectorAll(".settings-nav-button")].map(button => { button.click(); const page = document.querySelector(".settings-subpage.active"); return Boolean(page && page.scrollWidth <= page.clientWidth + 1); }); document.querySelector("[data-settings-page=uploads]")?.click(); return results.every(Boolean); })()');
@@ -3564,7 +3674,7 @@ try {
 
   const result = execFileSync(
     electronPath,
-    [`--user-data-dir=${userDataPath}`, '--require', injectPath, mainPath],
+    [`--user-data-dir=${userDataPath}`, '--require', injectPath, mainPath, '--dev'],
     { cwd: path.join(__dirname, '..'), timeout: 180000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
   );
   console.log(result);

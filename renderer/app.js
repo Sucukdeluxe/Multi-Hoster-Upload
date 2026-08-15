@@ -5987,17 +5987,17 @@ function _buildHosterSettingsHtml(name) {
           <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeMb" value="${hs.maxSizeMb ?? 0}" min="0">
           <span class="hint">0 = unbegrenzt</span>
         </div>
-        <div class="settings-row">
+        <div class="settings-row account-hoster-option-row">
           <label for="${fieldPrefix}-log">Links in Log schreiben</label>
           <input id="${fieldPrefix}-log" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="logToFile" ${hs.logToFile !== false ? 'checked' : ''}>
           <span class="hint">Erfolgreiche Links in fileuploader.log.</span>
         </div>
-        <div class="settings-row">
+        <div class="settings-row account-hoster-option-row">
           <label for="${fieldPrefix}-rotate">Accounts rotieren</label>
           <input id="${fieldPrefix}-rotate" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="rotateAccounts" ${hs.rotateAccounts === true ? 'checked' : ''}>
-          <span class="hint">Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.</span>
+          <span class="hint">Verteilt Dateien abwechselnd auf alle aktiven Accounts dieses Hosters. Bei nur einem Account hat die Option keinen Effekt.</span>
         </div>
-        <div class="settings-row">
+        <div class="settings-row account-hoster-option-row">
           <label for="${fieldPrefix}-size-memo">Größen-Limit merken</label>
           <input id="${fieldPrefix}-size-memo" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
           <span class="hint">Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.</span>
@@ -6353,7 +6353,7 @@ function getCredsFieldsHtml(authType, account, hoster) {
       <div class="settings-row">
         <label for="accField_password">Passwort</label>
         <input type="password" class="key-input" id="accField_password" name="password" autocomplete="current-password" value="${escapeAttr(account.password || '')}" placeholder="Passwort">
-        <button class="toggle-vis" type="button" title="Passwort anzeigen" aria-label="Passwort anzeigen" aria-pressed="false">&#128065;</button>
+        <button class="toggle-vis" type="button" title="Passwort anzeigen" aria-label="Passwort anzeigen" aria-pressed="false">👁️</button>
       </div>`;
   }
   // API key
@@ -6361,7 +6361,7 @@ function getCredsFieldsHtml(authType, account, hoster) {
     <div class="settings-row">
       <label for="accField_apiKey">API-Key</label>
       <input type="password" class="key-input" id="accField_apiKey" name="apiKey" autocomplete="off" spellcheck="false" value="${escapeAttr(account.apiKey || '')}" placeholder="API-Key">
-      <button class="toggle-vis" type="button" title="API-Key anzeigen" aria-label="API-Key anzeigen" aria-pressed="false">&#128065;</button>
+      <button class="toggle-vis" type="button" title="API-Key anzeigen" aria-label="API-Key anzeigen" aria-pressed="false">👁️</button>
     </div>`;
 }
 
@@ -6429,13 +6429,50 @@ function openAccountModal(editAccountId) {
     onEscape: closeAccountModal,
     onBackdrop: closeAccountModal
   });
+  _openAccountModalMotion(modal);
+}
+
+let _accountModalMotionToken = 0;
+
+function _openAccountModalMotion(modal) {
+  const card = modal.querySelector('.modal-card');
+  const token = ++_accountModalMotionToken;
+  modal.classList.remove('account-modal-opening', 'account-modal-closing');
+  if (!card) return;
+  void card.offsetHeight;
+  modal.classList.add('account-modal-opening');
+  const finish = event => {
+    if (event && event.target !== card) return;
+    card.removeEventListener('animationend', finish);
+    if (Object.is(token, _accountModalMotionToken)) modal.classList.remove('account-modal-opening');
+  };
+  card.addEventListener('animationend', finish);
+  window.setTimeout(() => finish(), 440);
 }
 
 function closeAccountModal() {
-  modalController.close('accountModal', { fallbackFocus: '#addAccountBtn' });
+  const modal = document.getElementById('accountModal');
+  if (!modalController.isOpen(modal) || modal.classList.contains('account-modal-closing')) return;
+  const card = modal.querySelector('.modal-card');
+  const token = ++_accountModalMotionToken;
+  modal.classList.remove('account-modal-opening', 'account-modal-closing');
+  if (card) void card.offsetHeight;
+  modalController.close(modal, { fallbackFocus: '#addAccountBtn' });
+  modal.style.display = 'flex';
+  modal.inert = true;
+  modal.classList.add('account-modal-closing');
   _hideOtpField();
   editingAccountId = null;
   _resetAccountModalState();
+  const finish = event => {
+    if (event && event.target !== card) return;
+    if (card) card.removeEventListener('animationend', finish);
+    if (!Object.is(token, _accountModalMotionToken)) return;
+    modal.classList.remove('account-modal-closing');
+    modal.style.display = 'none';
+  };
+  if (card) card.addEventListener('animationend', finish);
+  window.setTimeout(() => finish(), 380);
 }
 
 function openDeleteAccountModal(accountId) {

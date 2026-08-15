@@ -139,6 +139,32 @@ test('configureStartupRenderer disables hardware acceleration for a Windows Remo
   assert.equal(calls, 1);
 });
 
+test('configureStartupRenderer forces full motion only for hot dev', () => {
+  const devSwitches = [];
+  const releaseSwitches = [];
+  const createApp = switches => ({
+    disableHardwareAcceleration() {},
+    getPath(name) {
+      assert.equal(name, 'userData');
+      return 'C:\\ReleaseTest\\user-data';
+    },
+    commandLine: {
+      appendSwitch(name, value) {
+        switches.push({ name, value });
+      }
+    }
+  });
+
+  configureStartupRenderer(createApp(devSwitches), { SESSIONNAME: 'Console' }, 'win32', ['electron', '.', '--dev']);
+  configureStartupRenderer(createApp(releaseSwitches), { SESSIONNAME: 'Console' }, 'win32', ['Multi-Hoster-Upload.exe']);
+
+  assert.deepEqual(devSwitches, [
+    { name: 'force-prefers-no-reduced-motion', value: undefined },
+    { name: 'user-data-dir', value: 'C:\\ReleaseTest\\user-data' }
+  ]);
+  assert.deepEqual(releaseSwitches, []);
+});
+
 test('resolveStartupLanguage accepts only the supported persisted language', () => {
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'de' } }), 'de');
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'en' } }), 'en');
@@ -147,10 +173,15 @@ test('resolveStartupLanguage accepts only the supported persisted language', () 
 });
 
 test('createStartupWindow forces the main window to start hidden', () => {
-  const startup = createStartupWindow(TestBrowserWindow, { width: 1100, show: true });
+  const startup = createStartupWindow(TestBrowserWindow, {
+    width: 1100,
+    show: true,
+    disableAutoHideCursor: false
+  });
 
   assert.equal(startup.window.options.width, 1100);
   assert.equal(startup.window.options.show, false);
+  assert.equal(startup.window.options.disableAutoHideCursor, true);
 });
 
 test('main window uses the branded application icon', () => {

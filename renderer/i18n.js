@@ -237,7 +237,7 @@
     ['Hoster-Einstellungen', 'Host settings'],
     ['Upload-Einstellungen', 'Upload settings'],
     ['Erfolgreiche Links in fileuploader.log.', 'Successful links in fileuploader.log.'],
-    ['Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.', 'Distributes files across all active accounts for this host in round-robin order (file 1 → account 1, file 2 → account 2, and so on). Keeps accounts such as byse active. Has no effect with only one account.'],
+    ['Verteilt Dateien abwechselnd auf alle aktiven Accounts dieses Hosters. Bei nur einem Account hat die Option keinen Effekt.', 'Distributes files alternately across all active accounts for this host. The option has no effect with only one account.'],
     ['Größen-Limit merken', 'Remember size limit'],
     ['Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.', 'After two suspicious rejections on an account, larger files are skipped there in advance ("Known size limit"). When disabled, every file is always attempted.'],
     ['Einstellungen einzelner Hoster', 'Settings for individual hosts'],
