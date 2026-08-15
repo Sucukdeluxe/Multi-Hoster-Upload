@@ -1,6 +1,7 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
+const RuntimeBrowserWindow = globalThis.__mhuBrowserWindowConstructor || BrowserWindow;
 const path = require('path');
 app.setPath('userData', path.join(app.getPath('appData'), 'multi-hoster-uploader'));
 app.setName('Multi Hoster Uploader');
@@ -224,11 +225,48 @@ function createUploadFinalizationCoordinator({
     return rendererGeneration;
   }
 
+  function hasCompleteTerminalFallback(entry, pendingQueue) {
+    if (entry.historyPersisted) return true;
+    const terminalStatuses = new Set(['done', 'error', 'skipped', 'aborted']);
+    const normalizeValue = (value) => {
+      if (Array.isArray(value)) return value.map(normalizeValue);
+      if (!value || typeof value !== 'object') return value ?? null;
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, normalizeValue(value[key])]));
+    };
+    const valuesMatch = (left, right) => JSON.stringify(normalizeValue(left)) === JSON.stringify(normalizeValue(right));
+    const normalizeResult = result => ({
+      download_url: result?.download_url || null,
+      embed_url: result?.embed_url || null,
+      file_code: result?.file_code || null
+    });
+    const expected = [];
+    for (const file of Array.isArray(entry.summary?.files) ? entry.summary.files : []) {
+      for (const result of Array.isArray(file?.results) ? file.results : []) {
+        if (result?.jobId && terminalStatuses.has(result.status)) expected.push(result);
+      }
+    }
+    const jobs = Array.isArray(pendingQueue?.queueJobs) ? pendingQueue.queueJobs : [];
+    const byId = new Map(jobs.map(job => [job?.id, job]));
+    return expected.every((result) => {
+      const job = byId.get(result.jobId);
+      if (!job || job.status !== result.status) return false;
+      if ((result.error || null) !== (job.error || null)) return false;
+      if (!valuesMatch(result.failureDetails || null, job.failureDetails || null)) return false;
+      if ((result.remoteCommitUncertain === true) !== (job.remoteCommitUncertain === true)) return false;
+      if (result.status !== 'done') return true;
+      return valuesMatch(normalizeResult(result), normalizeResult(job.result));
+    });
+  }
+
   async function complete(payload) {
     const entry = payload?.finalizationId && pending.get(payload.finalizationId);
     if (!entry || entry.settled || entry.completing || !payload.deliveryId || payload.deliveryId !== entry.deliveryId) return false;
     entry.completing = true;
     if (payload.ready === false) {
+      settle(entry, false);
+      return false;
+    }
+    if (!hasCompleteTerminalFallback(entry, payload.pendingQueue)) {
       settle(entry, false);
       return false;
     }
@@ -265,6 +303,7 @@ function createUploadFinalizationBarrier({
     const terminalRecovery = {
       ...recovery,
       settledAt: now(),
+      historyPending: !historyPersisted,
       terminalJobs: buildTerminalSnapshots(summary)
     };
     let terminalRecoveryPersisted = true;
@@ -283,7 +322,7 @@ function createUploadFinalizationBarrier({
     }
 
     let recoveryCleared = false;
-    if (queuePersisted && terminalRecoveryPersisted) {
+    if (historyPersisted && queuePersisted && terminalRecoveryPersisted) {
       try {
         await saveRecovery(null);
         recoveryCleared = true;
@@ -1591,7 +1630,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
 }
 
 function createWindow() {
-  const startupWindow = createStartupWindow(BrowserWindow, {
+  const startupWindow = createStartupWindow(RuntimeBrowserWindow, {
     title: 'Multi Hoster Uploader',
     width: 1100,
     height: 750,
@@ -3516,7 +3555,7 @@ ipcMain.handle('diagnostics:status', () => {
 function createCaptureWindow() {
   if (captureWindow && !captureWindow.isDestroyed()) return;
   captureWindowReady = false;
-  captureWindow = new BrowserWindow({
+  captureWindow = new RuntimeBrowserWindow({
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -3792,7 +3831,7 @@ function createDropTargetWindow() {
   const { screen } = require('electron');
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
-  dropTargetWindow = new BrowserWindow({
+  dropTargetWindow = new RuntimeBrowserWindow({
     width: 120,
     height: 120,
     x: width - 140,

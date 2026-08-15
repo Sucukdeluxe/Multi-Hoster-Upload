@@ -357,17 +357,6 @@ const _sessionDoneJobs = new Set(); // Job IDs already counted for uploadedBytes
 const _completedUploadKeys = new Set(); // 'filepath|hoster' keys for done uploads (survives removeFromQueueOnDone)
 const _suppressedPreviewKeys = new Set();
 const _deletedJobIds = new Set(); // IDs of jobs explicitly deleted by user (prevents re-creation from stale progress callbacks)
-// Coalesce removeFromQueueOnDone removals into one filter pass per microtask
-// to avoid O(N²) behaviour when a burst of jobs finish at once. Logic now
-// lives in lib/coalesced-set.js so it can be unit-tested with a manual
-// scheduler. Optional-chained so the renderer still works if the script
-// failed to load — falls back to immediate per-event filter (legacy slow
-// path), better than crashing.
-const _doneRemovalCoalescer = window.CoalescedSet
-  ? window.CoalescedSet.makeCoalescedSet({
-      apply: (drop) => { queueJobs = queueJobs.filter(j => !drop.has(j.id)); }
-    })
-  : null;
 const queueSortState = { key: 'filename', direction: 'asc' };
 let uploadSidebarFilter = 'all';
 let queueSearchQuery = '';
@@ -604,7 +593,7 @@ async function init() {
     }
     sourceCleanupFinalizationPending = true;
     try {
-      handleBatchDone(summary, { deferPersistence: true });
+      handleBatchDone(summary, { deferPersistence: true, historyPersisted: data.historyPersisted === true });
       await completeSourceCleanupFinalization(data);
     } finally {
       sourceCleanupFinalizationPending = false;
@@ -1374,6 +1363,12 @@ function restoreQueueStateFromConfig() {
           remaining: 0,
           error: Object.hasOwn(recoveryOutcome, 'error') ? recoveryOutcome.error : (job.error || null),
           failureDetails: Object.hasOwn(recoveryOutcome, 'failureDetails') ? recoveryOutcome.failureDetails : (job.failureDetails || null),
+          remoteCommitUncertain: Object.hasOwn(recoveryOutcome, 'remoteCommitUncertain')
+            ? recoveryOutcome.remoteCommitUncertain === true
+            : job.remoteCommitUncertain === true,
+          historyPending: Object.hasOwn(recoveryOutcome, 'historyPending')
+            ? recoveryOutcome.historyPending === true
+            : job.historyPending === true,
           interrupted: recoveryOutcome.interrupted === true,
           result: Object.hasOwn(recoveryOutcome, 'result') ? recoveryOutcome.result : (job.result || null),
           sourceCleanupMetadataVersion: job.sourceCleanupMetadataVersion === 2 ? 2 : null,
@@ -1383,6 +1378,9 @@ function restoreQueueStateFromConfig() {
             ? [...job.sourceCleanupConfirmedHosters]
             : [],
           sourceCleanupProvisionalHosters: [],
+          sourceCleanupStartedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupStartedHosters)
+            ? [...job.sourceCleanupStartedHosters]
+            : undefined,
           sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
           attempt: 0,
           maxAttempts: job.maxAttempts || 0,
@@ -1408,7 +1406,7 @@ function restoreQueueStateFromConfig() {
 
 function buildPersistedQueueState({ historyPersisted = true } = {}) {
   const persistableJobs = historyPersisted
-    ? queueJobs.filter(job => !['done', 'skipped'].includes(job.status))
+    ? queueJobs.filter(job => !['done', 'skipped'].includes(job.status) || job.historyPending === true)
     : queueJobs;
   const selectedFileMap = new Map(selectedFiles.map(file => [file.path, file]));
 
@@ -1422,7 +1420,7 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
     }
   }
 
-  if (historyPersisted && selectedFileMap.size === 0 && queueJobs.every(job => ['done', 'skipped'].includes(job.status))) {
+  if (historyPersisted && selectedFileMap.size === 0 && queueJobs.every(job => ['done', 'skipped'].includes(job.status) && job.historyPending !== true)) {
     return null;
   }
 
@@ -1448,7 +1446,7 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
     selectedFiles: Array.from(selectedFileMap.values()),
     completedKeys,
     suppressedKeys,
-    queueJobs: queueJobs.map(job => {
+    queueJobs: persistableJobs.map(job => {
       const isTerminal = TERMINAL.has(job.status);
       return {
         id: job.id,
@@ -1459,6 +1457,8 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
         bytesTotal: job.bytesTotal || 0,
         error: isTerminal ? (job.error || null) : null,
         failureDetails: isTerminal ? (job.failureDetails || null) : null,
+        remoteCommitUncertain: job.remoteCommitUncertain === true,
+        historyPending: job.historyPending === true,
         result: isTerminal ? (job.result || null) : null,
         sourceCleanupMetadataVersion: job.sourceCleanupToken ? 2 : null,
         sourceCleanupToken: job.sourceCleanupToken || null,
@@ -1466,6 +1466,9 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
         sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
           ? [...job.sourceCleanupConfirmedHosters]
           : [],
+        sourceCleanupStartedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupStartedHosters)
+          ? [...job.sourceCleanupStartedHosters]
+          : undefined,
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         maxAttempts: job.maxAttempts || 0
       };
@@ -3109,7 +3112,6 @@ async function _persistQueueSnapshotBeforeUploadStart() {
 
 async function completeSourceCleanupFinalization(data) {
   if (!data?.finalizationId || !window.api.completeUploadFinalization) return false;
-  if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
   queuePersistThrottle.cancel();
   let writesReady = true;
   try {
@@ -3133,7 +3135,7 @@ async function completeSourceCleanupFinalization(data) {
       finalizationId: data.finalizationId,
       deliveryId: data.deliveryId,
       historyPersisted: data.historyPersisted === true,
-      pendingQueue: data.historyPersisted !== true || queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
+      pendingQueue: data.historyPersisted !== true || queueJobs.some((job) => !['done', 'skipped'].includes(job.status) || job.historyPending === true)
         ? buildPersistedQueueState({ historyPersisted: data.historyPersisted === true })
         : null
     });
@@ -3155,6 +3157,9 @@ function serializeUploadJob(job) {
     sourceCleanupToken: job.sourceCleanupToken || null,
     sourceCleanupRequiredHosters: job.sourceCleanupRequiredHosters || [],
     sourceCleanupConfirmedHosters: job.sourceCleanupConfirmedHosters || [],
+    sourceCleanupStartedHosters: Array.isArray(job.sourceCleanupStartedHosters)
+      ? [...job.sourceCleanupStartedHosters]
+      : undefined,
     sourceCleanupFingerprint: job.sourceCleanupFingerprint || null
   };
 }
@@ -3179,8 +3184,18 @@ async function startUpload(opts) {
     buildQueuePreview();
   }
 
-  const jobsToStart = queueJobs.filter((job) => isStartableQueueStatus(job.status));
+  const scopedJobs = Array.isArray(opts?.jobs) ? opts.jobs : queueJobs;
+  const automaticStart = opts?._autoRetry === true || opts?._restoredAutoStart === true;
+  const startableJobs = scopedJobs.filter((job) => isStartableQueueStatus(job.status));
+  const jobsToStart = automaticStart
+    ? startableJobs.filter((job) => job.remoteCommitUncertain !== true)
+    : startableJobs;
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
+  if (!automaticStart && !await confirmRemoteCommitRetry(jobsToStart)) {
+    uploading = false;
+    updateQueueActionButtons();
+    return;
+  }
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3240,7 +3255,7 @@ function _markSkippedJobs(result) {
   renderQueueTable();
 }
 
-async function startSelectedUpload(explicitJobs) {
+async function startSelectedUpload(explicitJobs, options = {}) {
   if (sourceCleanupFinalizationPending) return;
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
@@ -3248,8 +3263,9 @@ async function startSelectedUpload(explicitJobs) {
     const addable = scopedJobs.filter(j => isStartableQueueStatus(j.status));
     if (addable.length === 0) {
       if (selectedJobIds.size > 0) showCopyToast('Keine startbaren Jobs ausgewählt (alle laufen schon oder sind fertig).');
-      return;
+      return false;
     }
+    if (options.remoteRetryConfirmed !== true && !await confirmRemoteCommitRetry(addable)) return false;
     {
       const cleanupPreparation = prepareSourceCleanup(addable);
       addable.forEach(j => {
@@ -3267,7 +3283,7 @@ async function startSelectedUpload(explicitJobs) {
       } catch (err) {
         const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Jobs konnten nicht hinzugefügt werden';
         showCopyToast(formatLocalizedError(prefix, err));
-        return;
+        return false;
       }
 
       // If the batch ended between UI-state and IPC call, start a fresh batch immediately
@@ -3275,8 +3291,7 @@ async function startSelectedUpload(explicitJobs) {
         uploading = false;
         updateQueueActionButtons();
         updateStatusBar();
-        await startSelectedUpload(addable);
-        return;
+        return startSelectedUpload(addable, { remoteRetryConfirmed: true });
       }
       _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
@@ -3299,7 +3314,7 @@ async function startSelectedUpload(explicitJobs) {
       } else {
         showCopyToast('Keine Jobs hinzugefügt');
       }
-      return;
+      return !(result && result.error);
     }
   }
   uploading = true; // set immediately to prevent double-click race
@@ -3307,7 +3322,12 @@ async function startSelectedUpload(explicitJobs) {
 
   const hosters = getSelectedHosters();
   const jobsToStart = scopedJobs.filter(job => isStartableQueueStatus(job.status));
-  if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
+  if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return false; }
+  if (options.remoteRetryConfirmed !== true && !await confirmRemoteCommitRetry(jobsToStart)) {
+    uploading = false;
+    updateQueueActionButtons();
+    return false;
+  }
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3329,7 +3349,7 @@ async function startSelectedUpload(explicitJobs) {
       hosters,
       jobs: jobsToStart.map(serializeUploadJob),
       sourceCleanupGroups: cleanupPreparation.groups
-  };
+    };
     const result = await window.api.startUpload(uploadPayload);
     if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
@@ -3342,13 +3362,16 @@ async function startSelectedUpload(explicitJobs) {
       uploading = false;
       updateQueueActionButtons();
       updateStatusBar();
+      return false;
     }
+    return true;
   } catch (err) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
     const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Upload-Start fehlgeschlagen';
     await showAppAlert(formatLocalizedError(prefix, err), 'Upload-Start fehlgeschlagen');
+    return false;
   }
 }
 
@@ -3420,7 +3443,7 @@ function _handleProgressImpl(data) {
   }
 
   // Don't regress from terminal states (stale callbacks can arrive after completion)
-  if (job.status === 'done' || job.status === 'skipped') return;
+  if (['done', 'error', 'aborted', 'skipped'].includes(job.status)) return;
 
   // Update job state
   job.status = data.status;
@@ -3437,6 +3460,7 @@ function _handleProgressImpl(data) {
   job.remaining = data.remaining || 0;
   job.error = data.error || null;
   job.failureDetails = data.failureDetails || job.failureDetails || null;
+  job.remoteCommitUncertain = window.UploadRecovery.resolveRemoteCommitUncertainty(job.remoteCommitUncertain, data);
   job.result = data.result || job.result;
   job.attempt = data.attempt || 0;
   job.maxAttempts = data.maxAttempts || 0;
@@ -3468,23 +3492,6 @@ function _handleProgressImpl(data) {
     _completedUploadKeys.add(`${job.file}|${job.hoster}`);
   }
 
-  // Remove finished jobs from queue if setting is enabled. Coalesce the
-  // actual array filter into one microtask: a burst of 500 done events
-  // would otherwise fire 500 individual O(N) filters = O(N²) work, visible
-  // as a brief UI freeze when a big batch finishes. Index/selection are
-  // updated synchronously so subsequent lookups see the right state — only
-  // the array rewrite is deferred.
-  if (job.status === 'done' && config.globalSettings && config.globalSettings.removeFromQueueOnDone) {
-    removeJobFromIndex(job, true);
-    selectedJobIds.delete(job.id);
-    if (_doneRemovalCoalescer) {
-      _doneRemovalCoalescer.add(job.id);
-    } else {
-      // Legacy slow path: immediate filter when the lib script didn't load.
-      queueJobs = queueJobs.filter(j => j !== job);
-    }
-  }
-
   // Status changes (done/error/etc) get one coalesced update per frame so a
   // burst of 500 parallel jobs flipping state doesn't fire 2000 sync DOM
   // updates. Ongoing uploading progress is throttled at 200ms.
@@ -3498,7 +3505,7 @@ function _handleProgressImpl(data) {
 
 function handleBatchDone(summary, options = {}) {
   uploading = false;
-  applySummaryResults(summary);
+  applySummaryResults(summary, options.historyPersisted !== false);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
   // Prune session-stats sets to current queue contents. Without this, IDs
   // of jobs that were removed from queueJobs (via removeFromQueueOnDone
@@ -3527,7 +3534,6 @@ function handleBatchDone(summary, options = {}) {
 
   syncSelectedFilesFromQueue();
   updateQueueActionButtons();
-  renderQueueTable();
   renderRecentUploadsPanel();
   // History is only visible on the Verlauf tab. Mark it dirty and refresh when
   // the user actually switches to it — skips an IPC + full table rebuild per
@@ -3536,11 +3542,11 @@ function handleBatchDone(summary, options = {}) {
   if (_isHistoryTabActive()) loadHistory();
 
   const removeOnDone = config.globalSettings && config.globalSettings.removeFromQueueOnDone;
-  if (removeOnDone) {
+  if (options.historyPersisted !== false && removeOnDone) {
     // Single pass: build the keep-list and clean up the index for removed jobs.
     const nextJobs = [];
     for (const job of queueJobs) {
-      if (job.status === 'done') {
+      if (job.status === 'done' && job.historyPending !== true) {
         removeJobFromIndex(job, true);
         selectedJobIds.delete(job.id);
       } else {
@@ -3548,8 +3554,7 @@ function handleBatchDone(summary, options = {}) {
       }
     }
     queueJobs = nextJobs;
-    renderQueueTable();
-  } else {
+  } else if (options.historyPersisted !== false) {
     // Auto-prune for the default (removeOnDone=false) too: cap terminal
     // jobs (done/skipped/error/aborted) at the most recent N so the queue
     // can't grow unbounded across long sessions. The algorithm lives in
@@ -3560,19 +3565,21 @@ function handleBatchDone(summary, options = {}) {
     // Optional-chain so the renderer still works if the prune script fails
     // to load (e.g. file:// path issues during dev) — falls back to no-prune
     // rather than crashing on every batch-done.
-    const result = window.QueuePrune?.pruneOldestTerminalJobs(queueJobs, TERMINAL_KEEP_LIMIT);
+    const result = window.QueuePrune?.pruneOldestTerminalJobs(queueJobs.filter(job => job.historyPending !== true), TERMINAL_KEEP_LIMIT);
     if (result) {
+      const droppedIds = new Set(result.dropped.map(job => job.id));
       for (const j of result.dropped) {
         removeJobFromIndex(j, true);
         selectedJobIds.delete(j.id);
       }
-      queueJobs = result.kept;
-      renderQueueTable();
+      queueJobs = queueJobs.filter(job => !droppedIds.has(job.id));
     }
   }
 
+  renderQueueTable();
+
   if (!options.deferPersistence) {
-    if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status))) persistQueueStateSoon(true);
+    if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status) || job.historyPending === true)) persistQueueStateSoon(true);
     else clearPersistedQueueStateSoon();
   }
 
@@ -3592,6 +3599,7 @@ function _cancelAutoRetry(resetRound) {
 function _collectAutoRetryableJobs() {
   if (!window.Stats) return [];
   return queueJobs.filter(j => j.status === 'error'
+    && j.remoteCommitUncertain !== true
     && window.Stats.isRetryableCategory(window.Stats.classifyErrorCategory(j.error)));
 }
 function _scheduleAutoRetryIfNeeded() {
@@ -3611,10 +3619,11 @@ function _scheduleAutoRetryIfNeeded() {
     if (jobs.length === 0) { _autoRetryState.round = 0; return; }
     for (const j of jobs) {
       j.status = 'queued'; j.error = null; j.result = null;
+      j.remoteCommitUncertain = false;
       j.bytesUploaded = 0; j.speedKbs = 0; j.progress = 0; j.uploadId = null;
     }
     renderQueueTable();
-    startUpload({ _autoRetry: true });
+    startUpload({ _autoRetry: true, jobs });
   }, waitMin * 60_000);
 }
 async function _refreshSessionFailedSnapshot() {
@@ -3663,35 +3672,35 @@ function _maybeShowBatchSummary(summary) {
 
   const close = () => { modal.style.display = 'none'; };
   closeBtn.onclick = close;
-  retryAllBtn.onclick = () => { _retryFailedFromBuckets(buckets, false); close(); };
-  retryTransientBtn.onclick = () => { _retryFailedFromBuckets(buckets, true); close(); };
+  retryAllBtn.onclick = async () => { if (await _retryFailedFromBuckets(buckets, false)) close(); };
+  retryTransientBtn.onclick = async () => { if (await _retryFailedFromBuckets(buckets, true)) close(); };
   modal.style.display = 'flex';
 }
 
-function _retryFailedFromBuckets(buckets, transientOnly) {
+async function _retryFailedFromBuckets(buckets, transientOnly) {
   if (sourceCleanupFinalizationPending) return;
   const cats = transientOnly ? ['hoster-transient', 'network', 'unknown'] : ['hoster-transient', 'network', 'unknown', 'file-rejected', 'account-error'];
   const toRetry = [];
   for (const cat of cats) {
     for (const item of (buckets[cat] || [])) toRetry.push(item);
   }
-  if (toRetry.length === 0) return;
+  if (toRetry.length === 0) return false;
   const jobsToRetry = [];
   for (const item of toRetry) {
-    const job = queueJobs.find(j => (j.fileName === item.fileName) && (j.hoster === item.hoster) && j.status === 'error');
-    if (job) {
-      job.status = 'queued';
-      job.progress = 0;
-      job.bytesUploaded = 0;
-      job.error = null;
-      job.result = null;
-      jobsToRetry.push(job);
-    }
+    const job = item.jobId
+      ? queueJobs.find(candidate => candidate.id === item.jobId && candidate.status === 'error')
+      : (() => {
+          const candidates = queueJobs.filter(candidate => candidate.fileName === item.fileName && candidate.hoster === item.hoster && candidate.status === 'error');
+          return candidates.length === 1 ? candidates[0] : null;
+        })();
+    if (job && !jobsToRetry.includes(job)) jobsToRetry.push(job);
   }
-  if (jobsToRetry.length === 0) { showCopyToast('Keine passenden Jobs für Retry gefunden.'); return; }
-  renderQueueTable();
+  if (jobsToRetry.length === 0) { showCopyToast('Keine passenden Jobs für Retry gefunden.'); return false; }
+  if (!await confirmRemoteCommitRetry(jobsToRetry)) return false;
+  const started = await startSelectedUpload(jobsToRetry, { remoteRetryConfirmed: true });
+  if (!started) return false;
   showCopyToast(jobsToRetry.length === 1 ? '1 Job zum erneuten Upload zurückgesetzt' : `${jobsToRetry.length} Jobs zum erneuten Upload zurückgesetzt`);
-  if (typeof startUpload === 'function') startUpload();
+  return true;
 }
 
 function handleStats(data) {
@@ -3813,16 +3822,29 @@ async function copyJobLogToClipboard() {
 }
 
 // --- Retry ---
+async function confirmRemoteCommitRetry(jobs) {
+  const count = jobs.filter(job => job.remoteCommitUncertain === true).length;
+  if (count === 0) return true;
+  return showAppConfirm({
+    title: 'Uploadstatus konnte nicht bestätigt werden',
+    message: count === 1
+      ? 'Der Upload könnte beim Hoster bereits abgeschlossen sein. Ein erneuter Upload kann ein Duplikat erzeugen.'
+      : `${count} Uploads könnten bei den Hostern bereits abgeschlossen sein. Erneute Uploads können Duplikate erzeugen.`,
+    confirmText: 'Trotzdem erneut hochladen',
+    danger: true
+  });
+}
+
 async function retrySelectedJobs() {
   if (sourceCleanupFinalizationPending) return;
   _normalizeQueueSelectionToVisible();
-  const retryJobs = [];
+  const retryJobs = queueJobs.filter(j => selectedJobIds.has(j.id) && ['error', 'done', 'aborted', 'skipped'].includes(j.status));
+  if (retryJobs.length === 0 || !await confirmRemoteCommitRetry(retryJobs)) return;
   // Build a Set for O(1) selectedFiles dedup below.
   const existingFilePaths = new Set();
   for (const f of selectedFiles) existingFilePaths.add(f.path);
 
-  queueJobs.forEach(j => {
-    if (selectedJobIds.has(j.id) && ['error', 'done', 'aborted', 'skipped'].includes(j.status)) {
+  retryJobs.forEach(j => {
       // Invalidate the old uploadId: retire the index entry and mark it so
       // any late progress event from the previous (cancelled/completed)
       // upload can't overwrite the freshly-reset state.
@@ -3839,14 +3861,11 @@ async function retrySelectedJobs() {
       j.remaining = 0;
       j.progress = 0;
       j.uploadId = null;
-      retryJobs.push(j);
       if (!existingFilePaths.has(j.file)) {
         selectedFiles.push({ path: j.file, name: j.fileName, size: j.bytesTotal });
         existingFilePaths.add(j.file);
       }
-    }
   });
-  if (retryJobs.length === 0) return;
   for (const j of retryJobs) {
     if (j.file && j.hoster) {
       _completedUploadKeys.delete(`${j.file}|${j.hoster}`);
@@ -3862,7 +3881,7 @@ async function retrySelectedJobs() {
   retryJobs.forEach(j => selectedJobIds.add(j.id));
   selectionAnchorJobId = retryJobs[0]?.id || null;
   persistQueueStateSoon();
-  await startSelectedUpload(retryJobs);
+  await startSelectedUpload(retryJobs, { remoteRetryConfirmed: true });
 }
 
 async function abortSelectedJobs() {
@@ -4003,7 +4022,7 @@ function maybeAddSessionFile(job) {
 
 }
 
-function applySummaryResults(summary) {
+function applySummaryResults(summary, historyPersisted = true) {
   const files = Array.isArray(summary?.files) ? summary.files : [];
   const jobById = new Map();
   const jobsByLegacyKey = new Map();
@@ -4020,6 +4039,8 @@ function applySummaryResults(summary) {
       const candidates = hasJobId ? null : jobsByLegacyKey.get(`${file.name}\u0001${result.hoster}`);
       const job = hasJobId ? jobById.get(result.jobId) : (candidates?.length === 1 ? candidates[0] : null);
       if (!job) continue;
+      job.remoteCommitUncertain = window.UploadRecovery.resolveRemoteCommitUncertainty(job.remoteCommitUncertain, result);
+      job.historyPending = historyPersisted !== true;
       if (result.status === 'done') {
         job.status = 'done';
         job.result = {
@@ -7173,7 +7194,6 @@ function prepareForWindowClose(attempt) {
   closePreparationState = 'preparing';
   setClosePreparationUi(true);
   closePreparationPromise = (async () => {
-    if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
     await waitForClosePreparationStep(withCloseWriteAccess(flushPendingSettingsSaves));
     if (!isCurrentClosePreparation(generation, attempt)) return;
     const pendingQueue = buildPersistedQueueState();

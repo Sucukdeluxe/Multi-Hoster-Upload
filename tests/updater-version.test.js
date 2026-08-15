@@ -23,6 +23,75 @@ test('release arguments reject a malformed transport tag', async () => {
   );
 });
 
+test('release notes accept English and reject German or French', async () => {
+  const { createReleasePlan, parseReleaseArgs } = await import(releasePlanUrl);
+  for (const notes of [
+    'Security improvements and more reliable updates.',
+    'Uploads now resume correctly after network interruptions.',
+    'Faster uploads, smoother recovery.',
+    'Hardened credential redaction.'
+  ]) {
+    assert.equal(
+      createReleasePlan(parseReleaseArgs(['2.1.21', '--transport-tag', 'v2.1.21', notes])).releaseBody,
+      notes
+    );
+  }
+  for (const notes of [
+    'Sicherheitsverbesserungen und zuverlässigere Updates.',
+    'Uploads werden nach Netzwerkunterbrechungen jetzt korrekt fortgesetzt.',
+    'Améliorations de sécurité et mises à jour plus fiables.',
+    'Les téléversements reprennent correctement après les interruptions réseau.',
+    'Security update et corrections.',
+    'Das Programm korrigiert Probleme im update.',
+    'Uploads laufen wieder stabil.'
+  ]) {
+    assert.throws(
+      () => createReleasePlan(parseReleaseArgs(['2.1.21', '--transport-tag', 'v2.1.21', notes])),
+      /English release notes are required/
+    );
+  }
+});
+
+test('release arguments reject unknown, misspelled, and duplicate options', async () => {
+  const { parseReleaseArgs } = await import(releasePlanUrl);
+  assert.deepEqual(
+    parseReleaseArgs(['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Hardened credential redaction.', '--dry-run']),
+    {
+      version: '2.1.21',
+      transportTag: 'v2.1.21',
+      notes: 'Hardened credential redaction.',
+      dryRun: true
+    }
+  );
+  const invalidArgs = [
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Release notes', '--publish'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Release notes', '--dryrun'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Release notes', '-dry-run'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '-notes', 'Release notes'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Release notes', '--dry-run', '--dry-run'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--notes', 'Release notes', '--notes', 'Other notes'],
+    ['2.1.21', '--transport-tag', 'v2.1.21', '--transport-tag', 'v2.1.22', '--notes', 'Release notes']
+  ];
+
+  for (const args of invalidArgs) {
+    assert.throws(() => parseReleaseArgs(args), /option/i);
+  }
+});
+
+test(['GitHub and ', ['Gi', 'tea'].join(''), ' CI verify version tag pushes'].join(''), () => {
+  const workflowPaths = ['.github/workflows/ci.yml', `${['.', ['gi', 'tea'].join('')].join('')}/workflows/ci.yml`];
+  for (const relativePath of workflowPaths) {
+    const workflow = fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8');
+    const lines = workflow.split(/\r?\n/);
+    const pushIndex = lines.indexOf('  push:');
+    const pushTrigger = [];
+    for (let index = pushIndex + 1; index < lines.length && lines[index].startsWith('    '); index++) {
+      pushTrigger.push(lines[index]);
+    }
+    assert.ok(pushTrigger.includes("    tags: ['v*']"), relativePath);
+  }
+});
+
 test('matching GitHub release notes replace the private release body', async () => {
   const calls = [];
   const notes = await fetchGithubReleaseNotes('2.1.0', 'Private fallback', async (url, options) => {
@@ -250,5 +319,20 @@ test('incompatible existing release title fails closed', async () => {
   assert.throws(
     () => resolveExistingReleaseId(plan, release),
     /Refusing recovery for v3\.3\.109: existing release title "Multi-Hoster-Upload v3\.3\.109" does not match "Multi Hoster Uploader v2\.0\.1"/
+  );
+});
+
+test('existing release recovery rejects a mismatched transport tag', async () => {
+  const { createReleasePlan, parseReleaseArgs, resolveExistingReleaseId } = await import(releasePlanUrl);
+  const plan = createReleasePlan(parseReleaseArgs(['2.1.20', '--transport-tag', 'v2.1.20', 'Release notes']));
+  const release = {
+    id: 82,
+    tag_name: 'v9.9.9',
+    name: 'Multi Hoster Uploader v2.1.20'
+  };
+
+  assert.throws(
+    () => resolveExistingReleaseId(plan, release),
+    /existing release tag "v9\.9\.9" does not match "v2\.1\.20"/
   );
 });

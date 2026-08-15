@@ -151,7 +151,7 @@ test('removing a failed job never relaxes the stored requirements', () => {
 
 test('removeRequirement drops only an explicitly discarded unstarted hoster', () => {
   const queueJobs = queueFixture();
-  policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-1', 'win32');
+  policy.prepareGroups(queueJobs, queueJobs.slice(0, 3), () => 'cleanup-1', 'win32');
 
   const touchedJobs = policy.removeRequirement(queueJobs, queueJobs[3], 'win32');
 
@@ -176,6 +176,66 @@ test('markCompleted keeps successful hosters provisional for the current round',
     assert.deepEqual(job.sourceCleanupConfirmedHosters, []);
     assert.deepEqual(job.sourceCleanupProvisionalHosters, ['vidmoly.me']);
   }
+});
+
+test('a started cleanup requirement survives abort finalization persistence and restart', async () => {
+  const queueJobs = [
+    { id: 'job-complete', file: 'C:\\Uploads\\Protected.mkv', hoster: 'doodstream.com', status: 'preview' },
+    { id: 'job-started', file: 'C:\\Uploads\\Protected.mkv', hoster: 'voe.sx', status: 'preview' }
+  ];
+  policy.prepareGroups(queueJobs, queueJobs, () => 'cleanup-protected', 'win32');
+  queueJobs[0].status = 'done';
+  policy.markCompleted(queueJobs, queueJobs[0], 'win32');
+  queueJobs[1].status = 'aborted';
+  await policy.persistRoundCompletions(queueJobs, { historyPersisted: true, persist: async () => true });
+
+  const restored = structuredClone(queueJobs);
+  restored[1].status = 'preview';
+  restored[1].interrupted = false;
+  const touchedJobs = policy.removeRequirement(restored, restored[1], 'win32');
+
+  assert.deepEqual(touchedJobs, []);
+  assert.deepEqual(restored.map(job => job.sourceCleanupStartedHosters), [
+    ['doodstream.com', 'voe.sx'],
+    ['doodstream.com', 'voe.sx']
+  ]);
+  assert.deepEqual(restored.map(job => job.sourceCleanupRequiredHosters), [
+    ['doodstream.com', 'voe.sx'],
+    ['doodstream.com', 'voe.sx']
+  ]);
+});
+
+test('legacy version two cleanup metadata without started hosters fails closed', () => {
+  const queueJobs = [
+    {
+      id: 'legacy-complete',
+      file: 'C:\\Uploads\\Legacy.mkv',
+      hoster: 'doodstream.com',
+      status: 'done',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-legacy',
+      sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'],
+      sourceCleanupConfirmedHosters: ['doodstream.com']
+    },
+    {
+      id: 'legacy-candidate',
+      file: 'C:\\Uploads\\Legacy.mkv',
+      hoster: 'voe.sx',
+      status: 'preview',
+      sourceCleanupMetadataVersion: 2,
+      sourceCleanupToken: 'cleanup-legacy',
+      sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'],
+      sourceCleanupConfirmedHosters: ['doodstream.com']
+    }
+  ];
+
+  const touchedJobs = policy.removeRequirement(queueJobs, queueJobs[1], 'win32');
+
+  assert.deepEqual(touchedJobs, []);
+  assert.deepEqual(queueJobs.map(job => job.sourceCleanupRequiredHosters), [
+    ['doodstream.com', 'voe.sx'],
+    ['doodstream.com', 'voe.sx']
+  ]);
 });
 
 test('removeRequirement never relaxes requirements for started or interrupted jobs', () => {

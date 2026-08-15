@@ -538,7 +538,269 @@ describe('UploadManager', () => {
 
     assert.equal(settled.at(-1).status, 'aborted');
     assert.equal(progress.some(event => event.status === 'done'), false);
+    assert.equal(progress.at(-1).remoteCommitUncertain, true);
     assert.equal(summary.succeeded, 0);
+    assert.equal(summary.files[0].results[0].remoteCommitUncertain, true);
+  });
+
+  it('keeps a confirmed result when cancellation arrives after confirmation', async () => {
+    const mgr = new UploadManager({});
+    const originalExecuteUpload = mgr._executeUpload.bind(mgr);
+    mgr._executeUpload = async (...args) => {
+      const result = await originalExecuteUpload(...args);
+      queueMicrotask(() => mgr.cancelJobs(['confirmed-before-cancel']));
+      return result;
+    };
+    const settled = [];
+    let summary = null;
+    mgr.on('job-settled', event => settled.push(event));
+    mgr.on('batch-done', value => { summary = value; });
+
+    await mgr.startBatch([{
+      jobId: 'confirmed-before-cancel',
+      file: '/test/confirmed-before-cancel.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }]);
+
+    assert.equal(settled.at(-1).status, 'done');
+    assert.equal(summary.succeeded, 1);
+  });
+
+  it('finishAfterActive prevents a semaphore waiter from starting', async () => {
+    let releaseFirst;
+    let markFirstStarted;
+    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+    const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
+    const uploads = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
+      uploads.push(filePath);
+      if (filePath === '/test/active-before-stop.mp4') {
+        markFirstStarted();
+        await firstGate;
+      }
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const settled = new Map();
+    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
+    const batchPromise = mgr.startBatch([
+      { jobId: 'active-before-stop', file: '/test/active-before-stop.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'semaphore-waiter', file: '/test/semaphore-waiter.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    await firstStarted;
+    for (let index = 0; index < 50 && mgr._getSemaphore('doodstream.com').pending === 0; index++) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(mgr._getSemaphore('doodstream.com').pending, 1);
+    mgr.finishAfterActive();
+    releaseFirst();
+    await batchPromise;
+
+    assert.deepEqual(uploads, ['/test/active-before-stop.mp4']);
+    assert.equal(settled.get('active-before-stop'), 'done');
+    assert.equal(settled.get('semaphore-waiter'), 'aborted');
+  });
+
+  it('finishAfterActive prevents an interval waiter from starting', async () => {
+    let releaseInterval;
+    let markIntervalEntered;
+    const intervalGate = new Promise(resolve => { releaseInterval = resolve; });
+    const intervalEntered = new Promise(resolve => { markIntervalEntered = resolve; });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 1, maxSizeMb: 0 }
+    });
+    mgr._waitForInterval = async (hoster, intervalMs, signal, acquireSlots) => {
+      markIntervalEntered();
+      await intervalGate;
+      await acquireSlots();
+    };
+    let settled;
+    mgr.on('job-settled', event => { settled = event; });
+    const batchPromise = mgr.startBatch([{
+      jobId: 'interval-waiter-stop',
+      file: '/test/interval-waiter-stop.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }]);
+
+    await intervalEntered;
+    mgr.finishAfterActive();
+    releaseInterval();
+    await batchPromise;
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(settled.status, 'aborted');
+  });
+
+  it('finishAfterActive prevents a suspect-resolution waiter from starting', async () => {
+    let releaseSuspect;
+    let markSuspectEntered;
+    const suspectGate = new Promise(resolve => { releaseSuspect = resolve; });
+    const suspectEntered = new Promise(resolve => { markSuspectEntered = resolve; });
+    const mgr = new UploadManager({});
+    mgr._waitForSuspectResolution = async () => {
+      markSuspectEntered();
+      await suspectGate;
+    };
+    let settled;
+    mgr.on('job-settled', event => { settled = event; });
+    const batchPromise = mgr.startBatch([{
+      jobId: 'suspect-waiter-stop',
+      file: '/test/suspect-waiter-stop.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }]);
+
+    await suspectEntered;
+    mgr.finishAfterActive();
+    releaseSuspect();
+    await batchPromise;
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(settled.status, 'aborted');
+  });
+
+  it('does not start a suspect alternate that became a failed account while waiting', async () => {
+    const mgr = new UploadManager(
+      { 'byse.sx': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } },
+      {},
+      { 'byse.sx': [{ id: 'alternate', apiKey: 'alternate-key' }] }
+    );
+    const controller = new AbortController();
+    const task = {
+      file: '/test/suspect-waiter.mkv',
+      hoster: 'byse.sx',
+      accountId: 'alternate',
+      apiKey: 'alternate-key',
+      jobId: 'suspect-waiter'
+    };
+    mgr._beginSuspectResolution('byse.sx', 'suspect-owner');
+
+    const attempt = mgr._executeUploadWithAdmission(
+      task,
+      () => {},
+      controller.signal,
+      null,
+      { ok: true, isVideoLike: true },
+      fakeFileSize,
+      false,
+      task.jobId
+    );
+    await new Promise(resolve => setImmediate(resolve));
+    mgr._failedAccounts.set('byse.sx:alternate', true);
+    mgr._endSuspectResolution('byse.sx', 'suspect-owner');
+
+    await assert.rejects(attempt, error => error.accountUnavailable === true);
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+  });
+
+  it('finishAfterActive prevents a recovery-admission waiter from starting', async () => {
+    let releaseFirst;
+    let markFirstStarted;
+    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+    const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
+    const uploads = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
+      uploads.push(filePath);
+      if (filePath === '/test/first/shared-title.mp4') {
+        markFirstStarted();
+        await firstGate;
+      }
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: `ok-${uploads.length}` };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const settled = new Map();
+    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
+    const batchPromise = mgr.startBatch([
+      { jobId: 'recovery-active', file: '/test/first/shared-title.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'recovery-waiter', file: '/test/second/shared-title.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    await firstStarted;
+    await new Promise(resolve => setImmediate(resolve));
+    mgr.finishAfterActive();
+    releaseFirst();
+    await batchPromise;
+
+    assert.deepEqual(uploads, ['/test/first/shared-title.mp4']);
+    assert.equal(settled.get('recovery-active'), 'done');
+    assert.equal(settled.get('recovery-waiter'), 'aborted');
+  });
+
+  it('finishAfterActive remains enforced after account-failure coordination', async () => {
+    let releaseFailureGate;
+    let markFailureGateEntered;
+    const failureGate = new Promise(resolve => { releaseFailureGate = resolve; });
+    const failureGateEntered = new Promise(resolve => { markFailureGateEntered = resolve; });
+    const error = new Error('Account rejected upload');
+    error.accountError = true;
+    mockUploadFile.mock.mockImplementation(async () => { throw error; });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 2, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    mgr._coordinateAccountFailure = async () => {
+      markFailureGateEntered();
+      await failureGate;
+    };
+    let settled;
+    mgr.on('job-settled', event => { settled = event; });
+    const batchPromise = mgr.startBatch([{
+      jobId: 'failure-gate-stop',
+      file: '/test/failure-gate-stop.mp4',
+      hoster: 'doodstream.com',
+      accountId: 'ACCOUNT_A',
+      apiKey: 'key1'
+    }]);
+
+    await failureGateEntered;
+    mgr.finishAfterActive();
+    releaseFailureGate();
+    await batchPromise;
+
+    assert.equal(mockUploadFile.mock.calls.length, 1);
+    assert.equal(settled.status, 'aborted');
+  });
+
+  it('remote commit uncertainty remains terminal when finishAfterActive arrives simultaneously', async () => {
+    let releaseUpload;
+    let markUploadStarted;
+    const uploadGate = new Promise(resolve => { releaseUpload = resolve; });
+    const uploadStarted = new Promise(resolve => { markUploadStarted = resolve; });
+    mockUploadFile.mock.mockImplementation(async () => {
+      markUploadStarted();
+      await uploadGate;
+      const error = new Error('Remote commit could not be confirmed');
+      error.remoteCommitUncertain = true;
+      throw error;
+    });
+    const mgr = new UploadManager({
+      'example.test': { retries: 2, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    let summary;
+    const batchPromise = mgr.startBatch([{
+      jobId: 'uncertain-during-stop',
+      file: '/test/uncertain-during-stop.mp4',
+      hoster: 'example.test',
+      accountId: 'ACCOUNT_A',
+      apiKey: 'key1'
+    }]);
+    mgr.on('batch-done', value => { summary = value; });
+
+    await uploadStarted;
+    mgr.finishAfterActive();
+    releaseUpload();
+    await batchPromise;
+    const result = summary.files[0].results[0];
+
+    assert.equal(mockUploadFile.mock.calls.length, 1);
+    assert.equal(result.status, 'error');
+    assert.equal(result.remoteCommitUncertain, true);
   });
 
   it('late success after cancellation stays blocked by the real source cleanup gate', async (t) => {

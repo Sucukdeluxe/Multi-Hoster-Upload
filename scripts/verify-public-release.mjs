@@ -117,6 +117,7 @@ const sourceFiles = [
   'tests/folder-monitor.test.js',
   'tests/history-status.test.js',
   'tests/history-retention.test.js',
+  'tests/hidden-electron-window.test.js',
   'tests/hosters.test.js',
   'tests/hoster-recovery-provenance.test.js',
   'tests/hoster-recovery-safety.test.js',
@@ -151,6 +152,7 @@ const sourceFiles = [
   'tests/startup-renderer.test.js',
   'tests/stats.test.js',
   'tests/support-bundle.test.js',
+  'tests/support/hidden-electron-window.js',
   'tests/support/ui-network-safety.js',
   'tests/suspect-reject-alternates.test.js',
   'tests/throttle-timer.test.js',
@@ -163,6 +165,7 @@ const sourceFiles = [
   'tests/upload-log.test.js',
   'tests/upload-confirmation.test.js',
   'tests/upload-diagnostics.test.js',
+  'tests/upload-finalization-coordinator.test.js',
   'tests/upload-manager.test.js',
   'tests/upload-manager-recovery-claims.test.js',
   'tests/upload-recovery.test.js',
@@ -236,11 +239,22 @@ const internalTerms = [
 const forbiddenAiPattern = new RegExp(`\\b(?:${aiTerms}|multi[\\s-]+agents?)\\b`, 'i');
 const forbiddenPersonalPattern = new RegExp(`(?:[a-z]:[\\\\/]+users[\\\\/]+|\\b(?:${personalTerms})\\b|\\bdesktop-[a-z0-9-]+\\b)`, 'i');
 const forbiddenInternalPattern = new RegExp(`\\b(?:${internalTerms})\\b`, 'i');
-const updaterOnlyPattern = new RegExp([
-  ['gi', 'tea'].join(''),
-  ['git', '24-music', 'de'].join('\\.'),
-  [['Admin', 'istrator'].join(''), 'Multi-Hoster-Upload'].join('\\/')
-].join('|'), 'i');
+const credentialPatterns = [
+  new RegExp(`\\b${['gh', '[pousr]_'].join('')}[A-Za-z0-9]{36,}\\b`),
+  /\bgithub_pat_[A-Za-z0-9_]{60,}\b/,
+  /\bnpm_[A-Za-z0-9]{36,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{24,}\b/,
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}(?=$|[\s"'`,;}\]])/i,
+  new RegExp(['-----BEGIN ', '(?:RSA |EC |DSA |OPENSSH )?', 'PRIVATE KEY-----'].join('')),
+  new RegExp(`\\b${['aws', '_secret_access_key'].join('')}\\b\\s*[:=]\\s*["']?[A-Za-z0-9+/]{40}["']?`, 'i')
+];
+const credentialAssignmentPattern = /\b(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|cookie|session(?:id|token)?|authorization)\b\s*[:=]\s*["'`]([^"'`\r\n]{8,})["'`]/giu;
+const unquotedCredentialAssignmentPattern = /\b(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|cookie|session(?:id|token)?|authorization)\b\s*[:=]\s*([A-Za-z0-9._~+/=-]{12,})\s*(?:#.*)?$/gimu;
+const updaterOnlyTerms = [
+  'ed.cisum-42.tig'.split('').reverse().join('').replace(/[^a-z0-9]/g, ''),
+  'daolpu-retsoh-itlum/rotartsinimda'.split('').reverse().join('').replace(/[^a-z0-9]/g, '')
+];
 
 function addFailure(file, rule) {
   if (!failures.has(file)) failures.set(file, new Set());
@@ -353,8 +367,15 @@ async function enumerateTracked() {
     return [];
   }
 
-  const files = stdout.split('\0').filter(Boolean).map(normalizeRelative);
-  for (const relativePath of files) {
+  const files = new Set(stdout.split('\0').filter(Boolean).map(normalizeRelative));
+  const buildDirectories = ['lib', 'renderer'];
+  for (const relativeDirectory of buildDirectories) {
+    const buildFiles = await enumerateBuildDirectory(path.join(root, relativeDirectory), relativeDirectory);
+    for (const relativePath of buildFiles) files.add(relativePath);
+  }
+
+  const result = [...files];
+  for (const relativePath of result) {
     let stats;
     try {
       stats = await lstat(path.join(root, relativePath));
@@ -365,6 +386,33 @@ async function enumerateTracked() {
     if (!stats.isFile() || stats.isSymbolicLink()) addFailure(relativePath, 'unsupported-file-type');
     if (isDeniedBasename(path.basename(relativePath))) addFailure(relativePath, 'denied-basename');
     if (!allowedFiles.has(relativePath)) addFailure(relativePath, 'source-layout-allowlist');
+  }
+  return result;
+}
+
+async function enumerateBuildDirectory(directory, relativeDirectory) {
+  const files = [];
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    addFailure(relativeDirectory, 'build-input-enumeration');
+    return files;
+  }
+
+  for (const entry of entries) {
+    const relativePath = normalizeRelative(path.join(relativeDirectory, entry.name));
+    const absolutePath = path.join(directory, entry.name);
+    const stats = await lstat(absolutePath);
+    if (stats.isSymbolicLink()) {
+      addFailure(relativePath, 'unsupported-file-type');
+    } else if (entry.isDirectory()) {
+      files.push(...await enumerateBuildDirectory(absolutePath, relativePath));
+    } else if (entry.isFile()) {
+      files.push(relativePath);
+    } else {
+      addFailure(relativePath, 'unsupported-file-type');
+    }
   }
   return files;
 }
@@ -399,8 +447,39 @@ async function validateTextFiles(files) {
     if (forbiddenPersonalPattern.test(value)) addFailure(relativePath, 'forbidden-personal-term');
     if (forbiddenAiPattern.test(value)) addFailure(relativePath, 'forbidden-ai-term');
     if (forbiddenInternalPattern.test(value)) addFailure(relativePath, 'forbidden-internal-term');
-    if (relativePath !== 'lib/updater.js' && updaterOnlyPattern.test(value)) addFailure(relativePath, 'updater-endpoint-scope');
+    credentialAssignmentPattern.lastIndex = 0;
+    unquotedCredentialAssignmentPattern.lastIndex = 0;
+    const credentialAssignment = [...value.matchAll(credentialAssignmentPattern)]
+      .some((match) => !isCredentialPlaceholder(match[1], relativePath))
+      || [...value.matchAll(unquotedCredentialAssignmentPattern)]
+        .some((match) => !isCredentialPlaceholder(match[1], relativePath));
+    if (credentialPatterns.some((pattern) => pattern.test(value)) || credentialAssignment) {
+      addFailure(relativePath, 'credential-pattern');
+    }
+    const normalizedValue = value.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (relativePath !== 'lib/updater.js' && updaterOnlyTerms.some((term) => normalizedValue.includes(term))) {
+      addFailure(relativePath, 'updater-endpoint-scope');
+    }
   }
+}
+
+function isCredentialPlaceholder(value, relativePath) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized
+    || /^(?:\[?redacted\]?|none|null|undefined)$/i.test(normalized)
+    || /(?:dummy|example|fake|invalid|mock|notreal|placeholder|synthetic|test)[-_ ]?/i.test(normalized)
+    || /\$\{[^}]+\}/.test(normalized)
+    || /^<[^>]+>$/.test(normalized)) {
+    return true;
+  }
+  if (!relativePath.startsWith('tests/')) return false;
+  const longHex = /^[a-f0-9]{32,}$/i.test(normalized);
+  const opaqueLetters = /^[a-z]{16,}$/i.test(normalized);
+  const highEntropy = normalized.length >= 24
+    && /[a-z]/.test(normalized)
+    && /\d/.test(normalized)
+    && !/[-_ ](?:key|token|secret|password|session|account|fixture)(?:[-_ ]|$)/i.test(normalized);
+  return !longHex && !opaqueLetters && !highEntropy;
 }
 
 function validatePackage(packageJson, packageLock, files, expectedVersion) {

@@ -85,6 +85,222 @@ test('terminal finalization is delivered once per ready renderer generation and 
   assert.equal(sent.length, 2);
 });
 
+test('history failure acknowledgement requires every terminal job in the durable queue snapshot', async () => {
+  const createCoordinator = loadMainFunction('createUploadFinalizationCoordinator', 'createUploadFinalizationBarrier');
+  const savedQueues = [];
+  let deliveryId = null;
+  const coordinator = createCoordinator({
+    send: payload => {
+      deliveryId = payload.deliveryId;
+      return true;
+    },
+    saveQueue: async pendingQueue => savedQueues.push(pendingQueue),
+    schedule: () => null,
+    cancelSchedule: () => {},
+    createFinalizationId: () => 'history-failure-finalization',
+    createDeliveryId: () => 'history-failure-delivery'
+  });
+  coordinator.rendererReady();
+  const completion = coordinator.request({
+    files: [{ results: [
+      { jobId: 'done-a', status: 'done' },
+      { jobId: 'error-b', status: 'error' }
+    ] }]
+  }, false);
+
+  const accepted = await coordinator.complete({
+    finalizationId: 'history-failure-finalization',
+    deliveryId,
+    pendingQueue: { queueJobs: [{ id: 'done-a', status: 'done' }] }
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(await completion, false);
+  assert.deepEqual(savedQueues, []);
+});
+
+test('history failure acknowledgement requires exact terminal failure evidence', async () => {
+  const createCoordinator = loadMainFunction('createUploadFinalizationCoordinator', 'createUploadFinalizationBarrier');
+  const cases = [
+    {
+      name: 'error',
+      summary: { error: 'upload rejected', failureDetails: { code: 429, reason: 'rate-limit' }, remoteCommitUncertain: true },
+      queue: { error: 'different error', failureDetails: { reason: 'rate-limit', code: 429 }, remoteCommitUncertain: true }
+    },
+    {
+      name: 'failureDetails',
+      summary: { error: 'upload rejected', failureDetails: { code: 429, reason: 'rate-limit' }, remoteCommitUncertain: true },
+      queue: { error: 'upload rejected', failureDetails: { code: 500, reason: 'rate-limit' }, remoteCommitUncertain: true }
+    },
+    {
+      name: 'remoteCommitUncertain',
+      summary: { error: 'upload rejected', failureDetails: { code: 429, reason: 'rate-limit' }, remoteCommitUncertain: true },
+      queue: { error: 'upload rejected', failureDetails: { reason: 'rate-limit', code: 429 }, remoteCommitUncertain: false }
+    }
+  ];
+
+  for (const entry of cases) {
+    let deliveryId = null;
+    const savedQueues = [];
+    const coordinator = createCoordinator({
+      send: payload => {
+        deliveryId = payload.deliveryId;
+        return true;
+      },
+      saveQueue: async pendingQueue => savedQueues.push(pendingQueue),
+      schedule: () => null,
+      cancelSchedule: () => {},
+      createFinalizationId: () => `failure-${entry.name}`,
+      createDeliveryId: () => `delivery-${entry.name}`
+    });
+    coordinator.rendererReady();
+    const completion = coordinator.request({
+      files: [{ results: [{ jobId: 'error-job', status: 'error', ...entry.summary }] }]
+    }, false);
+
+    const accepted = await coordinator.complete({
+      finalizationId: `failure-${entry.name}`,
+      deliveryId,
+      pendingQueue: { queueJobs: [{ id: 'error-job', status: 'error', ...entry.queue }] }
+    });
+
+    assert.equal(accepted, false, entry.name);
+    assert.equal(await completion, false, entry.name);
+    assert.deepEqual(savedQueues, [], entry.name);
+  }
+});
+
+test('history failure acknowledgement accepts complete terminal failure evidence', async () => {
+  const createCoordinator = loadMainFunction('createUploadFinalizationCoordinator', 'createUploadFinalizationBarrier');
+  let deliveryId = null;
+  const savedQueues = [];
+  const coordinator = createCoordinator({
+    send: payload => {
+      deliveryId = payload.deliveryId;
+      return true;
+    },
+    saveQueue: async pendingQueue => savedQueues.push(pendingQueue),
+    schedule: () => null,
+    cancelSchedule: () => {},
+    createFinalizationId: () => 'complete-error-finalization',
+    createDeliveryId: () => 'complete-error-delivery'
+  });
+  coordinator.rendererReady();
+  const completion = coordinator.request({
+    files: [{ results: [{
+      jobId: 'error-job',
+      status: 'error',
+      error: 'upload rejected',
+      failureDetails: { code: 429, reason: 'rate-limit' },
+      remoteCommitUncertain: true
+    }] }]
+  }, false);
+  const pendingQueue = { queueJobs: [{
+    id: 'error-job',
+    status: 'error',
+    error: 'upload rejected',
+    failureDetails: { reason: 'rate-limit', code: 429 },
+    remoteCommitUncertain: true
+  }] };
+
+  const accepted = await coordinator.complete({
+    finalizationId: 'complete-error-finalization',
+    deliveryId,
+    pendingQueue
+  });
+
+  assert.equal(accepted, true);
+  assert.equal(await completion, true);
+  assert.deepEqual(savedQueues, [pendingQueue]);
+});
+
+test('history failure acknowledgement compares complete done results independent of object key order', async () => {
+  const createCoordinator = loadMainFunction('createUploadFinalizationCoordinator', 'createUploadFinalizationBarrier');
+  let deliveryId = null;
+  const savedQueues = [];
+  const coordinator = createCoordinator({
+    send: payload => {
+      deliveryId = payload.deliveryId;
+      return true;
+    },
+    saveQueue: async pendingQueue => savedQueues.push(pendingQueue),
+    schedule: () => null,
+    cancelSchedule: () => {},
+    createFinalizationId: () => 'done-result-finalization',
+    createDeliveryId: () => 'done-result-delivery'
+  });
+  coordinator.rendererReady();
+  const completion = coordinator.request({
+    files: [{ results: [{
+      jobId: 'done-job',
+      status: 'done',
+      download_url: 'https://doodstream.com/d/abc123',
+      embed_url: 'https://doodstream.com/e/abc123',
+      file_code: 'abc123'
+    }] }]
+  }, false);
+  const pendingQueue = { queueJobs: [{
+    id: 'done-job',
+    status: 'done',
+    result: {
+      file_code: 'abc123',
+      embed_url: 'https://doodstream.com/e/abc123',
+      download_url: 'https://doodstream.com/d/abc123'
+    }
+  }] };
+
+  const accepted = await coordinator.complete({
+    finalizationId: 'done-result-finalization',
+    deliveryId,
+    pendingQueue
+  });
+
+  assert.equal(accepted, true);
+  assert.equal(await completion, true);
+  assert.deepEqual(savedQueues, [pendingQueue]);
+});
+
+test('history failure acknowledgement rejects incomplete done results', async () => {
+  const createCoordinator = loadMainFunction('createUploadFinalizationCoordinator', 'createUploadFinalizationBarrier');
+  let deliveryId = null;
+  const savedQueues = [];
+  const coordinator = createCoordinator({
+    send: payload => {
+      deliveryId = payload.deliveryId;
+      return true;
+    },
+    saveQueue: async pendingQueue => savedQueues.push(pendingQueue),
+    schedule: () => null,
+    cancelSchedule: () => {},
+    createFinalizationId: () => 'incomplete-done-finalization',
+    createDeliveryId: () => 'incomplete-done-delivery'
+  });
+  coordinator.rendererReady();
+  const completion = coordinator.request({
+    files: [{ results: [{
+      jobId: 'done-job',
+      status: 'done',
+      download_url: 'https://doodstream.com/d/abc123',
+      embed_url: 'https://doodstream.com/e/abc123',
+      file_code: 'abc123'
+    }] }]
+  }, false);
+
+  const accepted = await coordinator.complete({
+    finalizationId: 'incomplete-done-finalization',
+    deliveryId,
+    pendingQueue: { queueJobs: [{
+      id: 'done-job',
+      status: 'done',
+      result: { download_url: 'https://doodstream.com/d/abc123', embed_url: null, file_code: 'abc123' }
+    }] }
+  });
+
+  assert.equal(accepted, false);
+  assert.equal(await completion, false);
+  assert.deepEqual(savedQueues, []);
+});
+
 test('history failure remains visible to the durable terminal finalization barrier', async () => {
   const createBarrier = loadMainFunction('createUploadFinalizationBarrier', 'requestUploadFinalization');
   const recoveries = [];
@@ -121,12 +337,13 @@ test('history failure remains visible to the durable terminal finalization barri
     startedAt: '2026-08-13T11:59:59.000Z',
     jobIds: ['skip-1'],
     settledAt: '2026-08-13T12:00:00.000Z',
+    historyPending: true,
     terminalJobs: [{ jobId: 'skip-1', status: 'skipped' }]
   }]);
   assert.deepEqual(errors, [['history', 'history unavailable']]);
 });
 
-test('terminal recovery clears only after history-independent queue acknowledgement', async () => {
+test('terminal recovery clears after history and queue are durable', async () => {
   const createBarrier = loadMainFunction('createUploadFinalizationBarrier', 'requestUploadFinalization');
   const recoveries = [];
   const barrier = createBarrier({
@@ -150,4 +367,36 @@ test('terminal recovery clears only after history-independent queue acknowledgem
   assert.equal(result.recoveryCleared, true);
   assert.equal(recoveries.length, 2);
   assert.equal(recoveries[1], null);
+});
+
+test('terminal recovery remains when queue is durable but history is pending', async () => {
+  const createBarrier = loadMainFunction('createUploadFinalizationBarrier', 'requestUploadFinalization');
+  const recoveries = [];
+  const barrier = createBarrier({
+    appendHistory: async () => { throw new Error('history unavailable'); },
+    saveRecovery: async value => { recoveries.push(value === null ? null : JSON.parse(JSON.stringify(value))); },
+    requestFinalization: async () => true,
+    buildTerminalSnapshots: () => [{ jobId: 'done-1', status: 'done' }],
+    now: () => '2026-08-13T12:02:00.000Z',
+    onError: () => {}
+  });
+
+  const result = await barrier.finalize({ id: 'history-pending-batch', files: [] }, {
+    id: 'recovery-history-pending',
+    startedAt: '2026-08-13T12:01:00.000Z',
+    jobIds: ['done-1']
+  });
+
+  assert.equal(result.historyPersisted, false);
+  assert.equal(result.queuePersisted, true);
+  assert.equal(result.terminalRecoveryPersisted, true);
+  assert.equal(result.recoveryCleared, false);
+  assert.deepEqual(recoveries, [{
+    id: 'recovery-history-pending',
+    startedAt: '2026-08-13T12:01:00.000Z',
+    jobIds: ['done-1'],
+    settledAt: '2026-08-13T12:02:00.000Z',
+    historyPending: true,
+    terminalJobs: [{ jobId: 'done-1', status: 'done' }]
+  }]);
 });

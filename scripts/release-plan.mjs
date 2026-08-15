@@ -1,9 +1,12 @@
 const PRODUCT_NAME = 'Multi Hoster Uploader';
 const ARTIFACT_NAME = 'Multi-Hoster-Upload';
+const NON_ENGLISH_RELEASE_PATTERN = /\b(?:das|dies(?:e|er|es)|fehler|für|hinzugefügt|jetzt|korrigiert|laufen|mit|nach|probleme|programm|sicherheit|stabil|und|verbessert|verbesserungen|werden|wieder|wurde|wurden|zuverlässig\w*|amélior\w*|après|avec|corrig\w*|et|les|mises|pour|reprennent|réseau|sécurité|téléversements)\b/iu;
+const ENGLISH_RELEASE_PATTERN = /\b(?:added|after|and|are|bridge|cancel|changes|credential|files?|faster|fixed|hardened|improved|installation|more|new|notes?|now|recovery|release|reliable|resume|security|safer|smoother|source|the|updates?|uploads?|with|without)\b/i;
 
 function requireEnglishReleaseNotes(value) {
   const notes = typeof value === 'string' ? value.trim() : '';
-  if (!/[A-Za-z]/.test(notes)) {
+  const words = notes.match(/[A-Za-z]+(?:['’-][A-Za-z]+)*/g) || [];
+  if (words.length < 2 || /(?![A-Za-z])\p{L}/u.test(notes) || NON_ENGLISH_RELEASE_PATTERN.test(notes) || !ENGLISH_RELEASE_PATTERN.test(notes)) {
     throw new Error('English release notes are required');
   }
   return notes;
@@ -12,18 +15,58 @@ function requireEnglishReleaseNotes(value) {
 export function parseReleaseArgs(args) {
   const version = Array.isArray(args) ? args[0] : '';
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) {
-    throw new Error('Usage: <version> --transport-tag <vX.Y.Z> [release notes] [--dry-run]');
+    throw new Error('Usage: <version> --transport-tag <vX.Y.Z> --notes <English release notes> [--dry-run]');
   }
 
-  const transportTagIndex = args.indexOf('--transport-tag');
-  const transportTag = transportTagIndex >= 0 ? args[transportTagIndex + 1] : '';
+  let transportTag = '';
+  let dryRun = false;
+  let notes = '';
+  const legacyNoteParts = [];
+  for (let index = 1; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--transport-tag') {
+      if (transportTag) {
+        throw new Error('Duplicate option: --transport-tag');
+      }
+      transportTag = args[++index] || '';
+      if (!/^v\d+\.\d+\.\d+$/.test(transportTag)) {
+        throw new Error('--transport-tag must match vX.Y.Z');
+      }
+      continue;
+    }
+    if (arg === '--notes') {
+      if (notes) {
+        throw new Error('Duplicate option: --notes');
+      }
+      const value = args[++index];
+      if (typeof value !== 'string' || !value.trim() || value.startsWith('-')) {
+        throw new Error('--notes requires English release notes');
+      }
+      notes = value;
+      continue;
+    }
+    if (arg === '--dry-run') {
+      if (dryRun) {
+        throw new Error('Duplicate option: --dry-run');
+      }
+      dryRun = true;
+      continue;
+    }
+    if (typeof arg !== 'string' || arg.startsWith('-')) {
+      throw new Error(`Unknown option: ${String(arg)}`);
+    }
+    if (notes) {
+      throw new Error(`Unexpected release note argument: ${arg}`);
+    }
+    legacyNoteParts.push(arg);
+  }
+
   if (!/^v\d+\.\d+\.\d+$/.test(transportTag)) {
     throw new Error('--transport-tag must match vX.Y.Z');
   }
 
-  const excludedIndexes = new Set([0, transportTagIndex, transportTagIndex + 1]);
-  const notes = requireEnglishReleaseNotes(args.filter((arg, index) => !excludedIndexes.has(index) && arg !== '--dry-run').join(' '));
-  return { version, transportTag, notes, dryRun: args.includes('--dry-run') };
+  const releaseNotes = requireEnglishReleaseNotes(notes || legacyNoteParts.join(' '));
+  return { version, transportTag, notes: releaseNotes, dryRun };
 }
 
 export function createReleasePlan(options) {
@@ -53,6 +96,10 @@ export function createReleasePlan(options) {
 
 export function resolveExistingReleaseId(plan, release) {
   const existingTitle = typeof release?.name === 'string' ? release.name : '';
+  const existingTag = typeof release?.tag_name === 'string' ? release.tag_name : '';
+  if (existingTag !== plan.tag) {
+    throw new Error(`Refusing recovery for ${plan.tag}: existing release tag "${existingTag}" does not match "${plan.tag}"`);
+  }
   if (existingTitle !== plan.releaseTitle) {
     throw new Error(`Refusing recovery for ${plan.tag}: existing release title "${existingTitle}" does not match "${plan.releaseTitle}"`);
   }

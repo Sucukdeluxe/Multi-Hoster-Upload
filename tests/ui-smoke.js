@@ -26,13 +26,15 @@ if (visualScreenshotDir) fs.mkdirSync(visualScreenshotDir, { recursive: true });
 // Create a temp script that the real Electron app will execute via --eval
 const testScript = `
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const path = require('path');
+const { installHiddenElectronWindowHarness } = require(path.join(process.cwd(), 'tests', 'support', 'hidden-electron-window'));
+const hiddenWindowHarness = installHiddenElectronWindowHarness({ BrowserWindow });
 const isolatedUserDataPath = app.getPath('userData');
 const setAppPath = app.setPath.bind(app);
 app.setPath = (name, value) => setAppPath(name, name === 'userData' ? isolatedUserDataPath : value);
 app.setVersion(${JSON.stringify(productVersion)});
 const fs = require('fs');
 const net = require('net');
-const path = require('path');
 const ConfigStore = require(path.join(process.cwd(), 'lib', 'config-store'));
 const RemoteServer = require(path.join(process.cwd(), 'lib', 'remote-server'));
 const { listenOnLoopback, installLoopbackRemoteServerGuard } = require(path.join(process.cwd(), 'tests', 'support', 'ui-network-safety'));
@@ -81,10 +83,10 @@ ipcMain.handle = (channel, listener) => {
         if (!initialConfigReadDelayed) {
           initialConfigReadDelayed = true;
           const deadline = Date.now() + 1500;
-          let window = BrowserWindow.getAllWindows()[0];
+          let window = hiddenWindowHarness.getWindows()[0];
           while (window && !window.isVisible() && Date.now() < deadline) {
             await new Promise(resolve => setTimeout(resolve, 25));
-            window = BrowserWindow.getAllWindows()[0];
+            window = hiddenWindowHarness.getWindows()[0];
           }
           startupLanguagePendingSnapshot = window
             ? {
@@ -157,12 +159,14 @@ async function waitUntil(read, timeoutMs = 3000) {
 
 // Wait for app to be ready, then wait for the real window to load
 setTimeout(async () => {
-  const windows = BrowserWindow.getAllWindows();
+  const windows = hiddenWindowHarness.getWindows();
   if (windows.length === 0) { console.log('ERROR: No windows found'); process.exit(1); }
   const win = windows[0];
+  win.setIgnoreMouseEvents(true);
   if (win.isFullScreen()) win.setFullScreen(false);
   if (win.isMaximized()) win.unmaximize();
   const wc = win.webContents;
+  if (typeof wc.setFrameRate === 'function') wc.setFrameRate(60);
   if (!wc.debugger.isAttached()) wc.debugger.attach('1.3');
   await wc.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   const setWindowBounds = async bounds => {
@@ -213,6 +217,7 @@ setTimeout(async () => {
   }
 
   try {
+    check('Every UI smoke window stays offscreen and never takes focus', hiddenWindowHarness.areNativeSurfacesSuppressed(hiddenWindowHarness.getWindows()));
     const startupUpdateState = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [_knownUpdateInfo?.remoteVersion, button?.hidden, getComputedStyle(button).display, document.getElementById("updateBanner")?.style.display].join("|"); })()');
     check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
@@ -803,7 +808,7 @@ setTimeout(async () => {
     const removeAllDanger = await wc.executeJavaScript('(() => { const item = document.querySelector("#contextMenu [data-action=delete-all]"); const channels = getComputedStyle(item).color.match(/[0-9.]+/g)?.map(Number) || []; return Boolean(item && channels.length >= 3 && channels[0] > channels[1] * 1.2 && channels[0] > channels[2] * 1.15); })()');
     check('Remove all is visually marked as a destructive queue action', removeAllDanger === true);
 
-    await wc.executeJavaScript('(() => { queuePersistThrottle.cancel(); queueJobs = [{ id: "ui-cleanup-survivor", file: "C:/ui/cleanup-remove-selected.bin", fileName: "cleanup-remove-selected.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-cleanup-remove-selected", sourceCleanupRequiredHosters: ["doodstream.com", "voe.sx"], sourceCleanupConfirmedHosters: ["doodstream.com"] }, { id: "ui-cleanup-remove-preview", file: "C:/ui/cleanup-remove-selected.bin", fileName: "cleanup-remove-selected.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-cleanup-remove-selected", sourceCleanupRequiredHosters: ["doodstream.com", "voe.sx"], sourceCleanupConfirmedHosters: ["doodstream.com"] }]; selectedJobIds.clear(); selectedJobIds.add("ui-cleanup-remove-preview"); rebuildJobIndex(); renderQueueTable(); window.__uiCleanupPreviewRemoval = handleContextAction("delete-selected"); return true; })()');
+    await wc.executeJavaScript('(() => { queuePersistThrottle.cancel(); queueJobs = [{ id: "ui-cleanup-survivor", file: "C:/ui/cleanup-remove-selected.bin", fileName: "cleanup-remove-selected.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-cleanup-remove-selected", sourceCleanupRequiredHosters: ["doodstream.com", "voe.sx"], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }, { id: "ui-cleanup-remove-preview", file: "C:/ui/cleanup-remove-selected.bin", fileName: "cleanup-remove-selected.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-cleanup-remove-selected", sourceCleanupRequiredHosters: ["doodstream.com", "voe.sx"], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }]; selectedJobIds.clear(); selectedJobIds.add("ui-cleanup-remove-preview"); rebuildJobIndex(); renderQueueTable(); window.__uiCleanupPreviewRemoval = handleContextAction("delete-selected"); return true; })()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
     await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
     const previewCleanupRemoval = await wc.executeJavaScript('window.__uiCleanupPreviewRemoval.then(() => { delete window.__uiCleanupPreviewRemoval; queuePersistThrottle.cancel(); const survivor = queueJobs[0]; const result = { length: queueJobs.length, id: survivor?.id, required: survivor?.sourceCleanupRequiredHosters || [], confirmed: survivor?.sourceCleanupConfirmedHosters || [], finalizing: sourceCleanupFinalizationPending }; queueJobs = []; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); return result; })');
@@ -871,13 +876,13 @@ setTimeout(async () => {
     restoreInitialIpcHandler('cancel-upload');
     restoreInitialIpcHandler('cancel-selected-jobs');
 
-    await wc.executeJavaScript('(() => { uploading = false; queuePersistThrottle.cancel(); const required = ["doodstream.com", "voe.sx", "byse.sx"]; window.__uiDeleteAllCleanupJobs = [{ id: "ui-delete-all-cleanup-done", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }, { id: "ui-delete-all-cleanup-voe", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }, { id: "ui-delete-all-cleanup-byse", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "byse.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }]; queueJobs = window.__uiDeleteAllCleanupJobs; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteAllCleanupPromise = handleContextAction("delete-all"); return true; })()');
+    await wc.executeJavaScript('(() => { uploading = false; queuePersistThrottle.cancel(); const required = ["doodstream.com", "voe.sx", "byse.sx"]; window.__uiDeleteAllCleanupJobs = [{ id: "ui-delete-all-cleanup-done", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }, { id: "ui-delete-all-cleanup-voe", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }, { id: "ui-delete-all-cleanup-byse", file: "C:/ui/delete-all-cleanup.bin", fileName: "delete-all-cleanup.bin", hoster: "byse.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-all-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }]; queueJobs = window.__uiDeleteAllCleanupJobs; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteAllCleanupPromise = handleContextAction("delete-all"); return true; })()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
     await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
     const deleteAllCleanupState = await wc.executeJavaScript('window.__uiDeleteAllCleanupPromise.then(() => { delete window.__uiDeleteAllCleanupPromise; queuePersistThrottle.cancel(); const result = { queueLength: queueJobs.length, required: window.__uiDeleteAllCleanupJobs.map(job => job.sourceCleanupRequiredHosters || []), confirmed: window.__uiDeleteAllCleanupJobs.map(job => job.sourceCleanupConfirmedHosters || []) }; delete window.__uiDeleteAllCleanupJobs; return result; })');
     check('Remove all drops only never-started cleanup destinations without authorizing deletion', deleteAllCleanupState.queueLength === 0 && deleteAllCleanupState.required.every(hosters => hosters.join('|') === 'doodstream.com') && deleteAllCleanupState.confirmed.every(hosters => hosters.join('|') === 'doodstream.com'));
 
-    await wc.executeJavaScript('(() => { const required = ["doodstream.com", "voe.sx", "byse.sx"]; queueJobs = [{ id: "ui-delete-hoster-cleanup-done", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }, { id: "ui-delete-hoster-cleanup-voe", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }, { id: "ui-delete-hoster-cleanup-byse", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "byse.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"] }]; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteHosterCleanupPromise = handleContextAction("delete-hoster:voe.sx"); return true; })()');
+    await wc.executeJavaScript('(() => { const required = ["doodstream.com", "voe.sx", "byse.sx"]; queueJobs = [{ id: "ui-delete-hoster-cleanup-done", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "doodstream.com", status: "done", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }, { id: "ui-delete-hoster-cleanup-voe", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "voe.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }, { id: "ui-delete-hoster-cleanup-byse", file: "C:/ui/delete-hoster-cleanup.bin", fileName: "delete-hoster-cleanup.bin", hoster: "byse.sx", status: "preview", bytesTotal: 100, sourceCleanupMetadataVersion: 2, sourceCleanupToken: "ui-delete-hoster-cleanup-token", sourceCleanupRequiredHosters: [...required], sourceCleanupConfirmedHosters: ["doodstream.com"], sourceCleanupStartedHosters: ["doodstream.com"] }]; selectedJobIds.clear(); rebuildJobIndex(); renderQueueTable(); window.__uiDeleteHosterCleanupPromise = handleContextAction("delete-hoster:voe.sx"); return true; })()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
     await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
     const deleteHosterCleanupState = await wc.executeJavaScript('window.__uiDeleteHosterCleanupPromise.then(() => { delete window.__uiDeleteHosterCleanupPromise; queuePersistThrottle.cancel(); const result = { ids: queueJobs.map(job => job.id), required: queueJobs.map(job => job.sourceCleanupRequiredHosters || []), confirmed: queueJobs.map(job => job.sourceCleanupConfirmedHosters || []) }; queueJobs = []; rebuildJobIndex(); return result; })');
@@ -1499,6 +1504,7 @@ setTimeout(async () => {
       await new Promise(r => setTimeout(r, 50));
     }
     check('Save shows Gespeichert!', feedback === 'Gespeichert!');
+    check('Always-on-top settings never affect the native UI smoke window', hiddenWindowHarness.isAlwaysOnTopRequested(win) === true && hiddenWindowHarness.isNativeSurfaceSuppressed(win));
 
     const originalShowSaveDialog = dialog.showSaveDialog;
     const originalShowOpenDialog = dialog.showOpenDialog;
@@ -2045,11 +2051,186 @@ setTimeout(async () => {
     const sourceCleanupBeforeJobs = sourceCleanupRollback.before?.queueJobs || [];
     const sourceCleanupAfterJobs = sourceCleanupRollback.after?.queueJobs || [];
     const sourceCleanupPromotedJobs = sourceCleanupFinalizationPayload?.pendingQueue?.queueJobs || [];
-    const sourceCleanupRollbackOk = sourceCleanupRollback.available === true && sourceCleanupRollback.result === false && sourceCleanupFinalizationPayload?.deliveryId === 'ui-cleanup-delivery' && sourceCleanupBeforeJobs.length === 2 && sourceCleanupBeforeJobs.every(job => !Object.prototype.hasOwnProperty.call(job, 'sourceCleanupProvisionalHosters') && !Object.prototype.hasOwnProperty.call(job, 'sourceCleanupCompletedHosters') && (job.sourceCleanupConfirmedHosters || []).length === 0) && sourceCleanupPromotedJobs.length === 2 && sourceCleanupPromotedJobs.every(job => (job.sourceCleanupConfirmedHosters || []).join('|') === 'voe.sx') && sourceCleanupAfterJobs.length === 2 && sourceCleanupAfterJobs.every(job => (job.sourceCleanupConfirmedHosters || []).length === 0);
+    const sourceCleanupRollbackOk = sourceCleanupRollback.available === true
+      && sourceCleanupRollback.result === false
+      && sourceCleanupFinalizationPayload?.deliveryId === 'ui-cleanup-delivery'
+      && sourceCleanupBeforeJobs.length === 1
+      && sourceCleanupBeforeJobs[0]?.id === 'ui-cleanup-byse'
+      && !Object.prototype.hasOwnProperty.call(sourceCleanupBeforeJobs[0], 'sourceCleanupProvisionalHosters')
+      && !Object.prototype.hasOwnProperty.call(sourceCleanupBeforeJobs[0], 'sourceCleanupCompletedHosters')
+      && (sourceCleanupBeforeJobs[0]?.sourceCleanupRequiredHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupBeforeJobs[0]?.sourceCleanupStartedHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupBeforeJobs[0]?.sourceCleanupConfirmedHosters || []).length === 0
+      && sourceCleanupPromotedJobs.length === 1
+      && sourceCleanupPromotedJobs[0]?.id === 'ui-cleanup-byse'
+      && (sourceCleanupPromotedJobs[0]?.sourceCleanupRequiredHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupPromotedJobs[0]?.sourceCleanupStartedHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupPromotedJobs[0]?.sourceCleanupConfirmedHosters || []).join('|') === 'voe.sx'
+      && sourceCleanupAfterJobs.length === 1
+      && sourceCleanupAfterJobs[0]?.id === 'ui-cleanup-byse'
+      && (sourceCleanupAfterJobs[0]?.sourceCleanupRequiredHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupAfterJobs[0]?.sourceCleanupStartedHosters || []).join('|') === 'voe.sx|byse.sx'
+      && (sourceCleanupAfterJobs[0]?.sourceCleanupConfirmedHosters || []).length === 0;
     check('Final queue persistence promotes only inside the handshake and rolls back failed saves', sourceCleanupRollbackOk);
     const terminalRecoveryState = await wc.executeJavaScript('(() => { selectedFiles = []; queueJobs = [{ id: "ui-terminal-done", file: "C:/ui/terminal-done.bin", fileName: "terminal-done.bin", hoster: "voe.sx", status: "done", bytesTotal: 41, error: null, result: { download_url: "https://example.invalid/terminal-done", embed_url: "https://example.invalid/embed-terminal-done", file_code: "terminal-code" } }, { id: "ui-terminal-skipped", file: "C:/ui/terminal-skipped.bin", fileName: "terminal-skipped.bin", hoster: "byse.sx", status: "skipped", bytesTotal: 42, error: "Size limit", result: null }]; rebuildJobIndex(); return { normal: buildPersistedQueueState(), recovery: buildPersistedQueueState({ historyPersisted: false }) }; })()');
     const terminalRecoveryJobs = terminalRecoveryState.recovery?.queueJobs || [];
     check('History failure keeps terminal queue results and links restart-recoverable', terminalRecoveryState.normal === null && terminalRecoveryState.recovery !== null && terminalRecoveryState.recovery.selectedFiles.length === 2 && terminalRecoveryJobs.length === 2 && terminalRecoveryJobs[0].id === 'ui-terminal-done' && terminalRecoveryJobs[0].status === 'done' && terminalRecoveryJobs[0].result?.download_url === 'https://example.invalid/terminal-done' && terminalRecoveryJobs[0].result?.embed_url === 'https://example.invalid/embed-terminal-done' && terminalRecoveryJobs[0].result?.file_code === 'terminal-code' && terminalRecoveryJobs[1].status === 'skipped' && terminalRecoveryJobs[1].error === 'Size limit');
+    const legacyCleanupRoundTrip = await wc.executeJavaScript(\`(() => {
+      const originalGlobalSettings = structuredClone(config.globalSettings || {});
+      selectedFiles = [];
+      queueJobs = [{ id: 'ui-legacy-cleanup-done', file: 'C:/ui/legacy-cleanup.bin', fileName: 'legacy-cleanup.bin', hoster: 'doodstream.com', status: 'done', bytesTotal: 20, sourceCleanupMetadataVersion: 2, sourceCleanupToken: 'ui-legacy-cleanup-token', sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'], sourceCleanupConfirmedHosters: ['doodstream.com'] }, { id: 'ui-legacy-cleanup-preview', file: 'C:/ui/legacy-cleanup.bin', fileName: 'legacy-cleanup.bin', hoster: 'voe.sx', status: 'preview', bytesTotal: 20, sourceCleanupMetadataVersion: 2, sourceCleanupToken: 'ui-legacy-cleanup-token', sourceCleanupRequiredHosters: ['doodstream.com', 'voe.sx'], sourceCleanupConfirmedHosters: ['doodstream.com'] }];
+      rebuildJobIndex();
+      const snapshot = JSON.parse(JSON.stringify(buildPersistedQueueState()));
+      const persistedMissing = snapshot.queueJobs.every(job => !Object.prototype.hasOwnProperty.call(job, 'sourceCleanupStartedHosters'));
+      config.globalSettings = { ...originalGlobalSettings, resumeQueueOnLaunch: true, pendingQueue: snapshot, uploadRecovery: null };
+      queueJobs = [];
+      rebuildJobIndex();
+      restoreQueueStateFromConfig();
+      const restoredMissing = queueJobs.every(job => !Array.isArray(job.sourceCleanupStartedHosters));
+      const touched = window.SourceCleanupPolicy.removeRequirement(queueJobs, queueJobs.find(job => job.id === 'ui-legacy-cleanup-preview'), 'win32');
+      const requiredPreserved = queueJobs.every(job => (job.sourceCleanupRequiredHosters || []).join('|') === 'doodstream.com|voe.sx');
+      config.globalSettings = originalGlobalSettings;
+      selectedFiles = [];
+      queueJobs = [];
+      rebuildJobIndex();
+      return { persistedMissing, restoredMissing, touched: touched.length, requiredPreserved };
+    })()\`);
+    check('Legacy cleanup metadata stays fail-closed through queue persistence and restart', legacyCleanupRoundTrip.persistedMissing === true && legacyCleanupRoundTrip.restoredMissing === true && legacyCleanupRoundTrip.touched === 0 && legacyCleanupRoundTrip.requiredPreserved === true);
+    const uncertainRetryState = await wc.executeJavaScript(\`(async () => {
+      const originalGlobalSettings = structuredClone(config.globalSettings || {});
+      const originalLanguage = document.documentElement.lang;
+      config.globalSettings = { ...originalGlobalSettings, uploadRecovery: null, resumeQueueOnLaunch: true };
+      setUiLanguage('en');
+      selectedFiles = [];
+      queueJobs = [{ id: 'ui-uncertain-retry', file: 'C:/ui/uncertain.bin', fileName: 'uncertain.bin', hoster: 'voe.sx', status: 'error', error: 'Connection lost', remoteCommitUncertain: true, bytesTotal: 77 }];
+      rebuildJobIndex();
+      const automaticCount = _collectAutoRetryableJobs().length;
+      const snapshot = buildPersistedQueueState();
+      config.globalSettings.pendingQueue = structuredClone(snapshot);
+      queueJobs = [];
+      rebuildJobIndex();
+      restoreQueueStateFromConfig();
+      const restored = queueJobs[0]?.remoteCommitUncertain === true;
+      uploadSidebarFilter = 'all';
+      queueSearchQuery = '';
+      queueHosterFilter = '';
+      queueStatusFilter = '';
+      renderQueueTable();
+      selectedJobIds.clear();
+      selectedJobIds.add('ui-uncertain-retry');
+      const retryPromise = retrySelectedJobs();
+      await Promise.resolve();
+      const dialogTitle = document.getElementById('appAlertTitle')?.textContent.trim();
+      const dialogDanger = document.getElementById('appAlertConfirmBtn')?.classList.contains('btn-danger') === true;
+      document.getElementById('appAlertCancelBtn')?.click();
+      await retryPromise;
+      const statusAfterCancel = queueJobs[0]?.status;
+      const uncertainAfterCancel = queueJobs[0]?.remoteCommitUncertain === true;
+      config.globalSettings = originalGlobalSettings;
+      setUiLanguage(originalLanguage);
+      selectedJobIds.clear();
+      selectedFiles = [];
+      queueJobs = [];
+      rebuildJobIndex();
+      return { automaticCount, restored, dialogTitle, dialogDanger, statusAfterCancel, uncertainAfterCancel };
+    })()\`);
+    check('Uncertain remote commits survive restart, never auto-retry, and require explicit dangerous confirmation', uncertainRetryState.automaticCount === 0 && uncertainRetryState.restored === true && uncertainRetryState.dialogTitle === 'The upload status could not be confirmed' && uncertainRetryState.dialogDanger === true && uncertainRetryState.statusAfterCancel === 'error' && uncertainRetryState.uncertainAfterCancel === true);
+    const lateTerminalProgress = await wc.executeJavaScript(\`(() => {
+      queueJobs = [{ id: 'ui-late-terminal', uploadId: 'ui-late-terminal-upload', file: 'C:/ui/late-terminal.bin', fileName: 'late-terminal.bin', hoster: 'voe.sx', status: 'error', error: 'Remote result uncertain', failureDetails: { phase: 'response' }, remoteCommitUncertain: true, bytesUploaded: 50, bytesTotal: 100, progress: .5 }];
+      rebuildJobIndex();
+      _handleProgressImpl({ jobId: 'ui-late-terminal', uploadId: 'ui-late-terminal-upload', fileName: 'late-terminal.bin', hoster: 'voe.sx', status: 'uploading', error: null, failureDetails: null, remoteCommitUncertain: false, bytesUploaded: 90, bytesTotal: 100, progress: .9 });
+      const job = queueJobs[0];
+      return { status: job.status, error: job.error, phase: job.failureDetails?.phase, uncertain: job.remoteCommitUncertain, bytesUploaded: job.bytesUploaded, progress: job.progress };
+    })()\`);
+    check('Late progress cannot overwrite a terminal uncertain upload result', lateTerminalProgress.status === 'error' && lateTerminalProgress.error === 'Remote result uncertain' && lateTerminalProgress.phase === 'response' && lateTerminalProgress.uncertain === true && lateTerminalProgress.bytesUploaded === 50 && lateTerminalProgress.progress === .5);
+    let uncertainStartCalls = 0;
+    ipcMain.removeHandler('start-upload');
+    ipcMain.handle('start-upload', () => {
+      uncertainStartCalls++;
+      return uncertainStartCalls === 1
+        ? { error: 'Injected start rejection' }
+        : { started: true, taskCount: 1, skippedJobs: [] };
+    });
+    const rejectedUncertainStartPromise = wc.executeJavaScript(\`(() => {
+      uploading = false;
+      selectedUploadHosters = ['voe.sx'];
+      selectedFiles = [];
+      queueJobs = [{ id: 'ui-normal-uncertain-start', file: 'C:/ui/normal-uncertain.bin', fileName: 'normal-uncertain.bin', hoster: 'voe.sx', status: 'error', error: 'Remote result uncertain', remoteCommitUncertain: true, bytesTotal: 12 }];
+      rebuildJobIndex();
+      return startUpload().then(() => ({ status: queueJobs[0].status, uncertain: queueJobs[0].remoteCommitUncertain === true }));
+    })()\`);
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertCancelBtn")?.hidden === false'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertCancelBtn")?.hidden === true && document.getElementById("appAlertModal")?.style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click()');
+    const rejectedUncertainStart = await rejectedUncertainStartPromise;
+    const acceptedUncertainStartPromise = wc.executeJavaScript('startUpload().then(() => { uploading = false; return { status: queueJobs[0].status, uncertain: queueJobs[0].remoteCommitUncertain === true }; })');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertCancelBtn")?.hidden === false'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn")?.click()');
+    const acceptedUncertainStart = await acceptedUncertainStartPromise;
+    const confirmedUncertainRetry = await wc.executeJavaScript('(() => { _handleProgressImpl({ jobId: "ui-normal-uncertain-start", uploadId: "ui-normal-uncertain-start-upload", fileName: "normal-uncertain.bin", hoster: "voe.sx", status: "done", result: { download_url: "https://voe.sx/e/confirmed", file_code: "confirmed" }, bytesUploaded: 12, bytesTotal: 12, progress: 1 }); return queueJobs[0]?.remoteCommitUncertain === true; })()');
+    check('Normal start preserves the duplicate warning until a confirmed terminal retry result', uncertainStartCalls === 2 && rejectedUncertainStart.uncertain === true && acceptedUncertainStart.uncertain === true && confirmedUncertainRetry === false);
+    let bucketRetryPayload = null;
+    ipcMain.removeHandler('start-upload');
+    ipcMain.handle('start-upload', (_event, payload) => {
+      bucketRetryPayload = payload;
+      return { started: true, taskCount: payload.jobs.length, skippedJobs: [] };
+    });
+    const bucketRetryState = await wc.executeJavaScript(\`(async () => {
+      uploading = false;
+      queueJobs = [{ id: 'ui-bucket-first', file: 'C:/ui/a/shared.bin', fileName: 'shared.bin', hoster: 'voe.sx', status: 'error', error: 'Network failed', bytesTotal: 13 }, { id: 'ui-bucket-second', file: 'C:/ui/b/shared.bin', fileName: 'shared.bin', hoster: 'voe.sx', status: 'error', error: 'Network failed', bytesTotal: 14 }, { id: 'ui-bucket-unrelated', file: 'C:/ui/c/other.bin', fileName: 'other.bin', hoster: 'voe.sx', status: 'error', error: 'Network failed', bytesTotal: 15 }];
+      rebuildJobIndex();
+      const started = await _retryFailedFromBuckets({ network: [{ jobId: 'ui-bucket-first', fileName: 'shared.bin', hoster: 'voe.sx' }, { jobId: 'ui-bucket-second', fileName: 'shared.bin', hoster: 'voe.sx' }] }, true);
+      uploading = false;
+      return { started, statuses: queueJobs.map(job => [job.id, job.status]) };
+    })()\`);
+    const bucketRetryIds = bucketRetryPayload?.jobs?.map(job => job.id).sort() || [];
+    check('Batch retry uses exact job IDs and starts only the requested duplicate-name jobs', bucketRetryState.started === true && bucketRetryIds.join('|') === 'ui-bucket-first|ui-bucket-second' && bucketRetryState.statuses.find(entry => entry[0] === 'ui-bucket-unrelated')?.[1] === 'error');
+    restoreInitialIpcHandler('start-upload');
+    const failedHistoryRetention = await wc.executeJavaScript(\`(() => {
+      const originalGlobalSettings = structuredClone(config.globalSettings || {});
+      const summaryFor = jobs => ({ files: jobs.map(job => ({ name: job.fileName, size: job.bytesTotal, results: [{ jobId: job.id, hoster: job.hoster, status: 'done', download_url: 'https://example.invalid/' + job.id }] })) });
+      config.globalSettings = { ...originalGlobalSettings, removeFromQueueOnDone: true };
+      queueJobs = [{ id: 'ui-history-auto-remove', file: 'C:/ui/history-auto-remove.bin', fileName: 'history-auto-remove.bin', hoster: 'voe.sx', status: 'preview', bytesTotal: 91 }];
+      selectedFiles = [];
+      rebuildJobIndex();
+      handleBatchDone(summaryFor(queueJobs), { deferPersistence: true, historyPersisted: false });
+      const autoRemoveSnapshot = buildPersistedQueueState();
+      const autoRemoveProtected = queueJobs.length === 1 && queueJobs[0].historyPending === true && autoRemoveSnapshot?.queueJobs?.[0]?.historyPending === true && autoRemoveSnapshot.queueJobs[0].result?.download_url === 'https://example.invalid/ui-history-auto-remove';
+      config.globalSettings.pendingQueue = structuredClone(autoRemoveSnapshot);
+      queueJobs = [];
+      rebuildJobIndex();
+      restoreQueueStateFromConfig();
+      const restartProtected = queueJobs.length === 1 && queueJobs[0].historyPending === true && queueJobs[0].result?.download_url === 'https://example.invalid/ui-history-auto-remove';
+      config.globalSettings = { ...originalGlobalSettings, removeFromQueueOnDone: false };
+      queueJobs = Array.from({ length: 501 }, (_, index) => ({ id: 'ui-history-large-' + index, file: 'C:/ui/history-large-' + index + '.bin', fileName: 'history-large-' + index + '.bin', hoster: 'byse.sx', status: 'preview', bytesTotal: index + 1 }));
+      selectedFiles = [];
+      rebuildJobIndex();
+      handleBatchDone(summaryFor(queueJobs), { deferPersistence: true, historyPersisted: false });
+      const largeSnapshot = buildPersistedQueueState();
+      const largeProtected = queueJobs.length === 501 && queueJobs.every(job => job.historyPending === true) && largeSnapshot?.queueJobs?.length === 501 && largeSnapshot.queueJobs[0].id === 'ui-history-large-0';
+      const protectedJob = queueJobs[0];
+      const originalPersistSoon = persistQueueStateSoon;
+      const originalClearSoon = clearPersistedQueueStateSoon;
+      let persistCalls = 0;
+      let clearCalls = 0;
+      persistQueueStateSoon = () => { persistCalls++; };
+      clearPersistedQueueStateSoon = () => { clearCalls++; };
+      const laterJob = { id: 'ui-history-later-batch', file: 'C:/ui/history-later.bin', fileName: 'history-later.bin', hoster: 'voe.sx', status: 'preview', bytesTotal: 92 };
+      queueJobs.push(laterJob);
+      rebuildJobIndex();
+      handleBatchDone(summaryFor([laterJob]), { historyPersisted: true });
+      persistQueueStateSoon = originalPersistSoon;
+      clearPersistedQueueStateSoon = originalClearSoon;
+      const laterBatchProtected = queueJobs.includes(protectedJob) && protectedJob.historyPending === true && persistCalls === 1 && clearCalls === 0;
+      config.globalSettings = originalGlobalSettings;
+      selectedFiles = [];
+      queueJobs = [];
+      rebuildJobIndex();
+      renderQueueTable();
+      return { autoRemoveProtected, restartProtected, largeProtected, laterBatchProtected };
+    })()\`);
+    check('Failed history persistence protects terminal results from auto-remove, restart loss, later batches, and 500-row pruning', failedHistoryRetention.autoRemoveProtected === true && failedHistoryRetention.restartProtected === true && failedHistoryRetention.largeProtected === true && failedHistoryRetention.laterBatchProtected === true);
     const finalSummaryCorrelation = await wc.executeJavaScript('(() => { queueJobs = [{ id: "summary-exact-a", file: "C:/ui/shared-a.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 10 }, { id: "summary-exact-b", file: "C:/ui/shared-b.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 11 }, { id: "summary-ambiguous", file: "C:/ui/shared-c.bin", fileName: "shared.bin", hoster: "voe.sx", status: "preview", bytesTotal: 12 }, { id: "summary-legacy-unique", file: "C:/ui/unique.bin", fileName: "unique.bin", hoster: "byse.sx", status: "preview", bytesTotal: 13 }]; rebuildJobIndex(); applySummaryResults({ files: [{ name: "shared.bin", size: 10, results: [{ jobId: "summary-exact-a", hoster: "voe.sx", status: "done", download_url: "https://example.invalid/exact-a" }, { jobId: "missing-summary-id", hoster: "voe.sx", status: "error", error: "Must not use legacy fallback" }, { hoster: "voe.sx", status: "error", error: "Ambiguous legacy result" }] }, { name: "different-name.bin", size: 11, results: [{ jobId: "summary-exact-b", hoster: "different.invalid", status: "done", download_url: "https://example.invalid/exact-b" }] }, { name: "unique.bin", size: 13, results: [{ hoster: "byse.sx", status: "done", download_url: "https://example.invalid/legacy-unique" }] }] }); const result = queueJobs.map(job => ({ id: job.id, status: job.status, error: job.error || null, link: job.result?.download_url || null })); queueJobs = []; selectedFiles = []; rebuildJobIndex(); renderQueueTable(); return result; })()');
     check('Final summary correlates by exact jobId and uses legacy identity only for one unique candidate', finalSummaryCorrelation[0].status === 'done' && finalSummaryCorrelation[0].link === 'https://example.invalid/exact-a' && finalSummaryCorrelation[1].status === 'done' && finalSummaryCorrelation[1].link === 'https://example.invalid/exact-b' && finalSummaryCorrelation[2].status === 'preview' && finalSummaryCorrelation[2].error === null && finalSummaryCorrelation[3].status === 'done' && finalSummaryCorrelation[3].link === 'https://example.invalid/legacy-unique');
     const completionIdentityRaces = await wc.executeJavaScript(\`(() => {
@@ -3012,6 +3193,9 @@ setTimeout(async () => {
         return {
           headerVisible: Boolean(headerRect && headerRect.width > 0 && headerRect.left >= containerRect.left - 1 && headerRect.right <= containerRect.right + 1),
           cellVisible: Boolean(cellRect && cellRect.width > 0 && cellRect.left >= containerRect.left - 1 && cellRect.right <= containerRect.right + 1),
+          containerRect: { left: containerRect.left, right: containerRect.right, width: containerRect.width },
+          headerRect: headerRect ? { left: headerRect.left, right: headerRect.right, width: headerRect.width } : null,
+          cellRect: cellRect ? { left: cellRect.left, right: cellRect.right, width: cellRect.width } : null,
           headerHeight: headerRect?.height,
           rowHeight: row?.getBoundingClientRect().height,
           sidebarIndicatorAligned: Boolean(sidebarIndicatorRect && activeSidebarRect && Math.abs(sidebarIndicatorRect.top - activeSidebarRect.top) <= 1 && Math.abs(sidebarIndicatorRect.width - activeSidebarRect.width) <= 1 && Math.abs(sidebarIndicatorRect.height - activeSidebarRect.height) <= 1)
@@ -3054,6 +3238,7 @@ setTimeout(async () => {
     })()\`);
     await setWindowBounds(originalBounds);
     await wc.executeJavaScript('queueJobs = []; rebuildJobIndex(); updateUploadView(); renderQueueTable(); updateStatusBar();');
+    if (!(queueProgressVisibility.minimum.headerVisible && queueProgressVisibility.minimum.cellVisible)) console.log('Queue progress visibility: ' + JSON.stringify(queueProgressVisibility));
     check('Upload progress stays visible at the standard window size', queueProgressVisibility.standard.headerVisible && queueProgressVisibility.standard.cellVisible);
     check('Upload progress stays visible at the minimum window size', queueProgressVisibility.minimum.headerVisible && queueProgressVisibility.minimum.cellVisible);
     check('Responsive queue keeps a compact table header', queueProgressVisibility.standard.headerHeight <= 34 && queueProgressVisibility.minimum.headerHeight <= 34);
@@ -3232,7 +3417,7 @@ setTimeout(async () => {
 
     restoreInitialIpcHandler('save-global-settings');
     restoreInitialIpcHandler('save-pending-queue');
-    const keepaliveWindow = new BrowserWindow({ show: false });
+    const keepaliveWindow = new globalThis.__mhuBrowserWindowConstructor({ show: false });
     realAppQuit = app.quit.bind(app);
     app.relaunch = () => { relaunchCalls++; };
     app.quit = () => {
@@ -3330,6 +3515,7 @@ setTimeout(async () => {
     failed++;
   }
 
+  check('Every UI smoke window remains offscreen after every interaction', hiddenWindowHarness.areNativeSurfacesSuppressed(hiddenWindowHarness.getWindows()));
   const printResults = () => {
     console.log('\\n=== Results ===');
     results.forEach(r => console.log(r));
@@ -3360,7 +3546,7 @@ try {
   const result = execFileSync(
     electronPath,
     [`--user-data-dir=${userDataPath}`, '--require', injectPath, mainPath],
-    { cwd: path.join(__dirname, '..'), timeout: 120000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
+    { cwd: path.join(__dirname, '..'), timeout: 180000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
   );
   console.log(result);
   const isolatedConfigPath = path.join(userDataPath, 'electron-config.json');

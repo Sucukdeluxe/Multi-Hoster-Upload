@@ -24,7 +24,7 @@ test('terminal recovery snapshots retain exact job outcomes and canonical links'
       name: 'episode.mkv',
       results: [
         { jobId: 'done-job', hoster: 'doodstream.com', status: 'done', download_url: 'https://doodstream.com/d/abc123', file_code: 'abc123' },
-        { jobId: 'error-job', hoster: 'voe.sx', status: 'error', error: 'rejected', failureDetails: { kind: 'hoster' } },
+        { jobId: 'error-job', hoster: 'voe.sx', status: 'error', error: 'rejected', failureDetails: { kind: 'hoster' }, remoteCommitUncertain: true },
         { hoster: 'byse.sx', status: 'done', download_url: 'https://byse.sx/d/no-id' }
       ]
     }]
@@ -43,6 +43,7 @@ test('terminal recovery snapshots retain exact job outcomes and canonical links'
       status: 'error',
       error: 'rejected',
       failureDetails: { kind: 'hoster' },
+      remoteCommitUncertain: true,
       result: null
     }
   ]);
@@ -52,12 +53,20 @@ test('recovery markers affect only their exact job IDs and never restart termina
   const { getRecoveryOutcome } = require('../lib/upload-recovery');
   const recovery = {
     jobIds: ['done-job', 'active-job'],
+    historyPending: true,
     terminalJobs: [{
       jobId: 'done-job',
       status: 'done',
       error: null,
       failureDetails: null,
       result: { download_url: 'https://doodstream.com/d/abc123', embed_url: null, file_code: 'abc123' }
+    }, {
+      jobId: 'uncertain-job',
+      status: 'error',
+      error: 'remote result unknown',
+      failureDetails: null,
+      remoteCommitUncertain: true,
+      result: null
     }]
   };
 
@@ -66,11 +75,33 @@ test('recovery markers affect only their exact job IDs and never restart termina
     error: null,
     failureDetails: null,
     result: { download_url: 'https://doodstream.com/d/abc123', embed_url: null, file_code: 'abc123' },
+    historyPending: true,
     interrupted: false
   });
   assert.deepEqual(getRecoveryOutcome({ id: 'active-job', status: 'queued' }, recovery), { status: 'queued', interrupted: true });
+  assert.deepEqual(getRecoveryOutcome({ id: 'uncertain-job', status: 'preview' }, recovery), {
+    status: 'error',
+    error: 'remote result unknown',
+    failureDetails: null,
+    remoteCommitUncertain: true,
+    result: null,
+    historyPending: true,
+    interrupted: false
+  });
   assert.deepEqual(getRecoveryOutcome({ id: 'foreign-job', status: 'queued' }, recovery), { status: 'queued', interrupted: false });
   assert.deepEqual(getRecoveryOutcome({ id: 'already-done', status: 'done' }, recovery), { status: 'done', interrupted: false });
+});
+
+test('remote commit uncertainty survives acknowledgements and failed retries until confirmed success', () => {
+  const { resolveRemoteCommitUncertainty } = require('../lib/upload-recovery');
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'queued' }), true);
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'getting-server' }), true);
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'uploading' }), true);
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'error' }), true);
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'aborted' }), true);
+  assert.equal(resolveRemoteCommitUncertainty(true, { status: 'done' }), false);
+  assert.equal(resolveRemoteCommitUncertainty(false, { status: 'error', remoteCommitUncertain: true }), true);
+  assert.equal(resolveRemoteCommitUncertainty(false, { status: 'error' }), false);
 });
 
 test('main and renderer keep recovery evidence until final queue persistence succeeds', () => {
@@ -84,7 +115,7 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   assert.match(mainSource, /buildTerminalSnapshots: buildTerminalJobSnapshots/);
   assert.ok(barrier.indexOf('appendHistory(summary)') < barrier.indexOf('saveRecovery(terminalRecovery)'));
   assert.ok(barrier.indexOf('saveRecovery(terminalRecovery)') < barrier.indexOf('requestFinalization(summary, historyPersisted)'));
-  assert.match(barrier, /if \(queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveRecovery\(null\)/);
+  assert.match(barrier, /if \(historyPersisted && queuePersisted && terminalRecoveryPersisted\)[\s\S]*saveRecovery\(null\)/);
   assert.match(batchDone, /uploadFinalizationBarrier\.finalize\(summary, recovery\)/);
   const startFailure = batchDone.slice(batchDone.indexOf('startBatch(tasks'));
   assert.match(startFailure, /buildFailedUploadSummary\(tasks/);
@@ -101,5 +132,10 @@ test('main and renderer keep recovery evidence until final queue persistence suc
   assert.match(rendererSource, /window\.UploadRecovery\.getRecoveryOutcome/);
   assert.match(rendererSource, /data\.historyPersisted !== true/);
   assert.match(rendererSource, /deliveryId: data\.deliveryId/);
+  assert.match(rendererSource, /remoteCommitUncertain: Object\.hasOwn\(recoveryOutcome, 'remoteCommitUncertain'\)/);
+  assert.match(rendererSource, /remoteCommitUncertain: job\.remoteCommitUncertain === true/);
+  assert.match(rendererSource, /j\.remoteCommitUncertain !== true/);
+  assert.equal((rendererSource.match(/window\.UploadRecovery\.resolveRemoteCommitUncertainty/g) || []).length >= 2, true);
+  assert.doesNotMatch(rendererSource, /acknowledgeRemoteCommitRetry/);
   assert.ok(indexSource.indexOf('../lib/upload-recovery.js') < indexSource.indexOf('app.js'));
 });

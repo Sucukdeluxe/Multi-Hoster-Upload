@@ -301,6 +301,52 @@ test('an uncertain remote commit blocks retries, account fallback, and later sam
   assert.equal(summary.succeeded, 0);
   assert.equal(summary.failed, 2);
   assert.deepEqual(calls, [{ file: firstPath, apiKey: 'ACCOUNT_KEY_A' }]);
+  assert.deepEqual(summary.files.flatMap(file => file.results).map(result => result.remoteCommitUncertain), [true, true]);
+});
+
+test('an uncertain fallback commit stops all retries and further account rotation', async () => {
+  const calls = [];
+  loadManager(async (hoster, file, apiKey) => {
+    calls.push(apiKey);
+    if (apiKey === 'PRIMARY_KEY') {
+      const error = new Error('Primary account rejected the request');
+      error.accountError = true;
+      throw error;
+    }
+    if (apiKey === 'FALLBACK_KEY') {
+      const error = new Error('Remote commit could not be confirmed');
+      error.remoteCommitUncertain = true;
+      throw error;
+    }
+    return {
+      file_code: 'UNSAFE_THIRD_RESULT',
+      download_url: 'https://byse.sx/d/UNSAFE_THIRD_RESULT'
+    };
+  });
+  const hosterSettings = settings('byse.sx', 1);
+  hosterSettings['byse.sx'].retries = 2;
+  const manager = new UploadManager(hosterSettings);
+  manager.on('account-failed', ({ accountId }) => {
+    if (accountId === 'PRIMARY') {
+      manager.switchAccount('byse.sx', { id: 'FALLBACK', apiKey: 'FALLBACK_KEY' });
+    } else if (accountId === 'FALLBACK') {
+      manager.switchAccount('byse.sx', { id: 'THIRD', apiKey: 'THIRD_KEY' });
+    }
+  });
+
+  const summary = await runBatch(manager, [{
+    jobId: 'fallback-uncertain',
+    file: distinctPath,
+    hoster: 'byse.sx',
+    accountId: 'PRIMARY',
+    apiKey: 'PRIMARY_KEY'
+  }]);
+  const result = summary.files[0].results[0];
+
+  assert.deepEqual(calls, ['PRIMARY_KEY', 'FALLBACK_KEY']);
+  assert.equal(result.status, 'error');
+  assert.equal(result.remoteCommitUncertain, true);
+  assert.equal(manager.getFailedAccountKeys().includes('byse.sx:FALLBACK'), false);
 });
 
 test('recovery claims do not leak into a later batch on the same manager', async () => {
@@ -722,7 +768,7 @@ test('batch completion clears Doodstream key and baseline caches', async () => {
   });
 });
 
-test('upload interval is enforced at the admitted upload start', async () => {
+test('upload interval admission uses the real serialized gate before every upload start', async () => {
   const events = [];
   let releaseFirst;
   let markFirstStarted;
@@ -749,9 +795,10 @@ test('upload interval is enforced at the admitted upload start', async () => {
   const hosterSettings = settings('byse.sx', 1);
   hosterSettings['byse.sx'].timeIntervalSec = 1;
   const manager = new UploadManager(hosterSettings);
+  const originalWait = manager._waitForInterval.bind(manager);
   manager._waitForInterval = async (hoster, intervalMs, signal, acquireSlots) => {
     events.push('interval');
-    await acquireSlots();
+    await originalWait(hoster, 0, signal, acquireSlots);
   };
   const batch = runBatch(manager, [
     { jobId: 'interval-first', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
@@ -761,11 +808,11 @@ test('upload interval is enforced at the admitted upload start', async () => {
 
   await waitFor(firstStarted, 500, 'First admitted upload did not start');
   await new Promise(resolve => setImmediate(resolve));
-  const intervalsBeforeRelease = events.filter(event => event === 'interval').length;
+  const uploadsBeforeRelease = uploadCount;
   releaseFirst();
   const summary = await batch;
 
-  assert.equal(intervalsBeforeRelease, 1, JSON.stringify(events));
+  assert.equal(uploadsBeforeRelease, 1, JSON.stringify(events));
   assert.equal(summary.succeeded, 3);
   assert.deepEqual(events.filter(event => event === 'interval'), ['interval', 'interval', 'interval']);
 });
@@ -807,11 +854,14 @@ test('an interval wait never occupies the global slot of another hoster', async 
     return originalWait(hoster, 0, signal, acquireSlots);
   };
   const batch = runBatch(manager, [
-    { jobId: 'interval-waiting-hoster', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' },
-    { jobId: 'interval-independent-hoster', file: distinctPath, hoster: 'voe.sx', accountId: 'VOE_ACCOUNT', apiKey: 'VOE_KEY' }
+    { jobId: 'interval-waiting-hoster', file: firstPath, hoster: 'byse.sx', accountId: 'BYSE_ACCOUNT', apiKey: 'BYSE_KEY' }
   ]);
 
   await waitFor(intervalWaiting, 500, 'Configured interval did not start waiting');
+  const added = manager.addJobs([
+    { jobId: 'interval-independent-hoster', file: distinctPath, hoster: 'voe.sx', accountId: 'VOE_ACCOUNT', apiKey: 'VOE_KEY' }
+  ]);
+  assert.equal(added.added, 1);
   let blockedError = null;
   try {
     await waitFor(otherStarted, 500, 'Interval wait occupied the global upload slot');
