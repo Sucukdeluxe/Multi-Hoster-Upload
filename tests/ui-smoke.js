@@ -1836,7 +1836,7 @@ setTimeout(async () => {
       queueImportStarted = true;
       return new Promise(resolve => { releaseQueueImport = () => resolve({ ok: false, canceled: true }); });
     });
-    const pendingQueueImport = wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-queue-flush", file: "C:/ui/queue-flush.bin", fileName: "queue-flush.bin", hoster: "byse.sx", status: "preview", bytesTotal: 1 }]; rebuildJobIndex(); persistQueueStateSoon(false); return doBackupImport(); })()');
+    const pendingQueueImport = wc.executeJavaScript('(() => { selectedFiles = []; selectedUploadHosters = []; queueJobs = [{ id: "ui-queue-flush", file: "C:/ui/queue-flush.bin", fileName: "queue-flush.bin", hoster: "byse.sx", status: "preview", bytesTotal: 1 }]; rebuildJobIndex(); persistQueueStateSoon(false); return doBackupImport(); })()');
     for (let attempt = 0; attempt < 100 && !queueImportStarted; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     const queueWriteDuringImport = await wc.executeJavaScript('(() => { queueJobs = [{ id: "ui-import-dialog-terminal", file: "C:/ui/import-dialog-terminal.bin", fileName: "import-dialog-terminal.bin", hoster: "byse.sx", status: "done", bytesTotal: 10, bytesUploaded: 10, result: { download_url: "https://example.invalid/done" } }]; rebuildJobIndex(); return persistQueueStateNow().then(() => ({ ok: true }), error => ({ ok: false, error: error.message })); })()');
     const terminalClearedBeforeImportFinished = queueImportSnapshots.some(snapshot => snapshot === null);
