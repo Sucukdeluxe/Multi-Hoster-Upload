@@ -1285,14 +1285,17 @@ function closeHosterModal() {
 }
 
 async function applyHosterSelection() {
+  if (_pendingImportInspections > 0) return false;
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
   // Move pending files to selectedFiles on confirm
-  const pendingPaths = new Set(_pendingFiles.map(f => f.path));
-  if (_pendingFiles.length > 0) {
-    selectedFiles.push(..._pendingFiles);
-    _pendingFiles = [];
+  const admittedFiles = _pendingFiles.filter(file => window.ImportPreflight
+    .getEligibleImportHosters(file, selectedUploadHosters, hosterSettings).length > 0);
+  const pendingPaths = new Set(admittedFiles.map(f => f.path));
+  if (admittedFiles.length > 0) {
+    selectedFiles.push(...admittedFiles);
   }
+  _pendingFiles = [];
   clearDedupKeysForPaths(pendingPaths);
   renderHosterSummary();
 
@@ -1314,8 +1317,12 @@ async function applyHosterSelection() {
 }
 
 function cancelHosterModal() {
+  _importGeneration++;
+  _pendingImportInspections = 0;
+  _importCoordination = Promise.resolve();
   _pendingFiles = [];
   _pendingImportInspection = null;
+  syncImportConfirmationState();
   closeHosterModal();
 }
 
@@ -1554,6 +1561,8 @@ function setupDragDrop() {
 let _pendingFiles = []; // Files waiting for hoster modal confirmation
 let _pendingImportInspection = null;
 let _importCoordination = Promise.resolve();
+let _importGeneration = 0;
+let _pendingImportInspections = 0;
 
 let _addingDropped = false;
 
@@ -1595,13 +1604,24 @@ function getImportPlanHosters() {
     : getSelectedHosters();
 }
 
-function renderImportPlanSummary() {
-  if (!_pendingImportInspection || !window.ImportPreflight) return;
-  const summary = window.ImportPreflight.summarizeImportPlan({
+function getImportPlanSummary() {
+  if (!_pendingImportInspection || !window.ImportPreflight) return null;
+  return window.ImportPreflight.summarizeImportPlan({
     inspection: _pendingImportInspection,
     selectedHosters: getImportPlanHosters(),
     hosterSettings
   });
+}
+
+function syncImportConfirmationState() {
+  const confirmButton = document.getElementById('confirmHosterModalBtn');
+  if (confirmButton) confirmButton.disabled = _pendingImportInspections > 0;
+}
+
+function renderImportPlanSummary() {
+  const summary = getImportPlanSummary();
+  syncImportConfirmationState();
+  if (!summary) return;
   const values = {
     importPlanCandidates: summary.candidateCount,
     importPlanDuplicates: summary.duplicateCount,
@@ -1618,21 +1638,41 @@ function renderImportPlanSummary() {
   }
 }
 
+function formatRejectedImportBalance(inspection) {
+  const values = [
+    ['Kandidaten', inspection.candidateCount],
+    ['Bereits vorhanden / dupliziert', inspection.duplicateCount],
+    ['Durch Dateinamenfilter ausgeschlossen', inspection.filteredCount],
+    ['Fehlend / unlesbar / leer', inspection.unavailableCount],
+    ['Akzeptierte Dateien', inspection.acceptedCount]
+  ];
+  return values.map(([label, value]) => `${localizeUiText(label)}: ${Number(value) || 0}`).join(' · ');
+}
+
 function existingImportPaths() {
   return [...selectedFiles.map(file => file.path), ..._pendingFiles.map(file => file.path), ...queueJobs.map(job => job.file)];
 }
 
-function coordinateImportEntries(entries) {
+function coordinateImportEntries(entries, inspectEntries) {
+  const candidates = Array.isArray(entries) ? entries : [];
+  if (candidates.length === 0) return Promise.resolve(null);
+  const generation = _importGeneration;
+  _pendingImportInspections++;
+  syncImportConfirmationState();
   const run = async () => {
-    const candidates = Array.isArray(entries) ? entries : [];
-    if (candidates.length === 0) return null;
+    if (generation !== _importGeneration) return null;
     let inspection;
     try {
-      inspection = await window.api.inspectImportFiles(candidates, existingImportPaths());
+      const inspect = typeof inspectEntries === 'function'
+        ? inspectEntries
+        : (values, existingPaths) => window.api.inspectImportFiles(values, existingPaths);
+      inspection = await inspect(candidates, existingImportPaths());
     } catch {
+      if (generation !== _importGeneration) return null;
       showCopyToast('Vorabprüfung fehlgeschlagen.', 6500);
       return null;
     }
+    if (generation !== _importGeneration) return null;
     mergePendingImportInspection(inspection);
     if (inspection.accepted.length > 0) {
       if (document.getElementById('hosterModal')?.style.display === 'flex') {
@@ -1643,23 +1683,24 @@ function coordinateImportEntries(entries) {
       clearDedupKeysForPaths(acceptedPaths);
       _pendingFiles.push(...inspection.accepted);
       if (document.getElementById('hosterModal')?.style.display === 'flex') {
-        syncSelectedUploadHosters();
         renderHosterModal();
       } else {
         openHosterModal();
       }
     } else if (_pendingFiles.length > 0) {
       renderImportPlanSummary();
-    } else if (inspection.candidateCount > 0 && inspection.duplicateCount === inspection.candidateCount) {
-      showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
-      _pendingImportInspection = null;
     } else {
-      showCopyToast('Keine Dateien wurden akzeptiert.', 6500);
+      showCopyToast(formatRejectedImportBalance(inspection), 6500);
       _pendingImportInspection = null;
     }
     return inspection;
   };
-  const pending = _importCoordination.then(run, run);
+  const operation = _importCoordination.then(run, run);
+  const pending = operation.finally(() => {
+    if (generation !== _importGeneration) return;
+    _pendingImportInspections = Math.max(0, _pendingImportInspections - 1);
+    renderImportPlanSummary();
+  });
   _importCoordination = pending.catch(() => {});
   return pending;
 }
@@ -1858,7 +1899,7 @@ function buildQueuePreview() {
     for (const file of selectedFiles) {
       for (const hoster of hosters) {
         const key = `${file.path}|${hoster}`;
-        if (!existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
+        if (window.ImportPreflight.isImportPairEligible(file, hoster, hosterSettings) && !existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
           const job = {
             id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             file: file.path, fileName: file.name, hoster,

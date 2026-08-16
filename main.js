@@ -55,7 +55,7 @@ const { buildFailedUploadSummary, buildTerminalJobSnapshots } = require('./lib/u
 const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
 const { createBatchMutationGate } = require('./lib/batch-mutation-gate');
 const { createUploadStartReservation } = require('./lib/upload-start-reservation');
-const { inspectImportEntries } = require('./lib/import-preflight');
+const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -2255,22 +2255,7 @@ ipcMain.handle('inspect-import-files', async (_event, payload) => {
     existingPaths: input.existingPaths,
     filenameFilter: currentConfig.globalSettings?.filenameFilter,
     concurrency: 8,
-    inspectPath: async filePath => {
-      let fileStat;
-      try {
-        fileStat = await fs.promises.stat(filePath);
-      } catch (error) {
-        if (error && error.code === 'ENOENT') return { exists: false };
-        return { exists: true, readable: false };
-      }
-      if (!fileStat.isFile()) return { exists: true, readable: false, size: fileStat.size };
-      try {
-        await fs.promises.access(filePath, fs.constants.R_OK);
-      } catch {
-        return { exists: true, readable: false, size: fileStat.size };
-      }
-      return { exists: true, readable: true, size: fileStat.size };
-    }
+    inspectPath: filePath => inspectReadableImportPath(filePath, fs.promises.open)
   });
 });
 

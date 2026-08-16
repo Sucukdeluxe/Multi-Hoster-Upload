@@ -2,7 +2,9 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  getEligibleImportHosters,
   inspectImportEntries,
+  inspectReadableImportPath,
   summarizeImportPlan
 } = require('../lib/import-preflight');
 
@@ -79,6 +81,72 @@ describe('import preflight', () => {
       jobCount: 3,
       sizeLimitedJobCount: 1
     });
+  });
+
+  it('uses the same configured size eligibility for summaries and queue admission', () => {
+    const file = { path: 'C:\\incoming\\large.custom', name: 'large.custom', size: 5 * 1024 * 1024 };
+    const selectedHosters = ['limited.example', 'unlimited.example', 'limited.example'];
+    const hosterSettings = {
+      'limited.example': { maxSizeMb: 3 },
+      'unlimited.example': { maxSizeMb: 0 }
+    };
+
+    assert.deepEqual(getEligibleImportHosters(file, selectedHosters, hosterSettings), ['unlimited.example']);
+    assert.deepEqual(summarizeImportPlan({
+      inspection: { candidateCount: 1, accepted: [file] },
+      selectedHosters,
+      hosterSettings
+    }), {
+      candidateCount: 1,
+      duplicateCount: 0,
+      filteredCount: 0,
+      unavailableCount: 0,
+      acceptedCount: 1,
+      targetCount: 2,
+      jobCount: 1,
+      sizeLimitedJobCount: 1
+    });
+  });
+
+  it('deduplicates Windows drive and UNC namespace aliases canonically', async () => {
+    const inspectedPaths = [];
+    const inspection = await inspectImportEntries([
+      '\\\\?\\C:\\incoming\\same.bin',
+      'C:\\incoming\\same.bin',
+      '\\\\?\\UNC\\server\\share\\same.bin',
+      '\\\\server\\share\\same.bin'
+    ], {
+      caseInsensitive: true,
+      inspectPath: async filePath => {
+        inspectedPaths.push(filePath);
+        return { exists: true, readable: true, size: 1 };
+      }
+    });
+
+    assert.equal(inspection.acceptedCount, 2);
+    assert.equal(inspection.duplicateCount, 2);
+    assert.deepEqual(inspectedPaths, ['C:\\incoming\\same.bin', '\\\\server\\share\\same.bin']);
+  });
+
+  it('inspects type and size through one opened read handle and closes it', async () => {
+    const calls = [];
+    const fileHandle = {
+      stat: async () => {
+        calls.push('stat');
+        return { isFile: () => true, size: 42 };
+      },
+      close: async () => {
+        calls.push('close');
+      }
+    };
+
+    const result = await inspectReadableImportPath('C:\\incoming\\readable.bin', async (filePath, flags) => {
+      calls.push(['open', filePath, flags]);
+      return fileHandle;
+    });
+
+    assert.deepEqual(result, { exists: true, readable: true, size: 42 });
+    assert.deepEqual(calls, [['open', 'C:\\incoming\\readable.bin', 'r'], 'stat', 'close']);
   });
 
   it('limits concurrent file inspections', async () => {
