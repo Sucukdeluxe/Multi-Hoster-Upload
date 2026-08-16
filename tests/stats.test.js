@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const stats = require('../lib/stats');
 const {
   summarizePerHoster,
   summarizeHosterHealth,
@@ -7,7 +8,7 @@ const {
   summarizeBatchErrors,
   isRetryableCategory,
   mergeSkippedIntoSummary
-} = require('../lib/stats');
+} = stats;
 
 function makeBatch(timestamp, results) {
   return {
@@ -150,6 +151,127 @@ test('summarizeHosterHealth uses only the 50 chronologically newest batches', ()
   });
 });
 
+test('summarizeHosterHealth counts seven-day failures across all valid batches outside the 50-batch sample', () => {
+  const now = new Date('2026-08-16T12:00:00.000Z');
+  const history = Array.from({ length: 60 }, (_, index) => makeBatch(
+    now.getTime() - (index + 1) * 60 * 60 * 1000,
+    [{ hoster: 'voe.sx', status: 'error' }]
+  ));
+
+  const summary = summarizeHosterHealth(history, { now })['voe.sx'];
+
+  assert.deepStrictEqual({
+    sampleSize: summary.sampleSize,
+    failed: summary.failed,
+    failuresLast7Days: summary.failuresLast7Days
+  }, {
+    sampleSize: 50,
+    failed: 50,
+    failuresLast7Days: 60
+  });
+});
+
+test('summarizeHosterHealth excludes disabled accounts from every problem-state counter', () => {
+  const summary = summarizeHosterHealth([], {
+    hosters: {
+      'voe.sx': [
+        { id: 'disabled-error', enabled: false, authType: 'api', apiKey: 'key' },
+        { id: 'disabled-unchecked', enabled: false, authType: 'api', apiKey: 'key' },
+        { id: 'disabled-checking', enabled: false, authType: 'api', apiKey: 'key' }
+      ]
+    },
+    accountStatuses: {
+      'disabled-error': { status: 'error' },
+      'disabled-unchecked': { status: 'unchecked' },
+      'disabled-checking': { status: 'checking' }
+    },
+    sessionFailedKeys: new Set(['voe.sx:disabled-error'])
+  })['voe.sx'];
+
+  assert.deepStrictEqual({
+    configuredAccounts: summary.configuredAccounts,
+    accountProblems: summary.accountProblems,
+    uncheckedAccounts: summary.uncheckedAccounts,
+    checkingAccounts: summary.checkingAccounts
+  }, {
+    configuredAccounts: 3,
+    accountProblems: 0,
+    uncheckedAccounts: 0,
+    checkingAccounts: 0
+  });
+});
+
+test('mergeHosterHealthHistory preserves the full snapshot and lets the summarizer choose the newest 50 batches', () => {
+  assert.strictEqual(typeof stats.mergeHosterHealthHistory, 'function');
+  const now = new Date('2026-08-16T12:00:00.000Z');
+  const history = Array.from({ length: 60 }, (_, index) => ({
+    ...makeBatch(now.getTime() - (index + 1) * 60 * 60 * 1000, [{ hoster: 'voe.sx', status: 'error' }]),
+    id: `loaded-${index}`
+  }));
+  const completed = {
+    ...makeBatch(now.getTime(), [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }]),
+    id: 'completed'
+  };
+
+  const merged = stats.mergeHosterHealthHistory(history, completed);
+  const replacement = { ...completed, total: 2 };
+  const deduplicated = stats.mergeHosterHealthHistory(merged, replacement);
+  const summary = summarizeHosterHealth(deduplicated, { now })['voe.sx'];
+
+  assert.strictEqual(merged.length, 61);
+  assert.deepStrictEqual(merged.slice(0, 60), history);
+  assert.strictEqual(merged[60], completed);
+  assert.strictEqual(deduplicated.length, 61);
+  assert.strictEqual(deduplicated[60], replacement);
+  assert.deepStrictEqual({
+    sampleSize: summary.sampleSize,
+    successful: summary.successful,
+    failed: summary.failed
+  }, {
+    sampleSize: 50,
+    successful: 1,
+    failed: 49
+  });
+});
+
+test('mergeHosterHealthHistory preserves null and undefined loading states', () => {
+  assert.strictEqual(typeof stats.mergeHosterHealthHistory, 'function');
+  const completed = makeBatch(Date.parse('2026-08-16T12:00:00.000Z'), [{ hoster: 'voe.sx', status: 'done' }]);
+
+  assert.strictEqual(stats.mergeHosterHealthHistory(null, completed), null);
+  assert.strictEqual(stats.mergeHosterHealthHistory(undefined, completed), undefined);
+});
+
+test('summarizeHosterHealth excludes invalid and future timestamps from every time statistic', () => {
+  const now = new Date('2026-08-16T12:00:00.000Z');
+  const history = [
+    {
+      id: 'invalid',
+      timestamp: 'not-a-date',
+      files: [{ name: 'invalid.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
+    },
+    makeBatch(Date.parse('2026-08-16T12:00:00.001Z'), [{ hoster: 'voe.sx', status: 'error' }])
+  ];
+
+  const summary = summarizeHosterHealth(history, { now, hosters: { 'voe.sx': [] } })['voe.sx'];
+
+  assert.deepStrictEqual({
+    sampleSize: summary.sampleSize,
+    successful: summary.successful,
+    failed: summary.failed,
+    skipped: summary.skipped,
+    lastSuccessAt: summary.lastSuccessAt,
+    failuresLast7Days: summary.failuresLast7Days
+  }, {
+    sampleSize: 0,
+    successful: 0,
+    failed: 0,
+    skipped: 0,
+    lastSuccessAt: null,
+    failuresLast7Days: 0
+  });
+});
+
 test('summarizeHosterHealth combines configured accounts, current statuses, and session failures without double counting', () => {
   const hosters = {
     'voe.sx': [
@@ -183,7 +305,7 @@ test('summarizeHosterHealth combines configured accounts, current statuses, and 
     checkingAccounts: summary['voe.sx'].checkingAccounts
   }, {
     configuredAccounts: 5,
-    accountProblems: 3,
+    accountProblems: 2,
     uncheckedAccounts: 1,
     checkingAccounts: 0
   });

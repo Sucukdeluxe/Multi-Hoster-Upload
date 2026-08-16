@@ -3614,11 +3614,12 @@ function _handleProgressImpl(data) {
 
 function recordHosterHealthBatch(summary) {
   if (!summary || typeof summary !== 'object' || !Array.isArray(summary.files)) return;
-  const current = Array.isArray(window._historyForStats) ? window._historyForStats : [];
-  const next = summary.id
-    ? current.filter(batch => batch?.id !== summary.id)
-    : current.filter(batch => batch !== summary);
-  window._historyForStats = [summary, ...next].slice(0, 50);
+  const current = window._historyForStats;
+  if (!Array.isArray(current)) {
+    if (current === null) loadHistory();
+    return;
+  }
+  window._historyForStats = window.Stats.mergeHosterHealthHistory(current, summary);
   _invalidateHosterLifetimeCache();
   renderHosterHealthOverview();
 }
