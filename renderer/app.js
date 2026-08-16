@@ -3612,22 +3612,9 @@ function _handleProgressImpl(data) {
   persistQueueStateSoon();
 }
 
-function recordHosterHealthBatch(summary) {
-  if (!summary || typeof summary !== 'object' || !Array.isArray(summary.files)) return;
-  const current = window._historyForStats;
-  if (!Array.isArray(current)) {
-    if (current === null) loadHistory();
-    return;
-  }
-  window._historyForStats = window.Stats.mergeHosterHealthHistory(current, summary);
-  _invalidateHosterLifetimeCache();
-  renderHosterHealthOverview();
-}
-
 function handleBatchDone(summary, options = {}) {
   uploading = false;
   applySummaryResults(summary, options.historyPersisted !== false);
-  if (options.historyPersisted !== false) recordHosterHealthBatch(summary);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
   // Prune session-stats sets to current queue contents. Without this, IDs
   // of jobs that were removed from queueJobs (via removeFromQueueOnDone
@@ -3661,7 +3648,7 @@ function handleBatchDone(summary, options = {}) {
   // the user actually switches to it — skips an IPC + full table rebuild per
   // batch-done when the user is watching the upload view.
   _historyDirty = true;
-  if (_isHistoryTabActive()) loadHistory();
+  if (options.historyPersisted !== false || _isHistoryTabActive()) loadHistory();
 
   const removeOnDone = config.globalSettings && config.globalSettings.removeFromQueueOnDone;
   if (options.historyPersisted !== false && removeOnDone) {

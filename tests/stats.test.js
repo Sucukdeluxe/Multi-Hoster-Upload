@@ -1,6 +1,5 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const stats = require('../lib/stats');
 const {
   summarizePerHoster,
   summarizeHosterHealth,
@@ -8,7 +7,7 @@ const {
   summarizeBatchErrors,
   isRetryableCategory,
   mergeSkippedIntoSummary
-} = stats;
+} = require('../lib/stats');
 
 function makeBatch(timestamp, results) {
   return {
@@ -201,8 +200,7 @@ test('summarizeHosterHealth excludes disabled accounts from every problem-state 
   });
 });
 
-test('mergeHosterHealthHistory preserves the full snapshot and lets the summarizer choose the newest 50 batches', () => {
-  assert.strictEqual(typeof stats.mergeHosterHealthHistory, 'function');
+test('summarizeHosterHealth selects the newest batches without mutating the full loaded snapshot', () => {
   const now = new Date('2026-08-16T12:00:00.000Z');
   const history = Array.from({ length: 60 }, (_, index) => ({
     ...makeBatch(now.getTime() - (index + 1) * 60 * 60 * 1000, [{ hoster: 'voe.sx', status: 'error' }]),
@@ -213,16 +211,11 @@ test('mergeHosterHealthHistory preserves the full snapshot and lets the summariz
     id: 'completed'
   };
 
-  const merged = stats.mergeHosterHealthHistory(history, completed);
-  const replacement = { ...completed, total: 2 };
-  const deduplicated = stats.mergeHosterHealthHistory(merged, replacement);
-  const summary = summarizeHosterHealth(deduplicated, { now })['voe.sx'];
+  history.push(completed);
+  const loadedOrder = [...history];
+  const summary = summarizeHosterHealth(history, { now })['voe.sx'];
 
-  assert.strictEqual(merged.length, 61);
-  assert.deepStrictEqual(merged.slice(0, 60), history);
-  assert.strictEqual(merged[60], completed);
-  assert.strictEqual(deduplicated.length, 61);
-  assert.strictEqual(deduplicated[60], replacement);
+  assert.deepStrictEqual(history, loadedOrder);
   assert.deepStrictEqual({
     sampleSize: summary.sampleSize,
     successful: summary.successful,
@@ -234,12 +227,28 @@ test('mergeHosterHealthHistory preserves the full snapshot and lets the summariz
   });
 });
 
-test('mergeHosterHealthHistory preserves null and undefined loading states', () => {
-  assert.strictEqual(typeof stats.mergeHosterHealthHistory, 'function');
-  const completed = makeBatch(Date.parse('2026-08-16T12:00:00.000Z'), [{ hoster: 'voe.sx', status: 'done' }]);
+test('summarizeHosterHealth preserves account health while history is unavailable', () => {
+  const options = {
+    hosters: {
+      'voe.sx': [{ id: 'unavailable-history', enabled: true, authType: 'api', apiKey: 'key' }]
+    },
+    accountStatuses: {
+      'unavailable-history': { status: 'error' }
+    }
+  };
 
-  assert.strictEqual(stats.mergeHosterHealthHistory(null, completed), null);
-  assert.strictEqual(stats.mergeHosterHealthHistory(undefined, completed), undefined);
+  for (const history of [null, undefined]) {
+    const summary = summarizeHosterHealth(history, options)['voe.sx'];
+    assert.deepStrictEqual({
+      sampleSize: summary.sampleSize,
+      configuredAccounts: summary.configuredAccounts,
+      accountProblems: summary.accountProblems
+    }, {
+      sampleSize: 0,
+      configuredAccounts: 1,
+      accountProblems: 1
+    });
+  }
 });
 
 test('summarizeHosterHealth excludes invalid and future timestamps from every time statistic', () => {

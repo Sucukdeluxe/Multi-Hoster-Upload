@@ -993,18 +993,6 @@ setTimeout(async () => {
         unchecked: document.querySelector('[data-hoster-health-row="byse.sx"] [data-health="accounts"]')?.textContent.trim()
       };
       setUiLanguage('de');
-      window._historyForStats = [];
-      _invalidateHosterLifetimeCache();
-      handleBatchDone({
-        id: 'health-completed-batch',
-        timestamp: new Date().toISOString(),
-        total: 1,
-        succeeded: 1,
-        failed: 0,
-        skipped: 0,
-        files: [{ name: 'completed.bin', size: 2048, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 2 }] }]
-      }, { historyPersisted: true, deferPersistence: true });
-      const completedSample = document.querySelector('[data-hoster-health-row="voe.sx"] [data-health="sample"]')?.textContent.trim();
       config = previousConfig;
       accountStatuses = previousStatuses;
       _sessionFailedKeys = previousSessionFailedKeys;
@@ -1012,12 +1000,11 @@ setTimeout(async () => {
       else delete window._historyForStats;
       _invalidateHosterLifetimeCache();
       renderAccounts();
-      return { empty, german, english, completedSample };
+      return { empty, german, english };
     })()\`);
     check('Host health overview renders clean empty and unchecked account states', hosterHealthStates.empty === 'Noch keine Hoster-Daten.' && hosterHealthStates.german.unchecked === 'Nicht geprüft');
     check('Host health overview renders counts, existing-rate semantics, effective historical throughput, recent failures, and account problems', hosterHealthStates.german.sample === '3' && hosterHealthStates.german.outcomes === '1 / 1 / 1' && hosterHealthStates.german.rate === '50 %' && hosterHealthStates.german.throughput === '512 kB/s' && hosterHealthStates.german.lastSuccess !== 'Nie' && hosterHealthStates.german.recentFailures === '1' && hosterHealthStates.german.accountProblems === '1');
     check('Host health overview switches fully to English without a renderer restart', hosterHealthStates.english.title === 'Host health' && hosterHealthStates.english.throughput === 'Effective historical throughput' && hosterHealthStates.english.unchecked === 'Not checked');
-    check('A completed upload batch immediately refreshes host health history', hosterHealthStates.completedSample === '1');
 
     const hosterHealthRegressionStates = await wc.executeJavaScript(\`(() => {
       const previousConfig = config;
@@ -1025,7 +1012,6 @@ setTimeout(async () => {
       const previousSessionFailedKeys = _sessionFailedKeys;
       const hadHistory = Object.hasOwn(window, '_historyForStats');
       const previousHistory = window._historyForStats;
-      const originalLoadHistory = loadHistory;
       let states;
       try {
         config = { ...config, hosters: Object.fromEntries(HOSTERS.map(name => [name, []])) };
@@ -1063,51 +1049,8 @@ setTimeout(async () => {
           accountProblems: invalidRow?.querySelector('[data-health="accounts"]')?.textContent.trim()
         };
 
-        const now = Date.now();
-        const loaded = Array.from({ length: 60 }, (_, index) => ({
-          id: 'health-loaded-' + index,
-          timestamp: new Date(now - (index + 1) * 60 * 60 * 1000).toISOString(),
-          files: [{ name: 'loaded-' + index + '.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'error' }] }]
-        }));
-        window._historyForStats = loaded;
-        const completed = {
-          id: 'health-merged-completed',
-          timestamp: new Date(now).toISOString(),
-          total: 1,
-          files: [{ name: 'completed.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
-        };
-        recordHosterHealthBatch(completed);
-        const replacement = { ...completed, total: 2 };
-        recordHosterHealthBatch(replacement);
-        const mergedRow = document.querySelector('[data-hoster-health-row="voe.sx"]');
-        const merged = {
-          historyLength: window._historyForStats.length,
-          loadedOrderPreserved: loaded.every((batch, index) => window._historyForStats[index] === batch),
-          completedIndex: window._historyForStats.indexOf(replacement),
-          completedCount: window._historyForStats.filter(batch => batch?.id === replacement.id).length,
-          sample: mergedRow?.querySelector('[data-health="sample"]')?.textContent.trim(),
-          outcomes: mergedRow?.querySelector('[data-health="outcomes"]')?.textContent.trim(),
-          recentFailures: mergedRow?.querySelector('[data-health="recent-failures"]')?.textContent.trim()
-        };
-
-        let historyReloads = 0;
-        loadHistory = async () => { historyReloads++; };
-        window._historyForStats = null;
-        recordHosterHealthBatch({ ...completed, id: 'health-null-completed' });
-        const nullState = {
-          preserved: window._historyForStats === null,
-          reloads: historyReloads
-        };
-        delete window._historyForStats;
-        const reloadsBeforeUndefined = historyReloads;
-        recordHosterHealthBatch({ ...completed, id: 'health-undefined-completed' });
-        const undefinedState = {
-          preserved: !Object.hasOwn(window, '_historyForStats') && window._historyForStats === undefined,
-          reloads: historyReloads - reloadsBeforeUndefined
-        };
-        states = { invalidAndDisabled, merged, nullState, undefinedState };
+        states = { invalidAndDisabled };
       } finally {
-        loadHistory = originalLoadHistory;
         config = previousConfig;
         accountStatuses = previousStatuses;
         _sessionFailedKeys = previousSessionFailedKeys;
@@ -1119,10 +1062,115 @@ setTimeout(async () => {
       return states;
     })()\`);
     check('Host health excludes disabled accounts and invalid or future batches from rendered problem and time statistics', hosterHealthRegressionStates.invalidAndDisabled.sample === '0' && hosterHealthRegressionStates.invalidAndDisabled.outcomes === '0 / 0 / 0' && hosterHealthRegressionStates.invalidAndDisabled.lastSuccess === 'Nie' && hosterHealthRegressionStates.invalidAndDisabled.recentFailures === '0' && hosterHealthRegressionStates.invalidAndDisabled.accountProblems === '0');
-    check('Completed batches preserve full history while the renderer samples 50 and counts all seven-day failures', hosterHealthRegressionStates.merged.historyLength === 61 && hosterHealthRegressionStates.merged.loadedOrderPreserved === true && hosterHealthRegressionStates.merged.completedIndex === 60 && hosterHealthRegressionStates.merged.sample === '50' && hosterHealthRegressionStates.merged.outcomes === '1 / 49 / 0' && hosterHealthRegressionStates.merged.recentFailures === '60');
-    check('Completed batch history merging deduplicates by batch ID without moving the loaded snapshot', hosterHealthRegressionStates.merged.completedCount === 1);
-    check('Completed batches preserve null history failures and trigger a reload', hosterHealthRegressionStates.nullState.preserved === true && hosterHealthRegressionStates.nullState.reloads === 1);
-    check('Completed batches preserve undefined initial history loading without starting a second load', hosterHealthRegressionStates.undefinedState.preserved === true && hosterHealthRegressionStates.undefinedState.reloads === 0);
+
+    const healthHistoryResolvers = [];
+    ipcMain.removeHandler('get-history');
+    ipcMain.handle('get-history', () => new Promise(resolve => { healthHistoryResolvers.push(resolve); }));
+    const healthBeforeReload = await wc.executeJavaScript(\`(() => {
+      window.__healthReloadPrevious = {
+        config,
+        accountStatuses,
+        sessionFailedKeys: _sessionFailedKeys,
+        hadHistory: Object.hasOwn(window, '_historyForStats'),
+        history: window._historyForStats,
+        historyEverLoaded: _historyEverLoaded,
+        historyDirty: _historyDirty
+      };
+      config = { ...config, hosters: Object.fromEntries(HOSTERS.map(name => [name, []])) };
+      accountStatuses = {};
+      _sessionFailedKeys = new Set();
+      window._historyForStats = [{
+        id: 'health-before-batch',
+        timestamp: new Date(Date.now() - 60000).toISOString(),
+        files: [{ name: 'before.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
+      }];
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+      window.__healthStaleReload = loadHistory();
+      const row = document.querySelector('[data-hoster-health-row="voe.sx"]');
+      return {
+        sample: row?.querySelector('[data-health="sample"]')?.textContent.trim(),
+        outcomes: row?.querySelector('[data-health="outcomes"]')?.textContent.trim()
+      };
+    })()\`);
+    await waitUntil(() => healthHistoryResolvers.length === 1);
+    const healthPendingReload = await wc.executeJavaScript(\`(() => {
+      handleBatchDone({
+        id: 'health-pruned-completed',
+        timestamp: new Date().toISOString(),
+        total: 1,
+        succeeded: 1,
+        failed: 0,
+        skipped: 0,
+        files: [{ name: 'pruned.bin', size: 2048, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
+      }, { historyPersisted: true, deferPersistence: true });
+      const row = document.querySelector('[data-hoster-health-row="voe.sx"]');
+      return {
+        sample: row?.querySelector('[data-health="sample"]')?.textContent.trim(),
+        outcomes: row?.querySelector('[data-health="outcomes"]')?.textContent.trim(),
+        ids: window._historyForStats.map(batch => batch.id)
+      };
+    })()\`);
+    const healthPostBatchReloadStarted = Boolean(await waitUntil(() => healthHistoryResolvers.length === 2, 750));
+    const retainedHealthHistory = [{
+      id: 'health-retained-authoritative',
+      timestamp: new Date().toISOString(),
+      files: [{ name: 'retained.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'error' }] }]
+    }];
+    const staleHealthHistory = [{
+      id: 'health-stale-before-batch',
+      timestamp: new Date().toISOString(),
+      files: [{ name: 'stale.bin', size: 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
+    }, {
+      id: 'health-pruned-completed',
+      timestamp: new Date().toISOString(),
+      files: [{ name: 'pruned.bin', size: 2048, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 1 }] }]
+    }];
+    if (healthPostBatchReloadStarted) {
+      healthHistoryResolvers[1](retainedHealthHistory);
+      await waitUntil(() => wc.executeJavaScript('window._historyForStats?.[0]?.id === "health-retained-authoritative"'));
+    } else {
+      healthHistoryResolvers[0](staleHealthHistory);
+      await wc.executeJavaScript('window.__healthStaleReload');
+    }
+    const healthAfterAuthoritativeReload = await wc.executeJavaScript(\`(() => {
+      const row = document.querySelector('[data-hoster-health-row="voe.sx"]');
+      return {
+        sample: row?.querySelector('[data-health="sample"]')?.textContent.trim(),
+        outcomes: row?.querySelector('[data-health="outcomes"]')?.textContent.trim(),
+        ids: window._historyForStats.map(batch => batch.id)
+      };
+    })()\`);
+    if (healthPostBatchReloadStarted) {
+      healthHistoryResolvers[0](staleHealthHistory);
+      await wc.executeJavaScript('window.__healthStaleReload');
+    }
+    const healthAfterStaleReload = await wc.executeJavaScript(\`(() => {
+      const row = document.querySelector('[data-hoster-health-row="voe.sx"]');
+      return {
+        sample: row?.querySelector('[data-health="sample"]')?.textContent.trim(),
+        outcomes: row?.querySelector('[data-health="outcomes"]')?.textContent.trim(),
+        ids: window._historyForStats.map(batch => batch.id)
+      };
+    })()\`);
+    restoreInitialIpcHandler('get-history');
+    await wc.executeJavaScript(\`(() => {
+      const previous = window.__healthReloadPrevious;
+      config = previous.config;
+      accountStatuses = previous.accountStatuses;
+      _sessionFailedKeys = previous.sessionFailedKeys;
+      _historyEverLoaded = previous.historyEverLoaded;
+      _historyDirty = previous.historyDirty;
+      if (previous.hadHistory) window._historyForStats = previous.history;
+      else delete window._historyForStats;
+      delete window.__healthReloadPrevious;
+      delete window.__healthStaleReload;
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+    })()\`);
+    check('A persisted batch starts a fresh Health reload without replacing existing values with a loading or local state', healthPostBatchReloadStarted && healthBeforeReload.sample === '1' && healthBeforeReload.outcomes === '1 / 0 / 0' && healthPendingReload.sample === '1' && healthPendingReload.outcomes === '1 / 0 / 0' && healthPendingReload.ids.join('|') === 'health-before-batch');
+    check('The authoritative post-batch reload removes batches already pruned by retention from Health', healthAfterAuthoritativeReload.sample === '1' && healthAfterAuthoritativeReload.outcomes === '0 / 1 / 0' && healthAfterAuthoritativeReload.ids.join('|') === 'health-retained-authoritative');
+    check('A delayed older History response cannot overwrite the newest Health snapshot', healthAfterStaleReload.sample === '1' && healthAfterStaleReload.outcomes === '0 / 1 / 0' && healthAfterStaleReload.ids.join('|') === 'health-retained-authoritative');
 
     await captureVisual('02-accounts.png');
 
