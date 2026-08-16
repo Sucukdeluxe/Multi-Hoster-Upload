@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('api', {
   selectFolderWithSizes: () => ipcRenderer.invoke('select-folder-with-sizes'),
   resolveFolderFiles: (folderPath) => ipcRenderer.invoke('resolve-folder-files', folderPath),
   getFileSizes: (paths) => ipcRenderer.invoke('get-file-sizes', paths),
+  inspectImportFiles: (entries, existingPaths) => ipcRenderer.invoke('inspect-import-files', { entries, existingPaths }),
 
   // Upload control
   startUpload: (payload) => ipcRenderer.invoke('start-upload', payload),

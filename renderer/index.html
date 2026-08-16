@@ -663,6 +663,16 @@
           <button class="btn btn-xs btn-secondary" id="clearHostersBtn">Keine</button>
         </div>
         <div class="hoster-modal-list" id="hosterModalList"></div>
+        <dl class="import-plan-summary" id="importPlanSummary" aria-label="Import-Vorabprüfung">
+          <div><dt>Kandidaten</dt><dd id="importPlanCandidates">0</dd></div>
+          <div><dt>Bereits vorhanden / dupliziert</dt><dd id="importPlanDuplicates">0</dd></div>
+          <div><dt>Durch Dateinamenfilter ausgeschlossen</dt><dd id="importPlanFiltered">0</dd></div>
+          <div><dt>Fehlend / unlesbar / leer</dt><dd id="importPlanUnavailable">0</dd></div>
+          <div><dt>Akzeptierte Dateien</dt><dd id="importPlanAccepted">0</dd></div>
+          <div><dt>Ausgewählte Ziele</dt><dd id="importPlanTargets">0</dd></div>
+          <div><dt>Entstehende Jobs</dt><dd id="importPlanJobs">0</dd></div>
+          <div><dt>Durch konfigurierte Größenlimits entfallene Jobs</dt><dd id="importPlanSizeLimited">0</dd></div>
+        </dl>
         <p class="modal-hint" id="hosterModalHint"></p>
       </div>
       <div class="modal-footer">
@@ -684,6 +694,7 @@
   <script src="../lib/speed-history.js"></script>
   <script src="../lib/upload-recovery.js"></script>
   <script src="../lib/filename-filter.js"></script>
+  <script src="../lib/import-preflight.js"></script>
   <script src="account-submit.js"></script>
   <script src="account-status.js"></script>
   <script src="history-status.js"></script>

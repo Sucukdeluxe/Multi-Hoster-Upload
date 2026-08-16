@@ -673,7 +673,7 @@ async function init() {
       }
     } else {
       // No pre-selected hosters: open modal
-      addPathsToQueue(files);
+      await addPathsToQueue(files);
     }
   });
 
@@ -1226,6 +1226,7 @@ function renderHosterModal() {
   if (available.length === 0) {
     list.innerHTML = '';
     hint.textContent = 'Keine Hoster mit Zugangsdaten vorhanden. Bitte zuerst in den Accounts einen Login oder API-Key hinterlegen.';
+    renderImportPlanSummary();
     return;
   }
 
@@ -1257,8 +1258,11 @@ function renderHosterModal() {
   list.querySelectorAll('input[data-hoster-modal]').forEach(input => {
     input.addEventListener('change', () => {
       input.closest('.hoster-option')?.classList.toggle('selected', input.checked);
+      renderImportPlanSummary();
     });
   });
+
+  renderImportPlanSummary();
 }
 
 function openHosterModal() {
@@ -1266,9 +1270,7 @@ function openHosterModal() {
   renderHosterModal();
   const description = document.getElementById('hosterModalDescription');
   if (description) {
-    description.textContent = _pendingImportSummary
-      ? formatFilenameFilterResult(_pendingImportSummary)
-      : localizeUiText('Dateien wurden hinzugefügt. Wähle jetzt die Hoster für den Upload.');
+    description.textContent = localizeUiText('Vorabprüfung abgeschlossen. Wähle jetzt die Hoster für den Upload.');
   }
   modalController.open('hosterModal', {
     initialFocus: '#cancelHosterModalBtn',
@@ -1308,12 +1310,12 @@ async function applyHosterSelection() {
   updateUploadView();
   persistQueueStateSoon(true); // immediate persist after adding files
   closeHosterModal();
-  _pendingImportSummary = null;
+  _pendingImportInspection = null;
 }
 
 function cancelHosterModal() {
   _pendingFiles = [];
-  _pendingImportSummary = null;
+  _pendingImportInspection = null;
   closeHosterModal();
 }
 
@@ -1550,25 +1552,13 @@ function setupDragDrop() {
 }
 
 let _pendingFiles = []; // Files waiting for hoster modal confirmation
-let _pendingImportSummary = null;
+let _pendingImportInspection = null;
+let _importCoordination = Promise.resolve();
 
 let _addingDropped = false;
 
 function admitFilenameFilter(files) {
   return window.FilenameFilter.applyFilenameFilter(files, config?.globalSettings?.filenameFilter);
-}
-
-function mergePendingImportSummary(result) {
-  if (!result.active) {
-    if (!_pendingImportSummary) _pendingImportSummary = null;
-    return;
-  }
-  const current = _pendingImportSummary || { total: 0, accepted: 0, excluded: 0 };
-  _pendingImportSummary = {
-    total: current.total + result.total,
-    accepted: current.accepted + result.accepted.length,
-    excluded: current.excluded + result.excluded.length
-  };
 }
 
 function formatFilenameFilterResult(result) {
@@ -1579,6 +1569,99 @@ function formatFilenameFilterResult(result) {
 
 function showFilenameFilterResult(result) {
   showCopyToast(formatFilenameFilterResult(result), 6500);
+}
+
+function mergePendingImportInspection(result) {
+  const current = _pendingImportInspection || {
+    candidateCount: 0,
+    duplicateCount: 0,
+    filteredCount: 0,
+    unavailableCount: 0,
+    accepted: []
+  };
+  _pendingImportInspection = {
+    candidateCount: current.candidateCount + result.candidateCount,
+    duplicateCount: current.duplicateCount + result.duplicateCount,
+    filteredCount: current.filteredCount + result.filteredCount,
+    unavailableCount: current.unavailableCount + result.unavailableCount,
+    accepted: current.accepted.concat(result.accepted)
+  };
+}
+
+function getImportPlanHosters() {
+  const inputs = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'));
+  return inputs.length > 0 || document.getElementById('hosterModal')?.style.display === 'flex'
+    ? inputs.map(input => input.dataset.hosterModal)
+    : getSelectedHosters();
+}
+
+function renderImportPlanSummary() {
+  if (!_pendingImportInspection || !window.ImportPreflight) return;
+  const summary = window.ImportPreflight.summarizeImportPlan({
+    inspection: _pendingImportInspection,
+    selectedHosters: getImportPlanHosters(),
+    hosterSettings
+  });
+  const values = {
+    importPlanCandidates: summary.candidateCount,
+    importPlanDuplicates: summary.duplicateCount,
+    importPlanFiltered: summary.filteredCount,
+    importPlanUnavailable: summary.unavailableCount,
+    importPlanAccepted: summary.acceptedCount,
+    importPlanTargets: summary.targetCount,
+    importPlanJobs: summary.jobCount,
+    importPlanSizeLimited: summary.sizeLimitedJobCount
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = String(value);
+  }
+}
+
+function existingImportPaths() {
+  return [...selectedFiles.map(file => file.path), ..._pendingFiles.map(file => file.path), ...queueJobs.map(job => job.file)];
+}
+
+function coordinateImportEntries(entries) {
+  const run = async () => {
+    const candidates = Array.isArray(entries) ? entries : [];
+    if (candidates.length === 0) return null;
+    let inspection;
+    try {
+      inspection = await window.api.inspectImportFiles(candidates, existingImportPaths());
+    } catch {
+      showCopyToast('Vorabprüfung fehlgeschlagen.', 6500);
+      return null;
+    }
+    mergePendingImportInspection(inspection);
+    if (inspection.accepted.length > 0) {
+      if (document.getElementById('hosterModal')?.style.display === 'flex') {
+        selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
+          .map(input => input.dataset.hosterModal);
+      }
+      const acceptedPaths = new Set(inspection.accepted.map(file => file.path));
+      clearDedupKeysForPaths(acceptedPaths);
+      _pendingFiles.push(...inspection.accepted);
+      if (document.getElementById('hosterModal')?.style.display === 'flex') {
+        syncSelectedUploadHosters();
+        renderHosterModal();
+      } else {
+        openHosterModal();
+      }
+    } else if (_pendingFiles.length > 0) {
+      renderImportPlanSummary();
+    } else if (inspection.candidateCount > 0 && inspection.duplicateCount === inspection.candidateCount) {
+      showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
+      _pendingImportInspection = null;
+    } else {
+      showCopyToast('Keine Dateien wurden akzeptiert.', 6500);
+      _pendingImportInspection = null;
+    }
+    return inspection;
+  };
+  const pending = _importCoordination.then(run, run);
+  _importCoordination = pending.catch(() => {});
+  return pending;
 }
 
 async function addDropTargetEntries(entries) {
@@ -1595,7 +1678,7 @@ async function addDropTargetEntries(entries) {
     }
     files.push(entry);
   }
-  addPathsToQueue(files);
+  await addPathsToQueue(files);
 }
 
 async function addDroppedFiles(fileList) {
@@ -1631,7 +1714,7 @@ async function addDroppedFiles(fileList) {
       const fileName = file.name || '';
       entries.push({ path: filePath, name: fileName, size: file.size });
     }
-    addPathsToQueue(entries);
+    await addPathsToQueue(entries);
   } finally {
     _addingDropped = false;
   }
@@ -1640,65 +1723,19 @@ async function addDroppedFiles(fileList) {
 async function pickFiles() {
   const paths = await window.api.selectFiles();
   if (!paths) return;
-  addPathsToQueue(paths);
+  await addPathsToQueue(paths);
 }
 
 async function pickFolder() {
   const richFiles = window.api.selectFolderWithSizes ? await window.api.selectFolderWithSizes() : null;
-  if (richFiles && Array.isArray(richFiles)) { addPathsToQueue(richFiles); return; }
+  if (richFiles && Array.isArray(richFiles)) { await addPathsToQueue(richFiles); return; }
   const paths = await window.api.selectFolder();
   if (!paths) return;
-  addPathsToQueue(paths);
+  await addPathsToQueue(paths);
 }
 
-function addPathsToQueue(paths) {
-  const existing = new Set();
-  for (const f of selectedFiles) existing.add(f.path);
-  for (const f of _pendingFiles) existing.add(f.path);
-
-  const newFiles = [];
-  const pendingSizeFetch = [];
-  for (const entry of paths) {
-    const p = typeof entry === 'string' ? entry : (entry && entry.path);
-    if (!p || existing.has(p)) continue;
-    existing.add(p);
-    const name = typeof entry === 'string' ? p.split('\\').pop().split('/').pop() : (entry.name || p.split('\\').pop().split('/').pop());
-    const size = typeof entry === 'string' ? null : (entry.size || 0);
-    newFiles.push({ path: p, name, size });
-    if (size === null || size === undefined || size === 0) pendingSizeFetch.push(p);
-  }
-  const admitted = admitFilenameFilter(newFiles);
-  if (admitted.accepted.length > 0) {
-    const acceptedPaths = new Set(admitted.accepted.map(file => file.path));
-    const acceptedSizeFetch = pendingSizeFetch.filter(filePath => acceptedPaths.has(filePath));
-    _pendingFiles.push(...admitted.accepted);
-    mergePendingImportSummary(admitted);
-    openHosterModal();
-    if (acceptedSizeFetch.length > 0 && window.api.getFileSizes) {
-      window.api.getFileSizes(acceptedSizeFetch).then((sizeMap) => {
-        if (!sizeMap || typeof sizeMap !== 'object') return;
-        let changed = false;
-        for (const f of _pendingFiles) {
-          if (sizeMap[f.path] && (!f.size || f.size === 0)) { f.size = sizeMap[f.path]; changed = true; }
-        }
-        for (const f of selectedFiles) {
-          if (sizeMap[f.path] && (!f.size || f.size === 0)) { f.size = sizeMap[f.path]; changed = true; }
-        }
-        for (const j of queueJobs) {
-          if (sizeMap[j.file] && (!j.bytesTotal || j.bytesTotal === 0)) { j.bytesTotal = sizeMap[j.file]; changed = true; }
-        }
-        if (changed) {
-          _queueStatsCache = null;
-          if (typeof renderQueueTable === 'function') renderQueueTable();
-          if (typeof updateStatusBar === 'function') updateStatusBar();
-        }
-      }).catch(() => {});
-    }
-  } else if (admitted.active && admitted.total > 0) {
-    showFilenameFilterResult(admitted);
-  } else if (Array.isArray(paths) && paths.length > 0) {
-    showCopyToast('Auswahl ist bereits in den Upload-Aufträgen.');
-  }
+async function addPathsToQueue(paths) {
+  return coordinateImportEntries(paths);
 }
 
 function updateUploadView() {
@@ -7500,12 +7537,14 @@ function setupListeners() {
       input.checked = true;
       input.closest('.hoster-option')?.classList.add('selected');
     });
+    renderImportPlanSummary();
   });
   document.getElementById('clearHostersBtn').addEventListener('click', () => {
     document.querySelectorAll('input[data-hoster-modal]').forEach(input => {
       input.checked = false;
       input.closest('.hoster-option')?.classList.remove('selected');
     });
+    renderImportPlanSummary();
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
 
