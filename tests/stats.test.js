@@ -422,6 +422,27 @@ test('mergeSkippedIntoSummary adds skipped jobs to totals and history files', ()
   });
 });
 
+test('mergeSkippedIntoSummary keeps duplicate basenames separated by file key', () => {
+  const summary = {
+    total: 2,
+    succeeded: 2,
+    failed: 0,
+    skipped: 0,
+    files: [
+      { name: 'same.mkv', fileKey: 'file-one', size: 10, results: [{ jobId: 'done-one', hoster: 'voe.sx', status: 'done' }] },
+      { name: 'same.mkv', fileKey: 'file-two', size: 20, results: [{ jobId: 'done-two', hoster: 'voe.sx', status: 'done' }] }
+    ]
+  };
+  const merged = mergeSkippedIntoSummary(summary, [
+    { jobId: 'skip-one', fileName: 'same.mkv', fileKey: 'file-one', hoster: 'byse.sx', reason: 'Kein Account' },
+    { jobId: 'skip-two', fileName: 'same.mkv', fileKey: 'file-two', hoster: 'doodstream.com', reason: 'Kein Account' }
+  ]);
+
+  assert.strictEqual(merged.files.length, 2);
+  assert.deepStrictEqual(merged.files[0].results.map(result => result.jobId), ['done-one', 'skip-one']);
+  assert.deepStrictEqual(merged.files[1].results.map(result => result.jobId), ['done-two', 'skip-two']);
+});
+
 test('isRetryableCategory: only transient + network + unknown retry-worthy', () => {
   assert.strictEqual(isRetryableCategory('hoster-transient'), true);
   assert.strictEqual(isRetryableCategory('network'), true);

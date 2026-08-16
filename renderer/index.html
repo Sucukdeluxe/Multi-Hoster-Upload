@@ -667,6 +667,95 @@
     <button class="btn btn-xs btn-secondary" id="cancelStartupResumeBtn">Abbrechen</button>
   </div>
 
+  <div class="modal-overlay" id="batchCompletionModal" style="display:none" aria-hidden="true">
+    <div class="modal-card batch-completion-card" role="dialog" aria-modal="true" aria-labelledby="batchCompletionTitle" aria-describedby="batchCompletionSummary" tabindex="-1">
+      <div class="modal-header batch-completion-header">
+        <div class="batch-completion-heading">
+          <span class="batch-completion-outcome" id="batchCompletionOutcome">Erfolgreich</span>
+          <h3 id="batchCompletionTitle">Batch abgeschlossen</h3>
+          <p id="batchCompletionSummary">Der Upload-Batch wurde abgeschlossen.</p>
+        </div>
+        <button class="icon-btn" id="batchCompletionHeaderCloseBtn" aria-label="Schließen">&times;</button>
+      </div>
+      <div class="modal-body batch-completion-body">
+        <dl class="batch-completion-transfer" aria-label="Übertragung">
+          <div><dt>Dauer</dt><dd id="batchCompletionDuration">00:00:00</dd></div>
+          <div><dt>Erfolgreich übertragen</dt><dd id="batchCompletionSuccessfulBytes">0 B</dd></div>
+          <div><dt>Durchschnitt</dt><dd id="batchCompletionAverageSpeed">0 B/s</dd></div>
+        </dl>
+
+        <div class="batch-completion-metric-sections">
+          <section class="batch-completion-section" aria-labelledby="batchCompletionFilesTitle">
+            <h4 id="batchCompletionFilesTitle">Dateien</h4>
+            <dl class="batch-completion-metrics">
+              <div><dt>Gesamt</dt><dd id="batchCompletionFilesTotal">0</dd></div>
+              <div><dt>Vollständig erfolgreich</dt><dd id="batchCompletionFilesFullySucceeded">0</dd></div>
+              <div><dt>Teilweise erfolgreich</dt><dd id="batchCompletionFilesPartiallySucceeded">0</dd></div>
+              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionFilesFailed">0</dd></div>
+            </dl>
+          </section>
+
+          <section class="batch-completion-section" aria-labelledby="batchCompletionJobsTitle">
+            <h4 id="batchCompletionJobsTitle">Aufträge</h4>
+            <dl class="batch-completion-metrics batch-completion-job-metrics">
+              <div><dt>Gesamt</dt><dd id="batchCompletionJobsTotal">0</dd></div>
+              <div><dt>Erfolgreich</dt><dd id="batchCompletionJobsSucceeded">0</dd></div>
+              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionJobsFailed">0</dd></div>
+              <div><dt>Übersprungen</dt><dd id="batchCompletionJobsSkipped">0</dd></div>
+              <div><dt>Abgebrochen</dt><dd id="batchCompletionJobsAborted">0</dd></div>
+            </dl>
+          </section>
+
+          <section class="batch-completion-section" aria-labelledby="batchCompletionCleanupTitle">
+            <h4 id="batchCompletionCleanupTitle">Quelldateien</h4>
+            <dl class="batch-completion-metrics">
+              <div><dt>Angefordert</dt><dd id="batchCompletionCleanupRequested">0</dd></div>
+              <div><dt>Gelöscht</dt><dd id="batchCompletionCleanupDeleted">0</dd></div>
+              <div><dt>Blockiert</dt><dd id="batchCompletionCleanupBlocked">0</dd></div>
+              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionCleanupFailed">0</dd></div>
+            </dl>
+          </section>
+        </div>
+
+        <section class="batch-completion-section batch-completion-hosters" aria-labelledby="batchCompletionHostersTitle">
+          <h4 id="batchCompletionHostersTitle">Hosterübersicht</h4>
+          <div class="batch-completion-table-scroll" tabindex="0">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Hoster</th>
+                  <th scope="col">Aufträge</th>
+                  <th scope="col">Erfolgreich</th>
+                  <th scope="col">Fehlgeschlagen</th>
+                  <th scope="col">Übersprungen</th>
+                  <th scope="col">Abgebrochen</th>
+                  <th scope="col">Übertragen</th>
+                </tr>
+              </thead>
+              <tbody id="batchCompletionHostersBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="batch-completion-section batch-completion-errors" id="batchCompletionErrorsSection" aria-labelledby="batchCompletionErrorsTitle" hidden>
+          <div class="batch-completion-section-heading">
+            <h4 id="batchCompletionErrorsTitle">Fehlerbeispiele</h4>
+            <span id="batchCompletionErrorsCount">0</span>
+          </div>
+          <ol id="batchCompletionErrorsList"></ol>
+          <p id="batchCompletionErrorsMore" hidden></p>
+        </section>
+      </div>
+      <div class="modal-footer batch-completion-footer">
+        <div class="batch-completion-export-actions">
+          <button class="btn btn-secondary" id="batchCompletionExportJsonBtn">JSON exportieren</button>
+          <button class="btn btn-secondary" id="batchCompletionExportCsvBtn">Fehler-CSV exportieren</button>
+        </div>
+        <button class="btn btn-primary" id="batchCompletionCloseBtn">Schließen</button>
+      </div>
+    </div>
+  </div>
+
   <div class="shutdown-overlay" id="shutdownOverlay" style="display:none" aria-hidden="true">
     <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage" tabindex="-1">
       <p id="shutdownMessage">System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...</p>

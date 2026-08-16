@@ -21,6 +21,7 @@ const {
 configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
 const fs = require('fs');
+const crypto = require('crypto');
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
@@ -51,6 +52,7 @@ const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
+const { buildBatchCompletionReport, buildBatchErrorCsv } = require('./lib/batch-completion-report');
 const { buildFailedUploadSummary, buildTerminalJobSnapshots } = require('./lib/upload-recovery');
 const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
 const { createBatchMutationGate } = require('./lib/batch-mutation-gate');
@@ -140,7 +142,10 @@ configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
 const uploadBatchMutationGates = new WeakMap();
 const uploadRecoveryStates = new WeakMap();
+const uploadBatchAdmissionSkips = new WeakMap();
+const batchCompletionReports = new Map();
 let lastSessionSummary = null;
+let lastBatchCompletionReport = null;
 let startupRecoveryCoordinator = null;
 let startupRevealGate = null;
 let startupRendererHandlers = null;
@@ -1134,6 +1139,25 @@ async function _persistFallbackLogPath(workingPath) {
   }
 }
 
+function publishBatchCompletionReport(summary, options = {}) {
+  if (isAllAborted(summary)) return null;
+  let secrets = [];
+  try { secrets = collectSecretValues(configStore.load()); } catch {}
+  const report = buildBatchCompletionReport({
+    reportId: `report-${summary?.id || Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    summary,
+    startedAt: options.startedAt,
+    completedAt: options.completedAt,
+    cleanupOutcomes: options.cleanupOutcomes,
+    secrets
+  });
+  batchCompletionReports.set(report.reportId, report);
+  while (batchCompletionReports.size > 5) batchCompletionReports.delete(batchCompletionReports.keys().next().value);
+  lastBatchCompletionReport = report;
+  safeSend('upload-batch-report', report);
+  return report;
+}
+
 // Whether this hoster's successful links should land in fileuploader.log.
 // Reads the LIVE uploadManager.hosterSettings (kept current via
 // updateSettings) so a mid-batch toggle takes effect immediately. Falls back
@@ -1293,6 +1317,12 @@ function buildTaskFromAccount(hoster, account, extra) {
   return task;
 }
 
+function buildBatchFileKey(file) {
+  const resolved = path.resolve(String(file || ''));
+  const canonical = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
 let _rotationCursors = null;
 function rotationCursors() {
   if (_rotationCursors === null) {
@@ -1323,7 +1353,7 @@ function buildUploadTasks(config, files, hosters, pick) {
     for (const hoster of hosters) {
       const account = pick(hoster);
       if (!account) { debugLog(`  skip ${hoster}: no enabled account with creds`); continue; }
-      tasks.push(buildTaskFromAccount(hoster, account, { file }));
+      tasks.push(buildTaskFromAccount(hoster, account, { file, fileKey: buildBatchFileKey(file) }));
     }
   }
   return tasks;
@@ -1338,6 +1368,7 @@ function buildUploadTasksFromJobs(config, jobs, pick) {
     if (!account) { debugLog(`  skip ${job.hoster}: no enabled account`); continue; }
     tasks.push(buildTaskFromAccount(job.hoster, account, {
       file: job.file,
+      fileKey: buildBatchFileKey(job.file),
       jobId: job.id || job.jobId || null,
       sourceCleanupToken: job.sourceCleanupToken || null
     }));
@@ -2248,6 +2279,27 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
   return out;
 });
 
+ipcMain.handle('get-last-batch-completion-report', () => lastBatchCompletionReport);
+
+ipcMain.handle('export-batch-completion-report', async (_event, reportId, format) => {
+  const report = batchCompletionReports.get(String(reportId || ''));
+  if (!report) return { ok: false, error: shellText('Der Batch-Bericht ist nicht mehr verfügbar', 'The batch report is no longer available') };
+  const normalizedFormat = String(format || '').toLowerCase();
+  if (normalizedFormat !== 'json' && normalizedFormat !== 'csv') return { ok: false, error: shellText('Ungültiges Exportformat', 'Invalid export format') };
+  const datePrefix = report.completedAt.slice(0, 10);
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: shellText('Batch-Bericht exportieren', 'Export batch report'),
+    defaultPath: `upload-batch-report-${datePrefix}.${normalizedFormat}`,
+    filters: normalizedFormat === 'json'
+      ? [{ name: shellText('JSON-Datei', 'JSON file'), extensions: ['json'] }]
+      : [{ name: shellText('CSV-Datei', 'CSV file'), extensions: ['csv'] }]
+  });
+  if (canceled || !filePath) return { ok: false, canceled: true };
+  const content = normalizedFormat === 'json' ? JSON.stringify(report, null, 2) : buildBatchErrorCsv(report);
+  fs.writeFileSync(filePath, content, 'utf-8');
+  return { ok: true, path: filePath, format: normalizedFormat, reportId: report.reportId };
+});
+
 ipcMain.handle('inspect-import-files', async (_event, payload) => {
   const input = payload && typeof payload === 'object' ? payload : {};
   const currentConfig = configStore.load();
@@ -2270,6 +2322,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
 
 async function executeReservedUploadStart(payload, startLease) {
   const config = configStore.load();
+  const batchStartedAt = new Date().toISOString();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
@@ -2292,6 +2345,7 @@ async function executeReservedUploadStart(payload, startLease) {
     jobId: j.id,
     file: j.file,
     fileName: j.fileName || path.basename(j.file || ''),
+    fileKey: buildBatchFileKey(j.file),
     size: Number(j.bytesTotal) || 0,
     hoster: j.hoster,
     reason: 'Kein gültiger Account für diesen Hoster'
@@ -2311,6 +2365,22 @@ async function executeReservedUploadStart(payload, startLease) {
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   persistRotation(pick);
 
+  const sourceCleanup = createSourceFileCleanup({
+    fs,
+    path,
+    platform: process.platform,
+    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
+    audit: appendSourceCleanupAudit,
+    journal: sourceDeleteJournal
+  });
+  let sourceCleanupFingerprints;
+  try {
+    sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
+  } catch (error) {
+    return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
+  }
+  for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
+
   if (tasks.length === 0) {
     const skippedSummary = stats.mergeSkippedIntoSummary({
       id: `skipped-${Date.now()}`,
@@ -2329,6 +2399,15 @@ async function executeReservedUploadStart(payload, startLease) {
     });
     if (!finalization.queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     if (!finalization.terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
+    const cleanupOutcomes = await sourceCleanup.finishBatch({
+      historyPersisted: finalization.historyPersisted,
+      queuePersisted: finalization.queuePersisted && finalization.terminalRecoveryPersisted
+    });
+    publishBatchCompletionReport(skippedSummary, {
+      startedAt: batchStartedAt,
+      completedAt: new Date().toISOString(),
+      cleanupOutcomes
+    });
     return {
       started: true,
       taskCount: 0,
@@ -2343,10 +2422,12 @@ async function executeReservedUploadStart(payload, startLease) {
   uploadBatchMutationGates.set(uploadManager, batchMutationGate);
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
+  const batchAdmissionSkippedJobs = [...skippedJobs];
+  uploadBatchAdmissionSkips.set(_thisManager, batchAdmissionSkippedJobs);
 
   const recovery = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    startedAt: new Date().toISOString(),
+    startedAt: batchStartedAt,
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
 
@@ -2375,24 +2456,6 @@ async function executeReservedUploadStart(payload, startLease) {
   // new upload; addJobs during a running batch keeps them).
   _jobLogCollector.clear();
 
-  const sourceCleanup = createSourceFileCleanup({
-    fs,
-    path,
-    platform: process.platform,
-    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
-    audit: appendSourceCleanupAudit,
-    journal: sourceDeleteJournal
-  });
-  let sourceCleanupFingerprints;
-  try {
-    sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
-  } catch (error) {
-    if (uploadManager === _thisManager) {
-      uploadManager = null;
-      globalThis._mhuUploadManagerRef = null;
-    }
-    return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
-  }
   try {
     await configStore.saveUploadRecovery(recovery);
   } catch (error) {
@@ -2404,7 +2467,6 @@ async function executeReservedUploadStart(payload, startLease) {
     return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
   }
   uploadRecoveryStates.set(_thisManager, recovery);
-  for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
   _thisManager.sourceFileCleanup = sourceCleanup;
   const _producerTracker = trackUploadProducer(_thisManager);
 
@@ -2536,7 +2598,7 @@ async function executeReservedUploadStart(payload, startLease) {
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
     const hadActiveBatchMutation = await batchMutationGate.sealAndDrain();
-    summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
+    summary = stats.mergeSkippedIntoSummary(summary, batchAdmissionSkippedJobs);
     lastSessionSummary = summary;
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
@@ -2557,9 +2619,14 @@ async function executeReservedUploadStart(payload, startLease) {
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
     if (!terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
     if (hadActiveBatchMutation) debugLog('source cleanup blocked: batch mutation overlapped finalization');
-    await sourceCleanup.finishBatch({
+    const cleanupOutcomes = await sourceCleanup.finishBatch({
       historyPersisted,
       queuePersisted: queuePersisted && terminalRecoveryPersisted && !hadActiveBatchMutation
+    });
+    publishBatchCompletionReport(summary, {
+      startedAt: recovery.startedAt,
+      completedAt: new Date().toISOString(),
+      cleanupOutcomes
     });
     _producerTracker.finish();
 
@@ -2600,9 +2667,22 @@ async function executeReservedUploadStart(payload, startLease) {
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
     }).catch(async (err) => {
       debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
-      await batchMutationGate.sealAndDrain();
-      const errorSummary = buildFailedUploadSummary(tasks, 'Upload konnte nicht gestartet werden');
-      await uploadFinalizationBarrier.finalize(errorSummary, recovery);
+      const hadActiveBatchMutation = await batchMutationGate.sealAndDrain();
+      const errorSummary = stats.mergeSkippedIntoSummary(
+        buildFailedUploadSummary(tasks, 'Upload konnte nicht gestartet werden'),
+        batchAdmissionSkippedJobs
+      );
+      lastSessionSummary = errorSummary;
+      const finalization = await uploadFinalizationBarrier.finalize(errorSummary, recovery);
+      const cleanupOutcomes = await sourceCleanup.finishBatch({
+        historyPersisted: finalization.historyPersisted,
+        queuePersisted: finalization.queuePersisted && finalization.terminalRecoveryPersisted && !hadActiveBatchMutation
+      });
+      publishBatchCompletionReport(errorSummary, {
+        startedAt: recovery.startedAt,
+        completedAt: new Date().toISOString(),
+        cleanupOutcomes
+      });
       _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
@@ -2658,7 +2738,15 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
     const skippedJobs = jobs
       .filter(j => j && j.id && !taskJobIds.has(j.id))
-      .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
+      .map(j => ({
+        jobId: j.id,
+        file: j.file,
+        fileName: j.fileName || path.basename(j.file || ''),
+        fileKey: buildBatchFileKey(j.file),
+        size: Number(j.bytesTotal) || 0,
+        hoster: j.hoster,
+        reason: 'Kein gültiger Account für diesen Hoster'
+      }));
     if (jobs.length > 0) {
       const auditedAdd = await runAfterDurableAudit(
         () => appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add'),
@@ -2691,6 +2779,7 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     if (batchManager.sourceFileCleanup) {
       for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
     }
+    if (skippedJobs.length > 0) uploadBatchAdmissionSkips.get(batchManager)?.push(...skippedJobs);
 
     if (tasks.length === 0) {
       debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);

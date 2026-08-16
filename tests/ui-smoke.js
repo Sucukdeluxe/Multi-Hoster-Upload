@@ -118,6 +118,48 @@ let releaseBlockedWrite = null;
 let blockedHistoryWriteMarker = '';
 let blockedHistoryWriteStarted = false;
 let releaseBlockedHistoryWrite = null;
+const successfulBatchCompletionReport = {
+  reportId: 'ui-report-success',
+  batchId: 'ui-batch-success',
+  startedAt: '2026-08-16T10:00:00.000Z',
+  completedAt: '2026-08-16T10:00:12.000Z',
+  durationSec: 12,
+  files: { total: 2, fullySucceeded: 2, partiallySucceeded: 0, failed: 0 },
+  jobs: { total: 4, succeeded: 4, failed: 0, skipped: 0, aborted: 0 },
+  cleanup: { requested: 2, deleted: 2, blocked: 0, failed: 0 },
+  transfer: { successfulBytes: 3145728, averageBytesPerSecond: 262144 },
+  hosters: {
+    'doodstream.com': { total: 2, succeeded: 2, failed: 0, skipped: 0, aborted: 0, successfulBytes: 1572864 },
+    'voe.sx': { total: 2, succeeded: 2, failed: 0, skipped: 0, aborted: 0, successfulBytes: 1572864 }
+  },
+  errors: []
+};
+const mixedBatchCompletionReport = {
+  reportId: 'ui-report-mixed',
+  batchId: 'ui-batch-mixed',
+  startedAt: '2026-08-16T11:00:00.000Z',
+  completedAt: '2026-08-16T11:01:40.000Z',
+  durationSec: 100,
+  files: { total: 4, fullySucceeded: 1, partiallySucceeded: 1, failed: 2 },
+  jobs: { total: 10, succeeded: 3, failed: 5, skipped: 1, aborted: 1 },
+  cleanup: { requested: 6, deleted: 2, blocked: 3, failed: 1 },
+  transfer: { successfulBytes: 5242880, averageBytesPerSecond: 52428.8 },
+  hosters: {
+    'doodstream.com': { total: 4, succeeded: 2, failed: 2, skipped: 0, aborted: 0, successfulBytes: 4194304 },
+    'voe.sx': { total: 3, succeeded: 1, failed: 1, skipped: 1, aborted: 0, successfulBytes: 1048576 },
+    'byse.sx': { total: 3, succeeded: 0, failed: 2, skipped: 0, aborted: 1, successfulBytes: 0 }
+  },
+  errors: [
+    { jobId: 'mixed-1', fileName: 'alpha.mkv', hoster: 'doodstream.com', status: 'error', category: 'network', attempt: 2, maxAttempts: 3, remoteCommitUncertain: false, message: 'Connection timed out' },
+    { jobId: 'mixed-2', fileName: 'beta.mkv', hoster: 'voe.sx', status: 'error', category: 'account-error', attempt: 1, maxAttempts: 1, remoteCommitUncertain: false, message: 'Account rejected' },
+    { jobId: 'mixed-3', fileName: 'gamma.mkv', hoster: 'byse.sx', status: 'error', category: 'file-rejected', attempt: 1, maxAttempts: 2, remoteCommitUncertain: false, message: 'File rejected' },
+    { jobId: 'mixed-4', fileName: 'delta.mkv', hoster: 'doodstream.com', status: 'error', category: 'hoster-transient', attempt: 3, maxAttempts: 3, remoteCommitUncertain: true, message: 'Remote completion is uncertain' },
+    { jobId: 'mixed-5', fileName: 'epsilon.mkv', hoster: 'byse.sx', status: 'error', category: 'unknown', attempt: 1, maxAttempts: 1, remoteCommitUncertain: false, message: 'Unknown response' },
+    { jobId: 'mixed-6', fileName: 'zeta.mkv', hoster: 'voe.sx', status: 'done', category: 'unknown', attempt: 1, maxAttempts: 2, remoteCommitUncertain: true, message: 'Confirmation missing' }
+  ]
+};
+let batchCompletionReportReads = 0;
+const batchCompletionExportCalls = [];
 ConfigStore.prototype._atomicWrite = function (data) {
   activeConfigStore = this;
   if (blockedWriteMarker && !blockedWriteStarted && String(data).includes(blockedWriteMarker)) {
@@ -294,6 +336,11 @@ setTimeout(async () => {
       await saveSettings({ feedbackText: 'Saved' });
       return new URL(location.href).searchParams.get('language');
     })()\`);
+    ipcMain.removeHandler('get-last-batch-completion-report');
+    registerIpcHandler('get-last-batch-completion-report', () => {
+      batchCompletionReportReads++;
+      return successfulBatchCompletionReport;
+    });
     const languageReloadFinished = new Promise(resolve => wc.once('did-finish-load', resolve));
     wc.reload();
     await languageReloadFinished;
@@ -301,6 +348,22 @@ setTimeout(async () => {
       if (typeof config !== 'object' || config.globalSettings?.language !== 'en') return '';
       return [document.documentElement.lang, new URL(location.href).searchParams.get('language'), [...document.querySelectorAll('.tab')].map(tab => tab.textContent.trim()).join(',')].join('|');
     })()\`));
+    const startupBatchReportState = await waitUntil(() => wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('batchCompletionModal');
+      if (!modal || modal.style.display === 'none') return null;
+      return {
+        title: document.getElementById('batchCompletionTitle')?.textContent.trim(),
+        outcome: modal.dataset.outcome,
+        files: ['Total', 'FullySucceeded', 'PartiallySucceeded', 'Failed'].map(key => document.getElementById('batchCompletionFiles' + key)?.textContent.trim()).join('|'),
+        jobs: ['Total', 'Succeeded', 'Failed', 'Skipped', 'Aborted'].map(key => document.getElementById('batchCompletionJobs' + key)?.textContent.trim()).join('|'),
+        hosters: [...document.querySelectorAll('#batchCompletionHostersBody tr')].map(row => row.dataset.hoster).join('|'),
+        errorsHidden: document.getElementById('batchCompletionErrorsSection')?.hidden,
+        focused: document.activeElement?.id,
+        isolated: [...document.body.children].filter(element => element !== modal).every(element => element.inert)
+      };
+    })()\`));
+    check('Startup fetch shows the latest successful batch report exactly once', batchCompletionReportReads === 1 && startupBatchReportState?.title === 'Batch complete' && startupBatchReportState?.outcome === 'success' && startupBatchReportState?.files === '2|2|0|0' && startupBatchReportState?.jobs === '4|4|0|0|0');
+    check('Successful batch report renders hosts, hides empty errors and isolates the background', startupBatchReportState?.hosters === 'doodstream.com|voe.sx' && startupBatchReportState?.errorsHidden === true && startupBatchReportState?.focused === 'batchCompletionHeaderCloseBtn' && startupBatchReportState?.isolated === true);
     const germanLanguageQuery = await wc.executeJavaScript(\`(async () => {
       const input = document.getElementById('languageInput');
       input.value = 'de';
@@ -309,6 +372,89 @@ setTimeout(async () => {
       return { query: new URL(location.href).searchParams.get('language'), active: document.documentElement.lang };
     })()\`);
     check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === 'en|en|Upload,Accounts,Settings,History' && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
+
+    const germanBatchReportState = await wc.executeJavaScript(\`(() => ({
+      title: document.getElementById('batchCompletionTitle')?.textContent.trim(),
+      filesHeading: document.getElementById('batchCompletionFilesTitle')?.textContent.trim(),
+      exportJson: document.getElementById('batchCompletionExportJsonBtn')?.textContent.trim(),
+      exportCsv: document.getElementById('batchCompletionExportCsvBtn')?.textContent.trim()
+    }))()\`);
+    check('Open batch report switches completely from English to German without restart', germanBatchReportState.title === 'Batch abgeschlossen' && germanBatchReportState.filesHeading === 'Dateien' && germanBatchReportState.exportJson === 'JSON exportieren' && germanBatchReportState.exportCsv === 'Fehler-CSV exportieren');
+
+    await wc.executeJavaScript('document.getElementById("batchCompletionCloseBtn")?.click()');
+    win.webContents.send('upload-batch-report', successfulBatchCompletionReport);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const duplicateBatchReportHidden = await wc.executeJavaScript('document.getElementById("batchCompletionModal")?.style.display === "none"');
+    check('The same batch report event is ignored after its reportId was already shown', duplicateBatchReportHidden === true);
+
+    await wc.executeJavaScript('document.getElementById("addFilesBtn")?.focus()');
+    win.webContents.send('upload-batch-report', mixedBatchCompletionReport);
+    const mixedBatchReportState = await waitUntil(() => wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('batchCompletionModal');
+      if (!modal || modal.style.display === 'none' || modal.dataset.reportId !== 'ui-report-mixed') return null;
+      return {
+        outcome: modal.dataset.outcome,
+        files: ['Total', 'FullySucceeded', 'PartiallySucceeded', 'Failed'].map(key => document.getElementById('batchCompletionFiles' + key)?.textContent.trim()).join('|'),
+        jobs: ['Total', 'Succeeded', 'Failed', 'Skipped', 'Aborted'].map(key => document.getElementById('batchCompletionJobs' + key)?.textContent.trim()).join('|'),
+        cleanup: ['Requested', 'Deleted', 'Blocked', 'Failed'].map(key => document.getElementById('batchCompletionCleanup' + key)?.textContent.trim()).join('|'),
+        errorCount: document.querySelectorAll('#batchCompletionErrorsList > li').length,
+        more: document.getElementById('batchCompletionErrorsMore')?.textContent.trim(),
+        uncertain: document.querySelectorAll('#batchCompletionErrorsList .batch-completion-error-uncertain').length,
+        hosters: [...document.querySelectorAll('#batchCompletionHostersBody tr')].map(row => row.dataset.hoster).join('|')
+      };
+    })()\`));
+    check('Mixed batch report renders all file, job, cleanup and host metrics', mixedBatchReportState?.outcome === 'mixed' && mixedBatchReportState?.files === '4|1|1|2' && mixedBatchReportState?.jobs === '10|3|5|1|1' && mixedBatchReportState?.cleanup === '6|2|3|1' && mixedBatchReportState?.hosters === 'doodstream.com|voe.sx|byse.sx');
+    check('Mixed batch report limits visible error examples to five and marks uncertain completion', mixedBatchReportState?.errorCount === 5 && mixedBatchReportState?.more === '1 weiterer Fehler' && mixedBatchReportState?.uncertain === 1);
+
+    const standardBatchReportFit = await wc.executeJavaScript(\`(() => {
+      const card = document.querySelector('#batchCompletionModal .batch-completion-card')?.getBoundingClientRect();
+      const body = document.querySelector('#batchCompletionModal .batch-completion-body');
+      return Boolean(card && body && card.left >= 0 && card.right <= innerWidth && card.top >= 0 && card.bottom <= innerHeight && body.scrollWidth <= body.clientWidth + 1);
+    })()\`);
+    check('Batch report fits the standard window without horizontal overflow', standardBatchReportFit === true);
+    await setWindowBounds({ ...originalBounds, width: 800, height: 550 });
+    const minimumBatchReportFit = await wc.executeJavaScript(\`(() => {
+      const card = document.querySelector('#batchCompletionModal .batch-completion-card')?.getBoundingClientRect();
+      const body = document.querySelector('#batchCompletionModal .batch-completion-body');
+      const footer = document.querySelector('#batchCompletionModal .modal-footer')?.getBoundingClientRect();
+      return Boolean(card && body && footer && card.left >= 0 && card.right <= innerWidth && card.top >= 0 && card.bottom <= innerHeight && body.scrollWidth <= body.clientWidth + 1 && footer.bottom <= card.bottom + 1);
+    })()\`);
+    check('Batch report remains readable and contained at the minimum window size', minimumBatchReportFit === true);
+    await setWindowBounds(originalBounds);
+
+    ipcMain.removeHandler('export-batch-completion-report');
+    registerIpcHandler('export-batch-completion-report', (_event, reportId, format) => {
+      batchCompletionExportCalls.push({ reportId, format });
+      return { ok: true, reportId, format, path: 'C:/ui/report.' + format };
+    });
+    await wc.executeJavaScript('document.getElementById("batchCompletionExportJsonBtn")?.click()');
+    await waitUntil(() => batchCompletionExportCalls.length === 1);
+    await wc.executeJavaScript('document.getElementById("batchCompletionExportCsvBtn")?.click()');
+    await waitUntil(() => batchCompletionExportCalls.length === 2);
+    check('Batch report exports bind JSON and error CSV to the exact visible reportId', batchCompletionExportCalls.length === 2 && batchCompletionExportCalls[0].reportId === 'ui-report-mixed' && batchCompletionExportCalls[0].format === 'json' && batchCompletionExportCalls[1].reportId === 'ui-report-mixed' && batchCompletionExportCalls[1].format === 'csv');
+    restoreInitialIpcHandler('export-batch-completion-report');
+    restoreInitialIpcHandler('get-last-batch-completion-report');
+
+    const batchReportFocusTrap = await wc.executeJavaScript(\`(() => {
+      const first = document.getElementById('batchCompletionHeaderCloseBtn');
+      const last = document.getElementById('batchCompletionCloseBtn');
+      first.focus();
+      first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      const backward = document.activeElement?.id;
+      last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      return { backward, forward: document.activeElement?.id };
+    })()\`);
+    check('Batch report traps forward and backward keyboard focus', batchReportFocusTrap.backward === 'batchCompletionCloseBtn' && batchReportFocusTrap.forward === 'batchCompletionHeaderCloseBtn');
+    await wc.executeJavaScript('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }))');
+    const escapedBatchReportState = await wc.executeJavaScript(\`(() => {
+      const modal = document.getElementById('batchCompletionModal');
+      return {
+        hidden: modal?.style.display === 'none' && modal?.getAttribute('aria-hidden') === 'true',
+        focus: document.activeElement?.id,
+        isolated: [...document.body.children].some(element => element !== modal && element.inert)
+      };
+    })()\`);
+    check('Escape closes the batch report, restores focus and removes background isolation', escapedBatchReportState.hidden && escapedBatchReportState.focus === 'addFilesBtn' && escapedBatchReportState.isolated === false);
 
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
@@ -2764,6 +2910,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
 
     console.log('\\n=== History View ===');
+    await wc.executeJavaScript('document.getElementById("batchCompletionModal")?.style.display !== "none" && document.getElementById("batchCompletionCloseBtn")?.click()');
 
     let historyFixture = [{
       timestamp: '2026-08-10T10:00:00.000Z',
@@ -3359,7 +3506,7 @@ setTimeout(async () => {
       [...document.querySelectorAll('[role="dialog"]')].every(dialog => dialog.getAttribute('aria-modal') === 'true' && dialog.tabIndex === -1),
       [...document.querySelectorAll('[role="dialog"]')].every(dialog => dialog.parentElement?.getAttribute('aria-hidden') === 'true')
     ].join('|'))()\`);
-    check('Every renderer dialog has complete hidden modal semantics', modalSemantics === '8|true|true');
+    check('Every renderer dialog has complete hidden modal semantics', modalSemantics === '9|true|true');
 
     const rapidViewStability = await wc.executeJavaScript(\`(async () => {
       const sequence = ['upload', 'accounts', 'settings', 'history', 'settings', 'accounts', 'upload', 'history', 'upload', 'accounts', 'history', 'settings'];
@@ -3752,6 +3899,7 @@ setTimeout(async () => {
     check('Renderer initialization failures notify main with serializable details', typeof initializationFailureSignal?.message === 'string' && initializationFailureSignal.message.includes('Injected renderer initialization failure') && typeof initializationFailureSignal.stack === 'string');
     check('Renderer initialization failure recovery restores the real interface', initializationRecovery === true);
 
+    await wc.executeJavaScript('document.getElementById("batchCompletionModal")?.style.display !== "none" && document.getElementById("batchCompletionCloseBtn")?.click()');
     const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: { de: "\\\\n\\\\n\\\\n## Neu in dieser Version\\\\n\\\\n\\\\n### Menüs und Navigation\\\\n\\\\n- Direkter Sprachwechsel hinzugefügt.\\\\n- Einstellungsdarstellung verbessert.\\\\n\\\\n\\\\n", en: "## New in this version\\\\n\\\\n### Menus and navigation\\\\n\\\\n- Added live language switching.\\\\n- Improved settings layout." } }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
     check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');
 
@@ -3785,7 +3933,7 @@ setTimeout(async () => {
     const updateHeaderHint = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.textContent?.trim(), button?.getAttribute("aria-label"), button?.dataset.tooltip].join("|"); })()');
     check('Available update gives the header action a matching hint', updateHeaderHint === 'Update verfügbar|Update v9.9.9 verfügbar. Klicken zum Installieren.|Update v9.9.9 verfügbar. Klicken zum Installieren.');
 
-    const updateDialogDismissed = await wc.executeJavaScript('document.getElementById("dismissUpdateBtn")?.click(); (() => { const overlay = document.getElementById("updateBanner"); return [overlay?.style.display, overlay?.getAttribute("aria-hidden"), document.activeElement?.id, document.querySelector(".app-header")?.inert, document.querySelector(".view.active")?.inert].join("|"); })()');
+    const updateDialogDismissed = await wc.executeJavaScript('document.getElementById("batchCompletionModal")?.style.display !== "none" && document.getElementById("batchCompletionCloseBtn")?.click(); document.getElementById("dismissUpdateBtn")?.click(); (() => { const overlay = document.getElementById("updateBanner"); return [overlay?.style.display, overlay?.getAttribute("aria-hidden"), document.activeElement?.id, document.querySelector(".app-header")?.inert, document.querySelector(".view.active")?.inert].join("|"); })()');
     check('Update dialog closes and restores focus and background', updateDialogDismissed === 'none|true|headerUpdateBtn|false|false');
 
     const busyUpdateState = await wc.executeJavaScript(\`(() => {

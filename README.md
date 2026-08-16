@@ -8,13 +8,14 @@ Multi Hoster Uploader is a Windows desktop application for sending file batches 
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.21. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.22. Use the release page for the executables and the full English changelog.
 
 ## Features
 
 ### Upload workspace
 
 - Add individual files, complete folders, or files by drag and drop.
+- Inspect imports before queue creation and review readable, duplicate, filtered, and host-size-limited files in one summary.
 - Filter new imports by file name with reusable include or exclude conditions before upload jobs are created.
 - Review how many selected files were accepted or excluded before choosing upload destinations.
 - Build one job per selected file and destination.
@@ -34,12 +35,14 @@ The latest public release is version 2.1.21. Use the release page for the execut
 - Keep multiple named accounts for each host.
 - Validate credentials before a new or edited account is saved.
 - Run health checks for one account or all configured accounts.
+- Review recent host reliability, throughput, last success, and account availability in a dedicated health overview.
 - Complete an OTP check in the account view when a host requests it.
 - Enable, disable, prioritize, and reorder accounts.
 - Rotate files across enabled accounts or keep the first enabled account as the primary account.
 - Switch to an available fallback account when an account-specific upload error is detected.
 - Apply retries, concurrency, bandwidth, file-size, and pacing settings per host.
 - Monitor a folder for new files and start matching uploads automatically.
+- Restrict new upload starts to configurable weekday and local-time windows while allowing active transfers to finish.
 
 ### History, transfer, and updates
 
@@ -48,6 +51,7 @@ The latest public release is version 2.1.21. Use the release page for the execut
 - Retain all history, a time window, or the latest 100 or 1,000 uploads.
 - Export history as CSV or JSON.
 - Export a per-session CSV or JSON report with host success rates, duration, bytes, attempts, and errors.
+- Review a final post-cleanup batch report with file, job, host, transfer, and source-cleanup totals, then export the complete report as JSON or sanitized errors as CSV.
 - Clearly mark interrupted uploads after a restart so they can be resumed deliberately.
 - Use the complete interface in English or German and switch at runtime.
 - Export settings locally or transfer them with an encrypted online backup key.

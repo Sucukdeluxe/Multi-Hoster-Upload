@@ -61,6 +61,7 @@ function refreshLocalizedRuntimeUi() {
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
+  if (_activeBatchCompletionReport) renderBatchCompletionReport(_activeBatchCompletionReport);
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -511,6 +512,228 @@ const modalController = (() => {
   return { open, close, isOpen };
 })();
 
+const _shownBatchCompletionReportIds = new Set();
+let _activeBatchCompletionReport = null;
+let _batchCompletionReportUiReady = false;
+
+function batchReportNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function batchReportInteger(value) {
+  return Math.max(0, Math.trunc(batchReportNumber(value)));
+}
+
+function setBatchCompletionValue(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = batchReportInteger(value).toLocaleString(getUiLocale());
+}
+
+function getBatchCompletionOutcome(report) {
+  const files = report?.files || {};
+  const jobs = report?.jobs || {};
+  const cleanup = report?.cleanup || {};
+  return batchReportInteger(files.partiallySucceeded) > 0
+    || batchReportInteger(files.failed) > 0
+    || batchReportInteger(jobs.failed) > 0
+    || batchReportInteger(jobs.skipped) > 0
+    || batchReportInteger(jobs.aborted) > 0
+    || batchReportInteger(cleanup.blocked) > 0
+    || batchReportInteger(cleanup.failed) > 0
+    || (Array.isArray(report?.errors) && report.errors.length > 0)
+    ? 'mixed'
+    : 'success';
+}
+
+function getBatchErrorCategoryLabel(category) {
+  const labels = {
+    network: 'Netzwerk',
+    'hoster-transient': 'Temporärer Hosterfehler',
+    'file-rejected': 'Datei abgelehnt',
+    'account-error': 'Account-Fehler',
+    aborted: 'Abgebrochen',
+    unknown: 'Unbekannt'
+  };
+  return localizeUiText(labels[String(category || '')] || 'Unbekannt');
+}
+
+function getBatchErrorStatusLabel(status) {
+  const labels = {
+    done: 'Erfolgreich',
+    error: 'Fehlgeschlagen',
+    skipped: 'Übersprungen',
+    aborted: 'Abgebrochen'
+  };
+  return localizeUiText(labels[String(status || '')] || 'Fehlgeschlagen');
+}
+
+function renderBatchCompletionHosters(report) {
+  const body = document.getElementById('batchCompletionHostersBody');
+  if (!body) return;
+  const rows = Object.entries(report?.hosters && typeof report.hosters === 'object' ? report.hosters : {}).map(([hoster, values]) => {
+    const row = document.createElement('tr');
+    row.dataset.hoster = hoster;
+    const host = document.createElement('th');
+    host.scope = 'row';
+    host.textContent = getHosterLabel(hoster);
+    row.appendChild(host);
+    [
+      batchReportInteger(values?.total).toLocaleString(getUiLocale()),
+      batchReportInteger(values?.succeeded).toLocaleString(getUiLocale()),
+      batchReportInteger(values?.failed).toLocaleString(getUiLocale()),
+      batchReportInteger(values?.skipped).toLocaleString(getUiLocale()),
+      batchReportInteger(values?.aborted).toLocaleString(getUiLocale()),
+      formatBytes(batchReportNumber(values?.successfulBytes))
+    ].forEach(value => {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.appendChild(cell);
+    });
+    return row;
+  });
+  body.replaceChildren(...rows);
+}
+
+function renderBatchCompletionErrors(report) {
+  const section = document.getElementById('batchCompletionErrorsSection');
+  const list = document.getElementById('batchCompletionErrorsList');
+  const count = document.getElementById('batchCompletionErrorsCount');
+  const more = document.getElementById('batchCompletionErrorsMore');
+  if (!section || !list || !count || !more) return;
+  const errors = Array.isArray(report?.errors) ? report.errors : [];
+  section.hidden = errors.length === 0;
+  count.textContent = errors.length.toLocaleString(getUiLocale());
+  const items = errors.slice(0, 5).map(error => {
+    const item = document.createElement('li');
+    const head = document.createElement('div');
+    head.className = 'batch-completion-error-head';
+    const file = document.createElement('strong');
+    file.className = 'batch-completion-error-file';
+    file.textContent = String(error?.fileName || localizeUiText('Unbekannt'));
+    const hoster = document.createElement('span');
+    hoster.textContent = getHosterLabel(String(error?.hoster || ''));
+    head.append(file, hoster);
+    const meta = document.createElement('div');
+    meta.className = 'batch-completion-error-meta';
+    const status = document.createElement('span');
+    status.textContent = getBatchErrorStatusLabel(error?.status);
+    const category = document.createElement('span');
+    category.textContent = getBatchErrorCategoryLabel(error?.category);
+    meta.append(status, category);
+    const attempt = batchReportInteger(error?.attempt);
+    const maxAttempts = batchReportInteger(error?.maxAttempts);
+    if (attempt > 0 || maxAttempts > 0) {
+      const attemptLabel = document.createElement('span');
+      attemptLabel.textContent = `${localizeUiText('Versuch')} ${attempt}${maxAttempts > 0 ? `/${maxAttempts}` : ''}`;
+      meta.appendChild(attemptLabel);
+    }
+    if (error?.remoteCommitUncertain === true) {
+      const uncertain = document.createElement('span');
+      uncertain.className = 'batch-completion-error-uncertain';
+      uncertain.textContent = localizeUiText('Remote-Abschluss unklar');
+      meta.appendChild(uncertain);
+    }
+    const message = document.createElement('p');
+    message.className = 'batch-completion-error-message';
+    message.textContent = String(error?.message || localizeUiText('Unbekannter Fehler'));
+    item.append(head, meta, message);
+    return item;
+  });
+  list.replaceChildren(...items);
+  const remaining = Math.max(0, errors.length - items.length);
+  more.hidden = remaining === 0;
+  more.textContent = remaining === 1 ? localizeUiText('1 weiterer Fehler') : localizeUiText(`${remaining} weitere Fehler`);
+}
+
+function renderBatchCompletionReport(report) {
+  const modal = document.getElementById('batchCompletionModal');
+  if (!modal || !report) return false;
+  _activeBatchCompletionReport = report;
+  const outcome = getBatchCompletionOutcome(report);
+  modal.dataset.reportId = String(report.reportId);
+  modal.dataset.outcome = outcome;
+  const outcomeLabel = document.getElementById('batchCompletionOutcome');
+  if (outcomeLabel) outcomeLabel.textContent = localizeUiText(outcome === 'success' ? 'Erfolgreich' : 'Mit Problemen');
+  const fileCount = batchReportInteger(report.files?.total);
+  const jobCount = batchReportInteger(report.jobs?.total);
+  const summary = document.getElementById('batchCompletionSummary');
+  if (summary) summary.textContent = `${fileCount.toLocaleString(getUiLocale())} ${localizeUiText(fileCount === 1 ? 'Datei' : 'Dateien')} · ${jobCount.toLocaleString(getUiLocale())} ${localizeUiText(jobCount === 1 ? 'Auftrag' : 'Aufträge')} · ${formatDateTime(report.completedAt).text}`;
+  setBatchCompletionValue('batchCompletionFilesTotal', report.files?.total);
+  setBatchCompletionValue('batchCompletionFilesFullySucceeded', report.files?.fullySucceeded);
+  setBatchCompletionValue('batchCompletionFilesPartiallySucceeded', report.files?.partiallySucceeded);
+  setBatchCompletionValue('batchCompletionFilesFailed', report.files?.failed);
+  setBatchCompletionValue('batchCompletionJobsTotal', report.jobs?.total);
+  setBatchCompletionValue('batchCompletionJobsSucceeded', report.jobs?.succeeded);
+  setBatchCompletionValue('batchCompletionJobsFailed', report.jobs?.failed);
+  setBatchCompletionValue('batchCompletionJobsSkipped', report.jobs?.skipped);
+  setBatchCompletionValue('batchCompletionJobsAborted', report.jobs?.aborted);
+  setBatchCompletionValue('batchCompletionCleanupRequested', report.cleanup?.requested);
+  setBatchCompletionValue('batchCompletionCleanupDeleted', report.cleanup?.deleted);
+  setBatchCompletionValue('batchCompletionCleanupBlocked', report.cleanup?.blocked);
+  setBatchCompletionValue('batchCompletionCleanupFailed', report.cleanup?.failed);
+  const duration = document.getElementById('batchCompletionDuration');
+  const bytes = document.getElementById('batchCompletionSuccessfulBytes');
+  const speed = document.getElementById('batchCompletionAverageSpeed');
+  if (duration) duration.textContent = formatDuration(Math.round(batchReportNumber(report.durationSec)));
+  if (bytes) bytes.textContent = formatBytes(batchReportNumber(report.transfer?.successfulBytes));
+  if (speed) speed.textContent = `${formatBytes(batchReportNumber(report.transfer?.averageBytesPerSecond))}/s`;
+  renderBatchCompletionHosters(report);
+  renderBatchCompletionErrors(report);
+  uiLocalizer.translate(modal);
+  return true;
+}
+
+function closeBatchCompletionReport() {
+  modalController.close('batchCompletionModal', { fallbackFocus: '#addFilesBtn' });
+}
+
+function showBatchCompletionReport(report) {
+  const reportId = typeof report?.reportId === 'string' ? report.reportId.trim() : '';
+  if (!reportId || _shownBatchCompletionReportIds.has(reportId)) return false;
+  _shownBatchCompletionReportIds.add(reportId);
+  if (!renderBatchCompletionReport({ ...report, reportId })) return false;
+  return modalController.open('batchCompletionModal', {
+    initialFocus: '#batchCompletionHeaderCloseBtn',
+    fallbackFocus: '#addFilesBtn',
+    onEscape: closeBatchCompletionReport
+  });
+}
+
+async function exportVisibleBatchCompletionReport(format, button) {
+  const reportId = _activeBatchCompletionReport?.reportId;
+  if (!reportId || !window.api?.exportBatchCompletionReport) return;
+  button.disabled = true;
+  try {
+    const result = await window.api.exportBatchCompletionReport(reportId, format);
+    if (result?.ok) showCopyToast(format === 'json' ? 'JSON-Bericht exportiert' : 'Fehler-CSV exportiert');
+    else if (!result?.canceled) await showAppAlert(result?.error || 'Batch-Bericht konnte nicht exportiert werden.', 'Export fehlgeschlagen');
+  } catch (error) {
+    await showAppAlert(getLocalizedErrorDetail(error), 'Export fehlgeschlagen');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setupBatchCompletionReportUi() {
+  if (_batchCompletionReportUiReady) return;
+  _batchCompletionReportUiReady = true;
+  document.getElementById('batchCompletionHeaderCloseBtn')?.addEventListener('click', closeBatchCompletionReport);
+  document.getElementById('batchCompletionCloseBtn')?.addEventListener('click', closeBatchCompletionReport);
+  const jsonButton = document.getElementById('batchCompletionExportJsonBtn');
+  const csvButton = document.getElementById('batchCompletionExportCsvBtn');
+  jsonButton?.addEventListener('click', () => exportVisibleBatchCompletionReport('json', jsonButton));
+  csvButton?.addEventListener('click', () => exportVisibleBatchCompletionReport('csv', csvButton));
+  window.api?.onUploadBatchReport?.(showBatchCompletionReport);
+}
+
+async function showLastBatchCompletionReport() {
+  if (!window.api?.getLastBatchCompletionReport) return;
+  try {
+    showBatchCompletionReport(await window.api.getLastBatchCompletionReport());
+  } catch {}
+}
+
 // Session-specific files for the "Files" panel (resets each session)
 let sessionFilesData = [];
 let _recentSeqCounter = 0;
@@ -566,6 +789,7 @@ async function init() {
   renderRecentUploadsPanel();
   updateUploadView();
   updateStatusBar();
+  await showLastBatchCompletionReport();
   const interruptedCount = queueJobs.filter(job => job.interrupted).length;
   if (interruptedCount > 0) showCopyToast(interruptedCount === 1 ? '1 unterbrochener Upload kann fortgesetzt werden.' : `${interruptedCount} unterbrochene Uploads können fortgesetzt werden.`, 7000);
 
@@ -8584,6 +8808,7 @@ function updateStatsPanel() {
 window.api.onUpdateAvailable(showUpdateBanner);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
+setupBatchCompletionReportUi();
 setupAppAlertListeners();
 init().then(() => {
   window.api.signalCloseHandshakeReady();

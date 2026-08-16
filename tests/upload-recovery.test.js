@@ -17,6 +17,15 @@ test('catastrophic batch starts retain exact terminal outcomes for every job', (
   ]);
 });
 
+test('catastrophic batch summaries preserve safe file keys for later skipped-job merging', () => {
+  const { buildFailedUploadSummary } = require('../lib/upload-recovery');
+  const summary = buildFailedUploadSummary([
+    { jobId: 'job-a', file: 'C:\\one\\same.mkv', fileKey: 'safe-file-key', hoster: 'doodstream.com' }
+  ], 'Upload konnte nicht gestartet werden');
+
+  assert.equal(summary.files[0].fileKey, 'safe-file-key');
+});
+
 test('terminal recovery snapshots retain exact job outcomes and canonical links', () => {
   const { buildTerminalJobSnapshots } = require('../lib/upload-recovery');
   const snapshots = buildTerminalJobSnapshots({

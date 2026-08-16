@@ -264,8 +264,8 @@ describe('UploadManager', () => {
     mgr.on('batch-done', (s) => { summary = s; });
 
     await mgr.startBatch([
-      { file: '/test/video1.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
-      { file: '/test/video2.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+      { file: '/test/video1.mp4', fileKey: 'video-one', hoster: 'doodstream.com', apiKey: 'key1' },
+      { file: '/test/video2.mp4', fileKey: 'video-two', hoster: 'doodstream.com', apiKey: 'key1' }
     ]);
 
     assert.ok(summary);
@@ -273,6 +273,7 @@ describe('UploadManager', () => {
     assert.equal(summary.succeeded, 2);
     assert.equal(summary.failed, 0);
     assert.equal(summary.files.length, 2);
+    assert.deepEqual(summary.files.map(file => file.fileKey), ['video-one', 'video-two']);
     assert.ok(summary.files.flatMap(file => file.results).every(result => typeof result.jobId === 'string' && result.jobId.length > 0));
   });
 
