@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   summarizePerHoster,
+  summarizeHosterHealth,
   classifyErrorCategory,
   summarizeBatchErrors,
   isRetryableCategory,
@@ -74,6 +75,127 @@ test('summarizePerHoster reports skipped uploads without lowering the host succe
   const summary = summarizePerHoster(history)['voe.sx'];
   assert.deepStrictEqual({ ok: summary.ok, fail: summary.fail, skipped: summary.skipped, total: summary.total }, { ok: 1, fail: 1, skipped: 1, total: 3 });
   assert.strictEqual(summary.rate, 0.5);
+});
+
+test('summarizeHosterHealth keeps skipped results outside the success rate and calculates effective historical throughput', () => {
+  const now = new Date('2026-08-16T12:00:00.000Z');
+  const history = [{
+    timestamp: '2026-08-16T10:00:00.000Z',
+    files: [
+      { name: 'one.bin', size: 1024 * 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 2 }] },
+      { name: 'two.bin', size: 2 * 1024 * 1024, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 2 }] },
+      { name: 'failed.bin', size: 8 * 1024 * 1024, results: [{ hoster: 'voe.sx', status: 'error', durationSec: 1 }] },
+      { name: 'skipped.bin', size: 16 * 1024 * 1024, results: [{ hoster: 'voe.sx', status: 'skipped', durationSec: 1 }] }
+    ]
+  }];
+
+  const summary = summarizeHosterHealth(history, { now })['voe.sx'];
+
+  assert.deepStrictEqual({
+    sampleSize: summary.sampleSize,
+    successful: summary.successful,
+    failed: summary.failed,
+    skipped: summary.skipped,
+    successRate: summary.successRate,
+    effectiveBytes: summary.effectiveBytes,
+    effectiveDurationSec: summary.effectiveDurationSec,
+    effectiveBytesPerSecond: summary.effectiveBytesPerSecond
+  }, {
+    sampleSize: 4,
+    successful: 2,
+    failed: 1,
+    skipped: 1,
+    successRate: 2 / 3,
+    effectiveBytes: 3 * 1024 * 1024,
+    effectiveDurationSec: 4,
+    effectiveBytesPerSecond: 786432
+  });
+});
+
+test('summarizeHosterHealth reports the newest successful batch and failures in the current seven-day window', () => {
+  const now = new Date('2026-08-16T12:00:00.000Z');
+  const history = [
+    makeBatch(Date.parse('2026-08-09T11:59:59.999Z'), [{ hoster: 'byse.sx', status: 'error' }]),
+    makeBatch(Date.parse('2026-08-09T12:00:00.000Z'), [{ hoster: 'byse.sx', status: 'error' }]),
+    makeBatch(Date.parse('2026-08-15T09:00:00.000Z'), [{ hoster: 'byse.sx', status: 'done', durationSec: 4 }]),
+    makeBatch(Date.parse('2026-08-16T11:00:00.000Z'), [{ hoster: 'byse.sx', status: 'error' }]),
+    makeBatch(Date.parse('2026-08-16T13:00:00.000Z'), [{ hoster: 'byse.sx', status: 'error' }])
+  ];
+
+  const summary = summarizeHosterHealth(history, { now })['byse.sx'];
+
+  assert.strictEqual(summary.lastSuccessAt, '2026-08-15T09:00:00.000Z');
+  assert.strictEqual(summary.failuresLast7Days, 2);
+});
+
+test('summarizeHosterHealth uses only the 50 chronologically newest batches', () => {
+  const history = [makeBatch(1, [{ hoster: 'doodstream.com', status: 'done', durationSec: 1 }])];
+  for (let timestamp = 2; timestamp <= 51; timestamp++) {
+    history.push(makeBatch(timestamp, [{ hoster: 'doodstream.com', status: 'error' }]));
+  }
+  history.reverse();
+
+  const summary = summarizeHosterHealth(history, { now: new Date(100000) })['doodstream.com'];
+
+  assert.deepStrictEqual({
+    sampleSize: summary.sampleSize,
+    successful: summary.successful,
+    failed: summary.failed,
+    lastSuccessAt: summary.lastSuccessAt
+  }, {
+    sampleSize: 50,
+    successful: 0,
+    failed: 50,
+    lastSuccessAt: null
+  });
+});
+
+test('summarizeHosterHealth combines configured accounts, current statuses, and session failures without double counting', () => {
+  const hosters = {
+    'voe.sx': [
+      { id: 'ready', enabled: true, authType: 'login', username: 'ready@example.invalid', password: 'secret' },
+      { id: 'failed', enabled: true, authType: 'login', username: 'failed@example.invalid', password: 'secret' },
+      { id: 'unchecked', enabled: true, authType: 'login', username: 'unchecked@example.invalid', password: 'secret' },
+      { id: 'disabled', enabled: false, authType: 'login', username: 'disabled@example.invalid', password: 'secret' },
+      { id: 'session', enabled: true, authType: 'login', username: 'session@example.invalid', password: 'secret' }
+    ],
+    'clouddrop.cc': []
+  };
+  const accountStatuses = {
+    ready: { status: 'ok' },
+    failed: { status: 'error' },
+    unchecked: { status: 'unchecked' },
+    disabled: { status: 'error' },
+    session: { status: 'ok' }
+  };
+
+  const summary = summarizeHosterHealth([], {
+    now: new Date('2026-08-16T12:00:00.000Z'),
+    hosters,
+    accountStatuses,
+    sessionFailedKeys: new Set(['voe.sx:failed', 'voe.sx:session'])
+  });
+
+  assert.deepStrictEqual({
+    configuredAccounts: summary['voe.sx'].configuredAccounts,
+    accountProblems: summary['voe.sx'].accountProblems,
+    uncheckedAccounts: summary['voe.sx'].uncheckedAccounts,
+    checkingAccounts: summary['voe.sx'].checkingAccounts
+  }, {
+    configuredAccounts: 5,
+    accountProblems: 3,
+    uncheckedAccounts: 1,
+    checkingAccounts: 0
+  });
+  assert.deepStrictEqual({
+    sampleSize: summary['clouddrop.cc'].sampleSize,
+    configuredAccounts: summary['clouddrop.cc'].configuredAccounts,
+    successRate: summary['clouddrop.cc'].successRate
+  }, {
+    sampleSize: 0,
+    configuredAccounts: 0,
+    successRate: null
+  });
 });
 
 test('classifyErrorCategory: file-rejected phrases', () => {

@@ -3681,6 +3681,115 @@ input[type="checkbox"] {
   padding: 10px 16px 0;
 }
 
+.hoster-health-overview {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px 16px 0;
+  overflow: hidden;
+}
+
+.hoster-health-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+}
+
+.hoster-health-heading h3 {
+  flex: 0 0 auto;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.hoster-health-heading p {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.hoster-health-scroll {
+  max-width: 100%;
+  max-height: 190px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.hoster-health-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.hoster-health-scroll table {
+  width: 100%;
+  min-width: 880px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hoster-health-caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.hoster-health-scroll th,
+.hoster-health-scroll td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.hoster-health-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+.hoster-health-scroll tbody th {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.hoster-health-scroll tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.hoster-health-scroll tbody tr:hover > * {
+  background: var(--bg-raised);
+}
+
+.hoster-health-scroll [data-hoster-health-empty] {
+  height: 38px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
 .accounts-list {
   flex: 1 1 auto;
   min-height: 0;

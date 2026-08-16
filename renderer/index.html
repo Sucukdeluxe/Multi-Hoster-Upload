@@ -423,6 +423,32 @@
         </div>
       </div>
       <div class="health-check-results account-health-results" id="healthCheckResults"></div>
+      <section class="hoster-health-overview" id="hosterHealthOverview" role="region" aria-labelledby="hosterHealthTitle" aria-describedby="hosterHealthHint">
+        <div class="hoster-health-heading">
+          <h3 id="hosterHealthTitle">Hoster-Gesundheit</h3>
+          <p id="hosterHealthHint">Lokale Werte aus höchstens 50 Batches. Der effektive historische Durchsatz kann Wartezeiten und Wiederholungen enthalten.</p>
+        </div>
+        <div class="hoster-health-scroll" tabindex="0">
+          <table>
+            <caption class="hoster-health-caption">Hoster-Gesundheit aus lokalem Verlauf und aktuellem Accountstatus</caption>
+            <thead>
+              <tr>
+                <th scope="col">Hoster</th>
+                <th scope="col">Stichprobe</th>
+                <th scope="col">Erfolg / Fehler / Übersprungen</th>
+                <th scope="col">Erfolgsrate</th>
+                <th scope="col" data-health-column="throughput">Effektiver historischer Durchsatz</th>
+                <th scope="col">Letzter Erfolg</th>
+                <th scope="col">Fehler (7 Tage)</th>
+                <th scope="col">Account-Probleme</th>
+              </tr>
+            </thead>
+            <tbody id="hosterHealthBody">
+              <tr><td colspan="8" data-hoster-health-empty>Wird geladen…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
       <div class="accounts-list" id="accountsList"></div>
       <div class="accounts-list-footer" id="accountsListFooter" style="display:none">
         <button class="btn btn-secondary" id="toggleAllAccountsBtn">Alle ausklappen</button>

@@ -919,6 +919,9 @@ setTimeout(async () => {
     const accountsActive = await wc.executeJavaScript('document.getElementById("accounts-view")?.classList.contains("active")');
     check('Accounts tab active', accountsActive);
 
+    const hosterHealthSemantics = await wc.executeJavaScript('(() => { const section = document.getElementById("hosterHealthOverview"); const table = section?.querySelector("table"); const list = document.getElementById("accountsList"); return { labelled: section?.getAttribute("role") === "region" && section?.getAttribute("aria-labelledby") === "hosterHealthTitle", table: Boolean(table && table.querySelector("caption") && table.querySelectorAll("thead th").length === 8), beforeAccounts: Boolean(section && list && (section.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING)) }; })()');
+    check('Host health overview is an accessible table above account groups', hosterHealthSemantics.labelled && hosterHealthSemantics.table && hosterHealthSemantics.beforeAccounts);
+
     const accountsWorkspaceLayout = await wc.executeJavaScript('(() => { const view = document.getElementById("accounts-view"); const sidebar = view?.querySelector(":scope > .view-sidebar"); const main = view?.querySelector(":scope > .view-main"); if (!sidebar || !main) return false; const sidebarRect = sidebar.getBoundingClientRect(); const mainRect = main.getBoundingClientRect(); return sidebarRect.width > 0 && mainRect.width > 0 && sidebarRect.right <= mainRect.left; })()');
     check('Accounts view separates sidebar and main workspace', accountsWorkspaceLayout === true);
 
@@ -930,6 +933,91 @@ setTimeout(async () => {
 
     const accountHeaderControlHeights = await wc.executeJavaScript('(() => [document.getElementById("accountsRunHealthCheckBtn"), document.querySelector(".accounts-auto-check"), document.getElementById("addAccountBtn")].map(element => element?.getBoundingClientRect().height || 0))()');
     check('Accounts header actions share one rendered height', accountHeaderControlHeights.every(height => height > 0 && Math.abs(height - accountHeaderControlHeights[0]) <= 0.5));
+
+    const hosterHealthStates = await wc.executeJavaScript(\`(() => {
+      const previousConfig = config;
+      const previousStatuses = accountStatuses;
+      const previousSessionFailedKeys = _sessionFailedKeys;
+      const hadHistory = Object.hasOwn(window, '_historyForStats');
+      const previousHistory = window._historyForStats;
+      config = { ...config, hosters: Object.fromEntries(HOSTERS.map(name => [name, []])) };
+      accountStatuses = {};
+      _sessionFailedKeys = new Set();
+      window._historyForStats = [];
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+      const empty = document.querySelector('#hosterHealthOverview [data-hoster-health-empty]')?.textContent.trim() || '';
+      config.hosters['voe.sx'] = [
+        { id: 'health-ready', enabled: true, authType: 'login', username: 'ready@example.invalid', password: 'secret' },
+        { id: 'health-failed', enabled: true, authType: 'login', username: 'failed@example.invalid', password: 'secret' }
+      ];
+      config.hosters['byse.sx'] = [
+        { id: 'health-unchecked', enabled: true, authType: 'api', apiKey: 'unchecked-key' }
+      ];
+      accountStatuses = {
+        'health-ready': { status: 'ok' },
+        'health-failed': { status: 'error' },
+        'health-unchecked': { status: 'unchecked' }
+      };
+      _sessionFailedKeys = new Set(['voe.sx:health-failed']);
+      window._historyForStats = [{
+        timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        files: [{
+          name: 'health.bin',
+          size: 1024 * 1024,
+          results: [
+            { hoster: 'voe.sx', status: 'done', durationSec: 2 },
+            { hoster: 'voe.sx', status: 'error', durationSec: 1 },
+            { hoster: 'voe.sx', status: 'skipped', durationSec: 1 }
+          ]
+        }]
+      }];
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+      const voe = document.querySelector('[data-hoster-health-row="voe.sx"]');
+      const byse = document.querySelector('[data-hoster-health-row="byse.sx"]');
+      const german = {
+        sample: voe?.querySelector('[data-health="sample"]')?.textContent.trim(),
+        outcomes: voe?.querySelector('[data-health="outcomes"]')?.textContent.trim(),
+        rate: voe?.querySelector('[data-health="rate"]')?.textContent.trim(),
+        throughput: voe?.querySelector('[data-health="throughput"]')?.textContent.trim(),
+        lastSuccess: voe?.querySelector('[data-health="last-success"]')?.textContent.trim(),
+        recentFailures: voe?.querySelector('[data-health="recent-failures"]')?.textContent.trim(),
+        accountProblems: voe?.querySelector('[data-health="accounts"]')?.textContent.trim(),
+        unchecked: byse?.querySelector('[data-health="accounts"]')?.textContent.trim()
+      };
+      setUiLanguage('en');
+      const english = {
+        title: document.getElementById('hosterHealthTitle')?.textContent.trim(),
+        throughput: document.querySelector('#hosterHealthOverview th[data-health-column="throughput"]')?.textContent.trim(),
+        unchecked: document.querySelector('[data-hoster-health-row="byse.sx"] [data-health="accounts"]')?.textContent.trim()
+      };
+      setUiLanguage('de');
+      window._historyForStats = [];
+      _invalidateHosterLifetimeCache();
+      handleBatchDone({
+        id: 'health-completed-batch',
+        timestamp: new Date().toISOString(),
+        total: 1,
+        succeeded: 1,
+        failed: 0,
+        skipped: 0,
+        files: [{ name: 'completed.bin', size: 2048, results: [{ hoster: 'voe.sx', status: 'done', durationSec: 2 }] }]
+      }, { historyPersisted: true, deferPersistence: true });
+      const completedSample = document.querySelector('[data-hoster-health-row="voe.sx"] [data-health="sample"]')?.textContent.trim();
+      config = previousConfig;
+      accountStatuses = previousStatuses;
+      _sessionFailedKeys = previousSessionFailedKeys;
+      if (hadHistory) window._historyForStats = previousHistory;
+      else delete window._historyForStats;
+      _invalidateHosterLifetimeCache();
+      renderAccounts();
+      return { empty, german, english, completedSample };
+    })()\`);
+    check('Host health overview renders clean empty and unchecked account states', hosterHealthStates.empty === 'Noch keine Hoster-Daten.' && hosterHealthStates.german.unchecked === 'Nicht geprüft');
+    check('Host health overview renders counts, existing-rate semantics, effective historical throughput, recent failures, and account problems', hosterHealthStates.german.sample === '3' && hosterHealthStates.german.outcomes === '1 / 1 / 1' && hosterHealthStates.german.rate === '50 %' && hosterHealthStates.german.throughput === '512 kB/s' && hosterHealthStates.german.lastSuccess !== 'Nie' && hosterHealthStates.german.recentFailures === '1' && hosterHealthStates.german.accountProblems === '1');
+    check('Host health overview switches fully to English without a renderer restart', hosterHealthStates.english.title === 'Host health' && hosterHealthStates.english.throughput === 'Effective historical throughput' && hosterHealthStates.english.unchecked === 'Not checked');
+    check('A completed upload batch immediately refreshes host health history', hosterHealthStates.completedSample === '1');
 
     await captureVisual('02-accounts.png');
 
@@ -2539,9 +2627,10 @@ setTimeout(async () => {
     const lifetimeRefreshState = await wc.executeJavaScript(\`(() => {
       const group = document.querySelector('[data-hoster-group="voe.sx"]');
       const meta = group?.querySelector('[data-hoster-lifetime="voe.sx"]');
-      return { sameGroup: group === window.__uiLifetimeGroup, visible: Boolean(meta && !meta.hidden), text: meta?.textContent.trim() || '' };
+      const healthSample = document.querySelector('[data-hoster-health-row="voe.sx"] [data-health="sample"]')?.textContent.trim() || '';
+      return { sameGroup: group === window.__uiLifetimeGroup, visible: Boolean(meta && !meta.hidden), text: meta?.textContent.trim() || '', healthSample };
     })()\`);
-    check('Loaded history refreshes hoster lifetime success without replacing the account group', lifetimeRefreshState.sameGroup && lifetimeRefreshState.visible && lifetimeRefreshState.text === '100% ok (1)');
+    check('Loaded history refreshes hoster lifetime success and health without replacing the account group', lifetimeRefreshState.sameGroup && lifetimeRefreshState.visible && lifetimeRefreshState.text === '100% ok (1)' && lifetimeRefreshState.healthSample === '1');
     historyFixture = historyFixtureBeforeLifetimeCheck;
     await wc.executeJavaScript('loadHistory()');
     await wc.executeJavaScript('HOSTERS.forEach(name => { config.hosters[name] = []; }); accountStatuses = {}; renderAccounts()');
@@ -3384,6 +3473,11 @@ setTimeout(async () => {
       const autoCheckVisible = Boolean(autoCheck && getComputedStyle(autoCheck).display !== 'none' && autoCheck.getBoundingClientRect().width > 0);
       const accountsMain = document.querySelector('#accounts-view .view-main');
       const accountsMainFits = fits(accountsMain);
+      const healthOverview = document.getElementById('hosterHealthOverview');
+      const healthScroller = healthOverview?.querySelector('.hoster-health-scroll');
+      const healthRect = healthOverview?.getBoundingClientRect();
+      const accountsRect = accountsMain?.getBoundingClientRect();
+      const healthOverviewFits = Boolean(healthRect && accountsRect && healthRect.left >= accountsRect.left - 1 && healthRect.right <= accountsRect.right + 1 && fits(healthOverview) && healthScroller?.scrollWidth >= healthScroller?.clientWidth);
       document.querySelector('.tab[data-view="upload"]').click();
       const telemetry = document.getElementById('uploadTelemetry');
       const availability = document.getElementById('uploadAvailability');
@@ -3401,6 +3495,7 @@ setTimeout(async () => {
         logRowsFit,
         autoCheckVisible,
         accountsMainFits,
+        healthOverviewFits,
         telemetryVisible: Boolean(telemetry && getComputedStyle(telemetry).display !== 'none'),
         availabilityVisible: Boolean(availability && getComputedStyle(availability).display !== 'none'),
         speedGraphs
@@ -3418,7 +3513,7 @@ setTimeout(async () => {
     check('Minimum window keeps the settings header compact', compactSettingsHeader <= 58);
     check('Minimum settings sidebar, search, and log rows stay contained', minimumResponsiveContract.settingsSidebarFits && minimumResponsiveContract.settingsSearchFits && minimumResponsiveContract.logRowsFit);
     if (!(minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits)) console.log('Minimum responsive contract: ' + JSON.stringify(minimumResponsiveContract));
-    check('Minimum Accounts keeps auto-check reachable and content contained', minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits);
+    check('Minimum Accounts keeps auto-check and host health reachable with content contained', minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits && minimumResponsiveContract.healthOverviewFits);
     check('Minimum Uploads preserves availability and telemetry information', minimumResponsiveContract.telemetryVisible && minimumResponsiveContract.availabilityVisible);
     check('Minimum window keeps the speed graph visible and contained on every main tab', minimumResponsiveContract.speedGraphs.length === 4 && minimumResponsiveContract.speedGraphs.every(Boolean));
 

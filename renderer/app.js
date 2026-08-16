@@ -3612,9 +3612,21 @@ function _handleProgressImpl(data) {
   persistQueueStateSoon();
 }
 
+function recordHosterHealthBatch(summary) {
+  if (!summary || typeof summary !== 'object' || !Array.isArray(summary.files)) return;
+  const current = Array.isArray(window._historyForStats) ? window._historyForStats : [];
+  const next = summary.id
+    ? current.filter(batch => batch?.id !== summary.id)
+    : current.filter(batch => batch !== summary);
+  window._historyForStats = [summary, ...next].slice(0, 50);
+  _invalidateHosterLifetimeCache();
+  renderHosterHealthOverview();
+}
+
 function handleBatchDone(summary, options = {}) {
   uploading = false;
   applySummaryResults(summary, options.historyPersisted !== false);
+  if (options.historyPersisted !== false) recordHosterHealthBatch(summary);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
   // Prune session-stats sets to current queue contents. Without this, IDs
   // of jobs that were removed from queueJobs (via removeFromQueueOnDone
@@ -5851,6 +5863,7 @@ function updateAccountCard(accountId) {
   _refreshHosterGroupHeader(found.name);
   updateAccountSidebarSummary();
   _applyAccountSidebarFilter();
+  renderHosterHealthOverview();
 }
 
 function _refreshHosterGroupHeader(name) {
@@ -5885,6 +5898,56 @@ function _refreshHosterGroupHeader(name) {
 
 let _accountListenersBound = false;
 
+function renderHosterHealthOverview() {
+  const body = document.getElementById('hosterHealthBody');
+  if (!body || !window.Stats?.summarizeHosterHealth) return;
+  if (window._historyForStats === undefined) {
+    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Wird geladen…'))}</td></tr>`;
+    return;
+  }
+  if (window._historyForStats === null) {
+    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Verlauf nicht verfügbar.'))}</td></tr>`;
+    return;
+  }
+  const summary = window.Stats.summarizeHosterHealth(window._historyForStats, {
+    now: new Date(),
+    hosters: config.hosters,
+    accountStatuses,
+    sessionFailedKeys: _sessionFailedKeys
+  });
+  const names = [...HOSTERS, ...Object.keys(summary).filter(name => !HOSTERS.includes(name))]
+    .filter(name => summary[name] && (summary[name].sampleSize > 0 || summary[name].configuredAccounts > 0));
+  if (names.length === 0) {
+    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Noch keine Hoster-Daten.'))}</td></tr>`;
+    return;
+  }
+  body.innerHTML = names.map(name => {
+    const row = summary[name];
+    const rate = row.successRate === null ? localizeUiText('Nicht geprüft') : `${Math.round(row.successRate * 100)} %`;
+    const throughput = row.effectiveBytesPerSecond === null
+      ? localizeUiText('Nicht geprüft')
+      : formatSpeed(row.effectiveBytesPerSecond / 1024);
+    const lastSuccess = row.lastSuccessAt ? formatDateTime(row.lastSuccessAt).text : localizeUiText('Nie');
+    let accounts = '—';
+    if (row.configuredAccounts > 0) {
+      if (row.accountProblems > 0) accounts = String(row.accountProblems);
+      else if (row.checkingAccounts > 0) accounts = localizeUiText('Prüfung läuft');
+      else if (row.uncheckedAccounts > 0) accounts = localizeUiText('Nicht geprüft');
+      else accounts = '0';
+    }
+    return `<tr data-hoster-health-row="${escapeAttr(name)}">
+      <th scope="row">${escapeHtml(getHosterLabel(name))}</th>
+      <td data-health="sample">${row.sampleSize}</td>
+      <td data-health="outcomes">${row.successful} / ${row.failed} / ${row.skipped}</td>
+      <td data-health="rate">${escapeHtml(rate)}</td>
+      <td data-health="throughput">${escapeHtml(throughput)}</td>
+      <td data-health="last-success">${escapeHtml(lastSuccess)}</td>
+      <td data-health="recent-failures">${row.failuresLast7Days}</td>
+      <td data-health="accounts">${escapeHtml(accounts)}</td>
+    </tr>`;
+  }).join('');
+}
+
 function renderAccounts() {
   const container = document.getElementById('accountsList');
   if (!container) return;
@@ -5892,6 +5955,7 @@ function renderAccounts() {
 
   const allAccounts = getAllAccountsFlat();
   updateAccountSidebarSummary(allAccounts);
+  renderHosterHealthOverview();
   const runCheckBtn = document.getElementById('accountsRunHealthCheckBtn');
   if (runCheckBtn) runCheckBtn.disabled = healthCheckRunning;
 
@@ -6951,6 +7015,9 @@ async function loadHistory() {
     history = await window.api.getHistory();
   } catch (error) {
     if (generation !== _historyLoadGeneration) return;
+    window._historyForStats = null;
+    _invalidateHosterLifetimeCache();
+    renderHosterHealthOverview();
     historyRowsData = [];
     historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
     updateHistorySidebarSummary();
@@ -6965,6 +7032,7 @@ async function loadHistory() {
   _historyDirty = false;
   _invalidateHosterLifetimeCache();
   _refreshAccountHosterLifetimeStats();
+  renderHosterHealthOverview();
   const retSel = document.getElementById('historyRetentionSelect');
   if (retSel) {
     retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
