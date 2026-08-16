@@ -57,6 +57,7 @@ function refreshLocalizedRuntimeUi() {
   const historyContainer = document.getElementById('historyContainer');
   if (historyContainer && historyRowsData.length) renderHistoryTable(historyContainer);
   updateStatusBar();
+  if (document.getElementById('uploadScheduleEnabledInput')) syncUploadScheduleControls();
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
@@ -4787,7 +4788,63 @@ function appendFilenameFilterCondition(condition = {}) {
   markSettingsDirty();
 }
 
+let uploadScheduleStatusTimer = null;
+
+function readUploadScheduleSettings(fallback = config.globalSettings?.uploadSchedule) {
+  if (!window.UploadSchedule) return fallback || { enabled: false };
+  const enabledInput = document.getElementById('uploadScheduleEnabledInput');
+  if (!enabledInput) return window.UploadSchedule.normalizeUploadSchedule(fallback);
+  return window.UploadSchedule.normalizeUploadSchedule({
+    enabled: enabledInput.checked,
+    weekdays: Array.from(document.querySelectorAll('[data-upload-schedule-day]:checked')).map(input => Number(input.value)),
+    start: document.getElementById('uploadScheduleStartInput')?.value,
+    end: document.getElementById('uploadScheduleEndInput')?.value
+  });
+}
+
+function syncUploadScheduleControls() {
+  if (!window.UploadSchedule) return;
+  const schedule = readUploadScheduleSettings();
+  const state = window.UploadSchedule.evaluateUploadSchedule(schedule, new Date());
+  const enabled = schedule.enabled;
+  document.querySelectorAll('[data-upload-schedule-dependent]').forEach(control => {
+    control.disabled = !enabled;
+  });
+  const status = document.getElementById('uploadScheduleStatus');
+  const badge = document.getElementById('uploadScheduleStatusBadge');
+  if (!status || !badge) return;
+  let text;
+  let badgeText;
+  let stateClass = '';
+  if (!enabled) {
+    text = localizeUiText('Deaktiviert. Neue Uploads starten sofort.');
+    badgeText = localizeUiText('Inaktiv');
+  } else if (!state.valid) {
+    text = state.reason === 'weekdays'
+      ? localizeUiText('Ungültig. Wähle mindestens einen Wochentag aus.')
+      : state.reason === 'equal-times'
+        ? localizeUiText('Ungültig. Start und Ende müssen unterschiedlich sein.')
+        : localizeUiText('Ungültig. Prüfe Start- und Endzeit.');
+    badgeText = localizeUiText('Ungültig');
+    stateClass = ' warning';
+  } else if (state.allowed) {
+    text = localizeUiText('Geöffnet. Neue Uploads dürfen starten.');
+    badgeText = localizeUiText('Geöffnet');
+    stateClass = ' active';
+  } else {
+    const nextStart = state.nextStart ? formatDateTime(state.nextStart.toISOString()) : '—';
+    text = `${localizeUiText('Geschlossen. Nächster erlaubter Start:')} ${nextStart}`;
+    badgeText = localizeUiText('Geschlossen');
+    stateClass = ' warning';
+  }
+  status.textContent = text;
+  badge.textContent = badgeText;
+  badge.className = `panel-status${stateClass}`;
+}
+
 function renderSettings() {
+  clearInterval(uploadScheduleStatusTimer);
+  uploadScheduleStatusTimer = null;
   const container = document.getElementById('settingsHosters');
   container.innerHTML = '';
 
@@ -4796,6 +4853,7 @@ function renderSettings() {
   const fm = globalSettings.folderMonitor || {};
   const remoteSettings = globalSettings.remote || {};
   const filenameFilter = window.FilenameFilter.normalizeFilenameFilter(globalSettings.filenameFilter);
+  const uploadSchedule = window.UploadSchedule.normalizeUploadSchedule(globalSettings.uploadSchedule);
   const filenameFilterConditions = filenameFilter.conditions.length > 0
     ? filenameFilter.conditions
     : [{ operator: 'contains', value: '' }];
@@ -4803,7 +4861,7 @@ function renderSettings() {
   const pageDefinitions = [
     { id: 'allgemein', label: 'Allgemein', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
     { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster dateiname filename filter enthält contains ausschließen exclude' },
-    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
+    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen zeitfenster schedule wochentage weekdays start ende ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
     { id: 'remote', label: 'Fernsteuerung', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
@@ -4981,7 +5039,7 @@ function renderSettings() {
   `;
 
   pages.automatik.innerHTML = `
-      ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
+      ${pageHeader('Automatik', 'Wiederholungen, Upload-Zeitfenster und überwachte Ordner für unbeaufsichtigte Uploads.')}
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
       <div class="settings-row automation-retry-row">
         <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
@@ -4996,6 +5054,31 @@ function renderSettings() {
           <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
           <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
         </div>
+      </div>
+      <div class="settings-section-label">Upload-Zeitfenster <span class="panel-status" id="uploadScheduleStatusBadge">Inaktiv</span></div>
+      <div class="upload-schedule-panel">
+        <div class="settings-option upload-schedule-toggle">
+          <div class="settings-option-copy">
+            <label for="uploadScheduleEnabledInput">Neue Uploads nur im Zeitfenster starten</label>
+            <span class="settings-option-description">Laufende Uploads dürfen fertig werden. Wartende Uploads starten automatisch bei der nächsten Öffnung.</span>
+          </div>
+          <input type="checkbox" class="settings-autosave" id="uploadScheduleEnabledInput" data-upload-schedule-control ${uploadSchedule.enabled ? 'checked' : ''}>
+        </div>
+        <div class="upload-schedule-days" role="group" aria-label="Erlaubte Wochentage">
+          <label><input type="checkbox" class="settings-autosave" value="1" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(1) ? 'checked' : ''}><span>Mo</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="2" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(2) ? 'checked' : ''}><span>Di</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="3" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(3) ? 'checked' : ''}><span>Mi</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="4" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(4) ? 'checked' : ''}><span>Do</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="5" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(5) ? 'checked' : ''}><span>Fr</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="6" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(6) ? 'checked' : ''}><span>Sa</span></label>
+          <label><input type="checkbox" class="settings-autosave" value="0" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(0) ? 'checked' : ''}><span>So</span></label>
+        </div>
+        <div class="upload-schedule-times">
+          <label for="uploadScheduleStartInput"><span>Start</span><input type="time" class="hs-input settings-autosave" id="uploadScheduleStartInput" data-upload-schedule-control data-upload-schedule-dependent value="${escapeAttr(uploadSchedule.start)}"></label>
+          <label for="uploadScheduleEndInput"><span>Ende</span><input type="time" class="hs-input settings-autosave" id="uploadScheduleEndInput" data-upload-schedule-control data-upload-schedule-dependent value="${escapeAttr(uploadSchedule.end)}"></label>
+          <span class="hint">Lokale Systemzeit · Zeitfenster über Mitternacht werden unterstützt</span>
+        </div>
+        <p class="upload-schedule-status" id="uploadScheduleStatus" aria-live="polite"></p>
       </div>
       <div class="settings-section-label">Ordnerüberwachung <span class="panel-status${fm.enabled && fm.folderPath ? ' active' : ''}" id="folderMonitorStatusBadge">${fm.enabled && fm.folderPath ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-row">
@@ -5472,6 +5555,12 @@ function renderSettings() {
   document.getElementById('addFilenameFilterConditionBtn')?.addEventListener('click', () => appendFilenameFilterCondition());
   document.getElementById('filenameFilterEnabledInput')?.addEventListener('change', syncFilenameFilterControls);
   syncFilenameFilterControls();
+  container.querySelectorAll('[data-upload-schedule-control]').forEach(control => {
+    const eventName = control.type === 'time' ? 'input' : 'change';
+    control.addEventListener(eventName, syncUploadScheduleControls);
+  });
+  syncUploadScheduleControls();
+  uploadScheduleStatusTimer = setInterval(syncUploadScheduleControls, 30000);
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
@@ -5479,6 +5568,7 @@ function renderSettings() {
       if (input.id === 'languageInput') {
         setUiLanguage(input.value);
         syncLanguagePicker(input.value);
+        syncUploadScheduleControls();
       }
       if (input.id === 'deleteSourceAfterSuccessfulUploadInput' && input.checked) {
         const confirmed = await showAppConfirm({
@@ -5590,6 +5680,16 @@ async function performSaveSettings(options = {}) {
   const cur = config.globalSettings || {};
   const curFm = cur.folderMonitor || {};
   const curRemote = cur.remote || {};
+  const uploadSchedule = readUploadScheduleSettings(cur.uploadSchedule);
+  const uploadScheduleState = window.UploadSchedule.evaluateUploadSchedule(uploadSchedule, new Date());
+  if (uploadSchedule.enabled && !uploadScheduleState.valid) {
+    const message = uploadScheduleState.reason === 'weekdays'
+      ? 'Wähle mindestens einen Wochentag für das Upload-Zeitfenster aus.'
+      : uploadScheduleState.reason === 'equal-times'
+        ? 'Start und Ende des Upload-Zeitfensters müssen unterschiedlich sein.'
+        : 'Prüfe Start und Ende des Upload-Zeitfensters.';
+    throw new Error(localizeUiText(message));
+  }
   const elTxt = (id, fb) => { const el = document.getElementById(id); return el ? el.value : fb; };
   const elChk = (id, fb) => { const el = document.getElementById(id); return el ? !!el.checked : fb; };
   const elInt = (id, curVal, dflt, lo, hi) => {
@@ -5630,6 +5730,7 @@ async function performSaveSettings(options = {}) {
     webhookMention: elTxt('webhookMentionInput', cur.webhookMention || '').trim(),
     autoRetryRounds: elInt('autoRetryRoundsInput', cur.autoRetryRounds ?? 0, 0, 0, 5),
     autoRetryDelayMin: elInt('autoRetryDelayMinInput', cur.autoRetryDelayMin ?? 5, 5, 1, 120),
+    uploadSchedule,
     folderMonitor: {
       ...curFm,
       enabled: elChk('fmEnabledInput', !!curFm.enabled),

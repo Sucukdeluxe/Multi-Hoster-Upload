@@ -238,7 +238,7 @@ setTimeout(async () => {
     await captureVisual('00-language-picker.png');
     await wc.executeJavaScript('document.getElementById("upload-tab").click()');
     const unchangedValues = await wc.executeJavaScript('(() => { setUiLanguage("de"); const nodes = []; const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let node = walker.nextNode(); while (node) { if (node.nodeValue.trim()) nodes.push({ node, source: node.nodeValue.trim() }); node = walker.nextNode(); } const attributes = [...document.querySelectorAll("[title],[aria-label],[placeholder],[data-tooltip]")].flatMap(element => ["title", "aria-label", "placeholder", "data-tooltip"].filter(name => element.hasAttribute(name)).map(name => ({ element, name, source: element.getAttribute(name).trim() }))); setUiLanguage("en"); const unchanged = nodes.filter(entry => entry.source === entry.node.nodeValue.trim()).map(entry => entry.source); unchanged.push(...attributes.filter(entry => entry.source === entry.element.getAttribute(entry.name).trim()).map(entry => entry.source)); return [...new Set(unchanged.filter(value => /[A-Za-zÄÖÜäöüß]{2}/.test(value)))].sort(); })()');
-    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-audit.log', 'upload-debug.log', 'mp4,mkv,avi']);
+    const neutralUiValues = new Set(['0 kB/s', 'Accounts', 'BBCode', 'CSV', 'Changelog', 'ETA', 'ETA --:--', 'FileUploader Log', 'HTML', 'JSON', 'Label (optional)', 'Link', 'Log', 'Logs & Support', 'MB/s', 'MHU2-…', 'MULTI HOSTER UPLOADER', 'Markdown', 'Multi Hoster Uploader', 'OK', 'Plaintext', 'Port', 'Server', 'Start', 'Status', 'Update', 'Upload', 'Uploads', 'Verbose Logging', 'Webhook', 'account-rotation.log', 'debug.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-audit.log', 'upload-debug.log', 'mp4,mkv,avi']);
     const neutralUiPathBasenames = new Set(['account-rotation.log', 'doodstream-debug.log', 'fileuploader.log', 'upload-audit.log', 'upload-debug.log']);
     const unexpectedUnchangedValues = unchangedValues.filter(value => !neutralUiValues.has(value) && !neutralUiPathBasenames.has(path.basename(value)) && !value.includes('Multi-Hoster-Uploader'));
     if (process.env.AUDIT_I18N_UNCHANGED === '1' || unexpectedUnchangedValues.length) console.log('Unchanged i18n values: ' + JSON.stringify(unchangedValues, null, 2));
@@ -1723,6 +1723,50 @@ setTimeout(async () => {
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\\'automatik\\\']")?.click()');
     const automationInputAlignment = await wc.executeJavaScript('(() => { const first = document.getElementById("autoRetryRoundsInput")?.getBoundingClientRect(); const second = document.getElementById("autoRetryDelayMinInput")?.getBoundingClientRect(); const firstHintEl = document.getElementById("autoRetryRoundsInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const secondHintEl = document.getElementById("autoRetryDelayMinInput")?.closest(".automation-retry-row")?.querySelector(".hint"); const firstHint = firstHintEl?.getBoundingClientRect(); const secondHint = secondHintEl?.getBoundingClientRect(); if (!first || !second || !firstHint || !secondHint || !firstHintEl || !secondHintEl) return "missing"; const firstTextLeft = firstHint.left + parseFloat(getComputedStyle(firstHintEl).paddingLeft); const secondTextLeft = secondHint.left + parseFloat(getComputedStyle(secondHintEl).paddingLeft); return [Math.round(Math.abs(first.left - second.left)), Math.round(first.width), Math.round(second.width), firstHint.top >= first.bottom + 6, secondHint.top >= second.bottom + 6, Math.round(Math.abs(firstTextLeft - first.left)) <= 1, Math.round(Math.abs(secondTextLeft - second.left)) <= 1].join("|"); })()');
     check('Automation retry hints start directly below their aligned inputs', automationInputAlignment === '0|100|100|true|true|true|true');
+    const uploadScheduleSettings = await wc.executeJavaScript(\`(async () => {
+      document.querySelector('[data-settings-page="automatik"]')?.click();
+      const toggle = document.getElementById('uploadScheduleEnabledInput');
+      const start = document.getElementById('uploadScheduleStartInput');
+      const end = document.getElementById('uploadScheduleEndInput');
+      const days = [...document.querySelectorAll('[data-upload-schedule-day]')];
+      const panel = document.querySelector('.upload-schedule-panel');
+      const initial = {
+        present: Boolean(toggle && start && end && days.length === 7),
+        dependentDisabled: days.every(input => input.disabled) && start.disabled && end.disabled,
+        contained: panel.scrollWidth <= panel.clientWidth + 1
+      };
+      toggle.checked = true;
+      toggle.dispatchEvent(new Event('change', { bubbles: true }));
+      days.forEach(input => { input.checked = false; });
+      start.value = '22:00';
+      end.value = '06:00';
+      syncUploadScheduleControls();
+      const invalid = {
+        status: document.getElementById('uploadScheduleStatus')?.textContent.trim(),
+        badge: document.getElementById('uploadScheduleStatusBadge')?.textContent.trim(),
+        saveRejected: await performSaveSettings().then(() => false, () => true)
+      };
+      days.find(input => input.value === '1').checked = true;
+      syncUploadScheduleControls();
+      await saveSettings({ feedbackText: 'Gespeichert' });
+      const saved = (await window.api.getGlobalSettings()).uploadSchedule;
+      setUiLanguage('en');
+      syncUploadScheduleControls();
+      const english = {
+        heading: document.getElementById('uploadScheduleEnabledInput')?.closest('.settings-option')?.querySelector('label')?.textContent.trim(),
+        badge: document.getElementById('uploadScheduleStatusBadge')?.textContent.trim(),
+        status: document.getElementById('uploadScheduleStatus')?.textContent.trim()
+      };
+      setUiLanguage('de');
+      toggle.checked = false;
+      toggle.dispatchEvent(new Event('change', { bubbles: true }));
+      await saveSettings({ feedbackText: 'Gespeichert' });
+      return { initial, invalid, saved, english, restored: (await window.api.getGlobalSettings()).uploadSchedule.enabled === false };
+    })()\`);
+    check('Automation exposes a contained seven-day upload schedule with dependent controls disabled by default', uploadScheduleSettings.initial.present && uploadScheduleSettings.initial.dependentDisabled && uploadScheduleSettings.initial.contained);
+    check('Invalid upload schedules are explained and rejected before persistence', uploadScheduleSettings.invalid.badge === 'Ungültig' && uploadScheduleSettings.invalid.status.includes('mindestens einen Wochentag') && uploadScheduleSettings.invalid.saveRejected);
+    check('Valid overnight schedules persist with the selected originating weekday', uploadScheduleSettings.saved.enabled === true && uploadScheduleSettings.saved.start === '22:00' && uploadScheduleSettings.saved.end === '06:00' && uploadScheduleSettings.saved.weekdays.join(',') === '1');
+    check('Upload schedule status and controls switch fully to English without restart', uploadScheduleSettings.english.heading === 'Start new uploads only during the schedule' && ['Open', 'Closed'].includes(uploadScheduleSettings.english.badge) && /^(Open|Closed)\./.test(uploadScheduleSettings.english.status) && uploadScheduleSettings.restored);
     await captureVisual('03-automation.png');
     await wc.executeJavaScript('document.querySelector("[data-settings-page=allgemein]")?.click()');
     const updateActionAlignment = await wc.executeJavaScript('(() => { const row = document.querySelector(".program-update-row")?.getBoundingClientRect(); const button = document.getElementById("manualUpdateCheckBtn")?.getBoundingClientRect(); return row && button ? [Math.abs(row.right - button.right) <= 16, button.bottom <= row.bottom, button.left > row.left + row.width / 2].join("|") : "missing"; })()');

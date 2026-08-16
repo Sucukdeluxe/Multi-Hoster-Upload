@@ -70,6 +70,119 @@ describe('UploadManager', () => {
     assert.ok(events.length > 0, 'should emit at least one progress event');
   });
 
+  it('waits outside the upload schedule and starts on a live settings update without consuming an attempt', async () => {
+    const mgr = new UploadManager({}, {
+      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
+    });
+    const events = [];
+    mgr.on('progress', event => events.push(event));
+    const done = new Promise(resolve => mgr.once('batch-done', resolve));
+
+    const batch = mgr.startBatch([{
+      file: '/test/scheduled.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      jobId: 'scheduled-job'
+    }]);
+    await new Promise(setImmediate);
+    await new Promise(setImmediate);
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(events.some(event => event.status === 'getting-server' || event.status === 'uploading'), false);
+
+    mgr.updateSettings(null, { uploadSchedule: { enabled: false } });
+    await batch;
+    const summary = await done;
+    const result = summary.files[0].results[0];
+
+    assert.equal(mockUploadFile.mock.calls.length, 1);
+    assert.equal(result.status, 'done');
+    assert.equal(result.attempt, 1);
+  });
+
+  it('cancels a schedule waiter without starting transport or recording a failure', async () => {
+    const mgr = new UploadManager({}, {
+      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
+    });
+    const done = new Promise(resolve => mgr.once('batch-done', resolve));
+    const batch = mgr.startBatch([{
+      file: '/test/scheduled-cancel.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1',
+      jobId: 'scheduled-cancel-job'
+    }]);
+    await new Promise(setImmediate);
+    mgr.cancel();
+    await batch;
+    const summary = await done;
+    const result = summary.files[0].results[0];
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(result.status, 'aborted');
+    assert.equal(result.attempt, 0);
+  });
+
+  it('finishAfterActive wakes a closed schedule waiter without starting transport', async () => {
+    const mgr = new UploadManager({}, {
+      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
+    });
+    const done = new Promise(resolve => mgr.once('batch-done', resolve));
+    const batch = mgr.startBatch([{
+      jobId: 'scheduled-stop',
+      file: '/test/scheduled-stop.mp4',
+      hoster: 'doodstream.com',
+      apiKey: 'key1'
+    }]);
+
+    await new Promise(resolve => setImmediate(resolve));
+    mgr.finishAfterActive();
+    await batch;
+    const summary = await done;
+    const result = summary.files[0].results[0];
+
+    assert.equal(mockUploadFile.mock.calls.length, 0);
+    assert.equal(result.status, 'aborted');
+    assert.equal(result.attempt, 0);
+  });
+
+  it('releases an acquired slot when the schedule closes and re-admits after reopening', async () => {
+    let releaseFirst;
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
+      if (filePath === '/test/schedule-first.mp4') {
+        return new Promise(resolve => { releaseFirst = () => resolve({ download_url: `https://${hoster}/first`, file_code: 'first' }); });
+      }
+      return { download_url: `https://${hoster}/second`, file_code: 'second' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1 }
+    }, {
+      uploadSchedule: { enabled: false }
+    });
+    const done = new Promise(resolve => mgr.once('batch-done', resolve));
+    const batch = mgr.startBatch([
+      { file: '/test/schedule-first.mp4', hoster: 'doodstream.com', apiKey: 'key1', jobId: 'schedule-first' },
+      { file: '/test/schedule-second.mp4', hoster: 'doodstream.com', apiKey: 'key1', jobId: 'schedule-second' }
+    ]);
+    for (let index = 0; index < 50 && typeof releaseFirst !== 'function'; index++) await new Promise(setImmediate);
+    assert.equal(typeof releaseFirst, 'function');
+
+    mgr.updateSettings(null, {
+      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
+    });
+    releaseFirst();
+    for (let index = 0; index < 10; index++) await new Promise(setImmediate);
+
+    assert.equal(mockUploadFile.mock.calls.length, 1);
+    assert.equal(mgr._getSemaphore('doodstream.com').active, 0);
+
+    mgr.updateSettings(null, { uploadSchedule: { enabled: false } });
+    await batch;
+    const summary = await done;
+
+    assert.equal(mockUploadFile.mock.calls.length, 2);
+    assert.equal(summary.succeeded, 2);
+  });
+
   it('emits job-settled after releasing job resources', async () => {
     const mgr = new UploadManager({});
     let settled;

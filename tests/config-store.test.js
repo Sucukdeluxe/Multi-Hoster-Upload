@@ -126,6 +126,12 @@ describe('ConfigStore', () => {
       matchMode: 'all',
       conditions: []
     });
+    assert.deepEqual(config.globalSettings.uploadSchedule, {
+      enabled: false,
+      weekdays: [1, 2, 3, 4, 5, 6, 0],
+      start: '00:00',
+      end: '23:59'
+    });
     assert.deepEqual(config.history, []);
   });
 
@@ -381,6 +387,36 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.parallelUploadCount, 0);
     assert.equal(config.globalSettings.scaleParallelUploads, false);
     assert.equal(config.globalSettings.logFilePath, '');
+  });
+
+  it('normalizes upload schedules across load and save boundaries', async () => {
+    fs.writeFileSync(store.filePath, JSON.stringify({
+      globalSettings: {
+        uploadSchedule: { enabled: true, weekdays: [0, 1, 1, 9], start: ' 22:00 ', end: '06:00' }
+      }
+    }), 'utf-8');
+
+    assert.deepEqual(store.load().globalSettings.uploadSchedule, {
+      enabled: true,
+      weekdays: [1, 0],
+      start: '22:00',
+      end: '06:00'
+    });
+
+    const current = store.load();
+    await store.save({
+      globalSettings: {
+        ...current.globalSettings,
+        uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '08:00' }
+      }
+    });
+
+    assert.deepEqual(store.load().globalSettings.uploadSchedule, {
+      enabled: true,
+      weekdays: [],
+      start: '08:00',
+      end: '08:00'
+    });
   });
 
   it('concurrent saves preserve both sections', async () => {
