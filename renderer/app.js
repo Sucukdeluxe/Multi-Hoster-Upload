@@ -1285,7 +1285,7 @@ function closeHosterModal() {
 }
 
 async function applyHosterSelection() {
-  if (_pendingImportInspections > 0) return false;
+  if (isImportConfirmationBlocked()) return false;
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
   // Move pending files to selectedFiles on confirm
@@ -1613,9 +1613,13 @@ function getImportPlanSummary() {
   });
 }
 
+function isImportConfirmationBlocked() {
+  return _pendingImportInspections > 0 || getImportPlanSummary()?.jobCount === 0;
+}
+
 function syncImportConfirmationState() {
   const confirmButton = document.getElementById('confirmHosterModalBtn');
-  if (confirmButton) confirmButton.disabled = _pendingImportInspections > 0;
+  if (confirmButton) confirmButton.disabled = isImportConfirmationBlocked();
 }
 
 function renderImportPlanSummary() {
