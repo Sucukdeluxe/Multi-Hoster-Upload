@@ -336,3 +336,18 @@ test('existing release recovery rejects a mismatched transport tag', async () =>
     /existing release tag "v9\.9\.9" does not match "v2\.1\.20"/
   );
 });
+
+test('checksum metadata accepts equivalent transport-specific installer separators', async () => {
+  const sha = crypto.randomBytes(64).toString('base64');
+  const metadata = await parseLatestYml('https://update.invalid/latest.yml', {
+    version: '2.1.22',
+    assetName: 'Multi-Hoster-Upload Setup 2.1.22.exe',
+    assetSize: 456
+  }, async () => ({
+    ok: true,
+    status: 200,
+    text: async () => `version: 2.1.22\npath: Multi-Hoster-Upload.Setup.2.1.22.exe\nsha512: ${sha}\nsize: 456\n`
+  }));
+
+  assert.equal(metadata.path, 'Multi-Hoster-Upload.Setup.2.1.22.exe');
+});
