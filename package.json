@@ -1,6 +1,6 @@
 {
   "name": "multi-hoster-uploader",
-  "version": "2.1.22",
+  "version": "2.1.23",
   "description": "Upload files to doodstream, voe, vidmoly, byse simultaneously",
   "main": "main.js",
   "scripts": {
