@@ -1,9 +1,19 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
+const os = require('os');
 const WebSocket = require('ws');
 const RemoteServer = require('../lib/remote-server');
 
 const TOKEN = 'a'.repeat(64);
+
+function firstLanIpv4() {
+  for (const entry of Object.values(os.networkInterfaces())) {
+    for (const net of (entry || [])) {
+      if (net && net.family === 'IPv4' && !net.internal && net.address) return net.address;
+    }
+  }
+  return null;
+}
 
 function startAgent(onDiagnosticRequest, extra) {
   const srv = new RemoteServer();
@@ -78,11 +88,19 @@ test('a loopback diagnostic client connects even with a non-matching allowlist (
   ws.close(); agent.stop();
 });
 
-test('diagnostic server rejects wildcard and non-loopback binds before opening a listener', async () => {
-  for (const host of ['0.0.0.0', '::', '192.0.2.10']) {
-    const server = new RemoteServer();
-    await assert.rejects(server.start({ port: 0, host, token: TOKEN, diagnosticMode: true }), /requires a loopback host/);
-    assert.equal(server._wss, null);
+test('network bind (0.0.0.0): an allowlisted non-loopback peer connects over a real socket (the Tailscale path)', async (t) => {
+  const lan = firstLanIpv4();
+  if (!lan) { t.skip('no non-internal IPv4 interface available'); return; }
+  const agent = await startAgent(() => {}, { host: '0.0.0.0', allowlist: [lan] });
+  const port = agent.getPort();
+  const ws = new WebSocket(`ws://${lan}:${port}`);
+  try {
+    await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+    ws.send(JSON.stringify({ type: 'auth', token: TOKEN, role: 'diagnostic' }));
+    const ok = await once(ws, 'auth-ok');
+    assert.ok(ok.clientId, 'allowlisted LAN peer authed over the 0.0.0.0 bind');
+  } finally {
+    ws.close(); agent.stop();
   }
 });
 

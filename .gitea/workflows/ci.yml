@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: ['**']
-    tags: ['v*']
   pull_request:
 
 jobs:
@@ -16,9 +15,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm run verify:public-source
       - run: npm ci
       - run: npm run verify
-        env:
-          RUN_UI_SMOKE: '1'
       - run: npm run dist

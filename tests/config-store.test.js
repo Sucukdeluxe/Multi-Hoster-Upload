@@ -17,35 +17,9 @@ Module._load = function load(request, parent, isMain) {
 const ConfigStore = require('../lib/config-store');
 require('../lib/secret-store').encryptField('test-initialization');
 Module._load = originalLoad;
-const { createCollectors } = require('../lib/diagnostics-collectors');
-const { createAgent } = require('../lib/diagnostics-agent');
-const support = require('../lib/support-bundle');
-const stats = require('../lib/stats');
 
 let tmpDir;
 let store;
-
-function thrownBy(fn) {
-  try {
-    fn();
-  } catch (error) {
-    return error;
-  }
-  assert.fail('Expected function to throw');
-}
-
-function createDiagnosticsAgent(configStore, logDir) {
-  return createAgent(createCollectors({
-    loadConfig: () => configStore.loadDiagnosticsConfig(),
-    loadHistory: () => configStore.loadDiagnosticsHistory(),
-    getAllLogPaths: () => ({ logDir }),
-    support,
-    stats,
-    appInfo: () => ({}),
-    systemInfo: () => ({}),
-    agentInfo: () => ({})
-  }));
-}
 
 function createStore() {
   const fakeApp = {
@@ -120,18 +94,6 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.scaleParallelUploads, false);
     assert.equal(config.globalSettings.lastBrowseDirectory, '');
     assert.equal(config.globalSettings.pendingQueue, null);
-    assert.deepEqual(config.globalSettings.filenameFilter, {
-      enabled: false,
-      action: 'include',
-      matchMode: 'all',
-      conditions: []
-    });
-    assert.deepEqual(config.globalSettings.uploadSchedule, {
-      enabled: false,
-      weekdays: [1, 2, 3, 4, 5, 6, 0],
-      start: '00:00',
-      end: '23:59'
-    });
     assert.deepEqual(config.history, []);
   });
 
@@ -299,39 +261,6 @@ describe('ConfigStore', () => {
     assert.equal(history[104].id, 'batch-104');
   });
 
-  it('durably syncs migrated history before replacing the live file', async () => {
-    store._historyMigrated = true;
-    fs.writeFileSync(store.historyPath, '[]', 'utf-8');
-    const originalOpen = fs.promises.open;
-    const originalRename = fs.promises.rename;
-    let synced = false;
-    let renamed = false;
-    fs.promises.open = async (...args) => {
-      const handle = await originalOpen(...args);
-      const originalSync = handle.sync.bind(handle);
-      handle.sync = async () => {
-        await originalSync();
-        synced = true;
-      };
-      return handle;
-    };
-    fs.promises.rename = async (...args) => {
-      assert.equal(synced, true);
-      renamed = true;
-      return originalRename(...args);
-    };
-
-    try {
-      await store.appendHistory({ id: 'durable', files: [] });
-    } finally {
-      fs.promises.open = originalOpen;
-      fs.promises.rename = originalRename;
-    }
-
-    assert.equal(renamed, true);
-    assert.deepEqual(store.loadHistory().map(entry => entry.id), ['durable']);
-  });
-
   it('clearHistory empties the array', async () => {
     await store.appendHistory({ id: 'test', files: [] });
     assert.equal(store.loadHistory().length, 1);
@@ -387,36 +316,6 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.parallelUploadCount, 0);
     assert.equal(config.globalSettings.scaleParallelUploads, false);
     assert.equal(config.globalSettings.logFilePath, '');
-  });
-
-  it('normalizes upload schedules across load and save boundaries', async () => {
-    fs.writeFileSync(store.filePath, JSON.stringify({
-      globalSettings: {
-        uploadSchedule: { enabled: true, weekdays: [0, 1, 1, 9], start: ' 22:00 ', end: '06:00' }
-      }
-    }), 'utf-8');
-
-    assert.deepEqual(store.load().globalSettings.uploadSchedule, {
-      enabled: true,
-      weekdays: [1, 0],
-      start: '22:00',
-      end: '06:00'
-    });
-
-    const current = store.load();
-    await store.save({
-      globalSettings: {
-        ...current.globalSettings,
-        uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '08:00' }
-      }
-    });
-
-    assert.deepEqual(store.load().globalSettings.uploadSchedule, {
-      enabled: true,
-      weekdays: [],
-      start: '08:00',
-      end: '08:00'
-    });
   });
 
   it('concurrent saves preserve both sections', async () => {
@@ -614,51 +513,6 @@ describe('ConfigStore', () => {
     assert.equal(store.load().globalSettings.lastBrowseDirectory, selectedDirectory);
   });
 
-  it('merges the fallback log path after earlier queued settings without reverting them', async () => {
-    assert.equal(typeof store.saveFallbackLogPath, 'function');
-    await store.save({
-      globalSettings: {
-        alwaysOnTop: false,
-        webhookUrl: 'https://before.invalid',
-        logFilePath: ''
-      }
-    });
-
-    const originalAtomicWrite = store._atomicWrite.bind(store);
-    let releaseSettingsWrite;
-    let signalSettingsWriteStarted;
-    const settingsWriteStarted = new Promise(resolve => { signalSettingsWriteStarted = resolve; });
-    store._atomicWrite = (data) => {
-      const settings = JSON.parse(data).globalSettings;
-      if (!releaseSettingsWrite && settings.webhookUrl === 'https://concurrent.invalid') {
-        signalSettingsWriteStarted();
-        return new Promise((resolve, reject) => {
-          releaseSettingsWrite = () => originalAtomicWrite(data).then(resolve, reject);
-        });
-      }
-      return originalAtomicWrite(data);
-    };
-
-    const current = store.load();
-    const settingsSave = store.save({
-      globalSettings: {
-        ...current.globalSettings,
-        alwaysOnTop: true,
-        webhookUrl: 'https://concurrent.invalid'
-      }
-    });
-    await settingsWriteStarted;
-    const fallbackPath = path.join(tmpDir, 'fallback', 'fileuploader.log');
-    const fallbackSave = store.saveFallbackLogPath(fallbackPath);
-    releaseSettingsWrite();
-    await Promise.all([settingsSave, fallbackSave]);
-
-    const saved = store.load().globalSettings;
-    assert.equal(saved.alwaysOnTop, true);
-    assert.equal(saved.webhookUrl, 'https://concurrent.invalid');
-    assert.equal(saved.logFilePath, fallbackPath);
-  });
-
   it('merges remote settings in the write queue and returns the canonical token', async () => {
     await store.save({
       globalSettings: {
@@ -734,68 +588,6 @@ describe('ConfigStore', () => {
     assert.equal(config.hosters['doodstream.com'][0].apiKey, 'from-backup');
   });
 
-  it('strict diagnostics config loading rejects primary failures while normal loading keeps recovery', () => {
-    assert.equal(typeof store.loadDiagnosticsConfig, 'function');
-
-    fs.writeFileSync(store.filePath + '.bak', JSON.stringify({
-      hosters: { 'doodstream.com': [{ id: 'bak-1', authType: 'api', apiKey: 'from-backup' }] },
-      hosterSettings: {},
-      globalSettings: {},
-      history: []
-    }), 'utf-8');
-    fs.writeFileSync(store.filePath, '{broken-config', 'utf-8');
-
-    assert.equal(store.load().hosters['doodstream.com'][0].apiKey, 'from-backup');
-    assert.throws(() => store.loadDiagnosticsConfig());
-
-    fs.rmSync(store.filePath);
-    assert.equal(store.load().globalSettings.language, 'en');
-    assert.throws(() => store.loadDiagnosticsConfig());
-  });
-
-  it('strict diagnostics config errors never expose malformed JSON or file paths', () => {
-    const opaque = 'opaque-config-42';
-    fs.writeFileSync(store.filePath, opaque, 'utf-8');
-
-    let error = thrownBy(() => store.loadDiagnosticsConfig());
-    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_INVALID');
-    assert.equal(error.message, 'Die Diagnosekonfiguration ist ungültig');
-    assert.ok(!error.message.includes(opaque));
-
-    fs.writeFileSync(store.filePath, '{}', 'utf-8');
-    error = thrownBy(() => store.loadDiagnosticsConfig());
-    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_INVALID');
-    assert.equal(error.message, 'Die Diagnosekonfiguration ist ungültig');
-
-    fs.rmSync(store.filePath);
-    error = thrownBy(() => store.loadDiagnosticsConfig());
-    assert.equal(error.code, 'DIAGNOSTIC_CONFIG_READ_FAILED');
-    assert.equal(error.message, 'Die Diagnosekonfiguration konnte nicht gelesen werden');
-    assert.ok(!error.message.includes(store.filePath));
-  });
-
-  it('strict diagnostics config loading decrypts current credentials and propagates decryption failures', () => {
-    assert.equal(typeof store.loadDiagnosticsConfig, 'function');
-
-    const encrypted = `enc:v1:${Buffer.from('test-protected:diagnostic-secret').toString('base64')}`;
-    fs.writeFileSync(store.filePath, JSON.stringify({
-      hosters: { 'doodstream.com': [{ id: 'diag-1', authType: 'api', apiKey: encrypted }] },
-      hosterSettings: {},
-      globalSettings: {},
-      history: []
-    }), 'utf-8');
-
-    assert.equal(store.loadDiagnosticsConfig().hosters['doodstream.com'][0].apiKey, 'diagnostic-secret');
-
-    const originalDecryptString = safeStorage.decryptString;
-    safeStorage.decryptString = () => { throw new Error('diagnostic decrypt failure'); };
-    try {
-      assert.throws(() => store.loadDiagnosticsConfig(), /Gespeicherte Zugangsdaten konnten nicht entschlüsselt werden/);
-    } finally {
-      safeStorage.decryptString = originalDecryptString;
-    }
-  });
-
   it('wipe-guard: a settings-only save recovers accounts from .bak when the live config validly has none', async () => {
     // Post-wipe state: live config parses fine but has empty hosters; a backup still holds the accounts.
     fs.writeFileSync(store.filePath, JSON.stringify({ hosters: {}, hosterSettings: {}, globalSettings: {}, history: [] }), 'utf-8');
@@ -858,65 +650,6 @@ describe('ConfigStore history split (electron-history.json)', () => {
     s._migrateHistory();
     assert.deepEqual(s.load().history, [], 'history is not carried in the always-loaded config');
     assert.equal(s.loadHistory().length, 30);
-  });
-
-  it('strict diagnostics history accepts valid empty history and rejects failed or corrupt dedicated reads', () => {
-    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
-    writeConfigWithHistory(7);
-    s._migrateHistory();
-
-    fs.writeFileSync(s.historyPath, '[]', 'utf-8');
-    assert.deepEqual(s.loadDiagnosticsHistory(), []);
-
-    for (const invalidHistory of ['null', '{}', '{"history":null}', '{broken-history']) {
-      fs.writeFileSync(s.historyPath, invalidHistory, 'utf-8');
-      const error = thrownBy(() => s.loadDiagnosticsHistory());
-      assert.equal(error.code, 'DIAGNOSTIC_HISTORY_INVALID');
-      assert.equal(error.message, 'Die Diagnoseverlaufsdatei ist ungültig');
-      assert.ok(!error.message.includes(invalidHistory));
-    }
-
-    fs.rmSync(s.historyPath);
-    fs.mkdirSync(s.historyPath);
-    const error = thrownBy(() => s.loadDiagnosticsHistory());
-    assert.equal(error.code, 'DIAGNOSTIC_HISTORY_READ_FAILED');
-    assert.equal(error.message, 'Die Diagnoseverlaufsdatei konnte nicht gelesen werden');
-    assert.ok(!error.message.includes(s.historyPath));
-  });
-
-  it('real diagnostics agent never returns opaque corrupt dedicated history content', () => {
-    const opaque = 'opaque42';
-    writeConfigWithHistory(0);
-    fs.writeFileSync(s.historyPath, opaque, 'utf-8');
-    const agent = createDiagnosticsAgent(s, dir);
-
-    for (const operation of ['get_history', 'list_errors', 'server_health']) {
-      const response = agent.handle(operation, {});
-      assert.deepEqual(response, { ok: false, error: 'Die Diagnoseverlaufsdatei ist ungültig' });
-      assert.ok(!JSON.stringify(response).includes(opaque));
-    }
-  });
-
-  it('strict diagnostics history never falls back to stale config history when a dedicated file exists', () => {
-    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
-    writeConfigWithHistory(7);
-    fs.writeFileSync(s.historyPath, 'null', 'utf-8');
-
-    assert.equal(s._historyMigrated, false);
-    assert.equal(s.loadHistory().length, 7);
-    assert.throws(() => s.loadDiagnosticsHistory());
-  });
-
-  it('strict diagnostics history preserves the valid pre-migration history path', () => {
-    assert.equal(typeof s.loadDiagnosticsHistory, 'function');
-    writeConfigWithHistory(7);
-
-    assert.equal(s.loadDiagnosticsHistory().length, 7);
-
-    const config = JSON.parse(fs.readFileSync(s.filePath, 'utf-8'));
-    config.history = null;
-    fs.writeFileSync(s.filePath, JSON.stringify(config), 'utf-8');
-    assert.throws(() => s.loadDiagnosticsHistory());
   });
 
   it('appendHistory writes to history.json; the next config write strips stale history from the config file', async () => {

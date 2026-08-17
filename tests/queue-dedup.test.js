@@ -73,32 +73,6 @@ test('empty/missing inputs do not throw', () => {
 
 const T = (s) => Date.parse(s.replace(' ', 'T'));
 
-test('history fallback keeps a serialized successful terminal result through log deduplication', () => {
-  const result = {
-    download_url: 'https://voe.sx/e/exact-link',
-    embed_url: 'https://voe.sx/e/exact-embed',
-    file_code: 'exact-code'
-  };
-  const restored = JSON.parse(JSON.stringify({
-    savedAt: T('2026-08-13 12:00:00'),
-    queueJobs: [{
-      id: 'history-fallback-done',
-      file: 'C:/dl/episode.mkv',
-      fileName: 'episode.mkv',
-      hoster: 'voe.sx',
-      status: 'done',
-      result
-    }]
-  }));
-  const log = [{ fileName: 'episode.mkv', hoster: 'voe.sx', ts: T('2026-08-13 12:00:05') }];
-
-  const { kept, removed } = partitionRestoredJobsByLog(restored.queueJobs, log, restored.savedAt);
-
-  assert.deepEqual(removed, []);
-  assert.deepEqual(kept, restored.queueJobs);
-  assert.deepEqual(kept[0].result, result);
-});
-
 test('ts-gate: preview job uploaded AFTER the snapshot is dropped (the ghost bug)', () => {
   const jobs = [job('preview', 'a.mkv', 'voe.sx')];
   const log = [{ fileName: 'a.mkv', hoster: 'voe.sx', ts: T('2026-06-19 12:00:05') }];

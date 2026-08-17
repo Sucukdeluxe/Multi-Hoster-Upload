@@ -148,7 +148,7 @@
       </div>
       <div class="update-dialog-copy">
         <h2 id="updateDialogTitle">Eine neue Version ist verfügbar</h2>
-        <p id="updateMessage" aria-live="polite"></p>
+        <p id="updateMessage"></p>
       </div>
       <div class="update-release-notes" id="updateReleaseNotes" hidden>
         <div class="update-release-notes-title">Changelog</div>
@@ -209,10 +209,10 @@
           <div class="view-sidebar-summary view-sidebar-summary-block hoster-summary" id="hosterSummary">Keine Upload-Ziele ausgewählt</div>
         </div>
         <div class="upload-telemetry" id="uploadTelemetry" aria-label="Upload-Statistik">
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibend</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRemaining" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Gesamt</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryTotal" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Läuft</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRunning" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbindungen</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryConnections" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibend</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRemaining" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Läuft</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRunning" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fertig</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryCompleted" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fehler</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryFailed" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Geschwindigkeit</span><strong class="upload-telemetry-value" id="uploadTelemetrySpeed" aria-label="0 B/s">0 B/s</strong></div>
@@ -423,32 +423,6 @@
         </div>
       </div>
       <div class="health-check-results account-health-results" id="healthCheckResults"></div>
-      <section class="hoster-health-overview" id="hosterHealthOverview" role="region" aria-labelledby="hosterHealthTitle" aria-describedby="hosterHealthHint">
-        <div class="hoster-health-heading">
-          <h3 id="hosterHealthTitle">Hoster-Gesundheit</h3>
-          <p id="hosterHealthHint">Lokale Werte aus höchstens 50 Batches. Der effektive historische Durchsatz kann Wartezeiten und Wiederholungen enthalten.</p>
-        </div>
-        <div class="hoster-health-scroll" tabindex="0">
-          <table>
-            <caption class="hoster-health-caption">Hoster-Gesundheit aus lokalem Verlauf und aktuellem Accountstatus</caption>
-            <thead>
-              <tr>
-                <th scope="col">Hoster</th>
-                <th scope="col">Stichprobe</th>
-                <th scope="col">Erfolg / Fehler / Übersprungen</th>
-                <th scope="col">Erfolgsrate</th>
-                <th scope="col" data-health-column="throughput">Effektiver historischer Durchsatz</th>
-                <th scope="col">Letzter Erfolg</th>
-                <th scope="col">Fehler (7 Tage)</th>
-                <th scope="col">Account-Probleme</th>
-              </tr>
-            </thead>
-            <tbody id="hosterHealthBody">
-              <tr><td colspan="8" data-hoster-health-empty>Wird geladen…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
       <div class="accounts-list" id="accountsList"></div>
       <div class="accounts-list-footer" id="accountsListFooter" style="display:none">
         <button class="btn btn-secondary" id="toggleAllAccountsBtn">Alle ausklappen</button>
@@ -456,8 +430,8 @@
     </main>
   </div>
 
-  <div class="modal-overlay" id="accountModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-describedby="accountModalSubtitle" tabindex="-1">
+  <div class="modal-overlay" id="accountModal" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="accountModalTitle" aria-describedby="accountModalSubtitle">
       <div class="modal-header">
         <div>
           <h3 id="accountModalTitle">Account hinzufügen</h3>
@@ -484,8 +458,8 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="jobLogModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="jobLogTitle" tabindex="-1" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
+  <div class="modal-overlay" id="jobLogModal" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="jobLogTitle" style="width:min(820px,96%);max-height:80vh;display:flex;flex-direction:column">
       <div class="modal-header">
         <div><h3 id="jobLogTitle">Upload-Log</h3></div>
         <button class="icon-btn" id="closeJobLogBtn" aria-label="Schließen">&times;</button>
@@ -500,8 +474,8 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="deleteAccountModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteAccountTitle" aria-describedby="deleteAccountMessage" tabindex="-1" style="width:min(400px,100%)">
+  <div class="modal-overlay" id="deleteAccountModal" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteAccountTitle" aria-describedby="deleteAccountMessage" style="width:min(400px,100%)">
       <div class="modal-header">
         <div><h3 id="deleteAccountTitle">Account löschen?</h3></div>
         <button class="icon-btn" id="closeDeleteModalBtn" aria-label="Schließen">&times;</button>
@@ -517,7 +491,7 @@
   </div>
 
   <div class="modal-overlay app-alert-modal" id="appAlertModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appAlertTitle" aria-describedby="appAlertMessage" tabindex="-1" style="width:min(420px,100%)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="appAlertTitle" aria-describedby="appAlertMessage" style="width:min(420px,100%)">
       <div class="modal-header">
         <div><h3 id="appAlertTitle">Hinweis</h3></div>
         <button class="icon-btn" id="appAlertCloseBtn" aria-label="Schließen">&times;</button>
@@ -534,7 +508,7 @@
   </div>
 
   <div class="modal-overlay" id="historyClearModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="historyClearModalTitle" aria-describedby="historyClearModalMessage" tabindex="-1" style="width:min(440px,100%)">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="historyClearModalTitle" aria-describedby="historyClearModalMessage" style="width:min(440px,100%)">
       <div class="modal-header">
         <div><h3 id="historyClearModalTitle">Verlauf löschen?</h3></div>
         <button class="icon-btn" id="closeHistoryClearModalBtn" aria-label="Schließen">&times;</button>
@@ -667,104 +641,15 @@
     <button class="btn btn-xs btn-secondary" id="cancelStartupResumeBtn">Abbrechen</button>
   </div>
 
-  <div class="modal-overlay" id="batchCompletionModal" style="display:none" aria-hidden="true">
-    <div class="modal-card batch-completion-card" role="dialog" aria-modal="true" aria-labelledby="batchCompletionTitle" aria-describedby="batchCompletionSummary" tabindex="-1">
-      <div class="modal-header batch-completion-header">
-        <div class="batch-completion-heading">
-          <span class="batch-completion-outcome" id="batchCompletionOutcome">Erfolgreich</span>
-          <h3 id="batchCompletionTitle">Batch abgeschlossen</h3>
-          <p id="batchCompletionSummary">Der Upload-Batch wurde abgeschlossen.</p>
-        </div>
-        <button class="icon-btn" id="batchCompletionHeaderCloseBtn" aria-label="Schließen">&times;</button>
-      </div>
-      <div class="modal-body batch-completion-body">
-        <dl class="batch-completion-transfer" aria-label="Übertragung">
-          <div><dt>Dauer</dt><dd id="batchCompletionDuration">00:00:00</dd></div>
-          <div><dt>Erfolgreich übertragen</dt><dd id="batchCompletionSuccessfulBytes">0 B</dd></div>
-          <div><dt>Durchschnitt</dt><dd id="batchCompletionAverageSpeed">0 B/s</dd></div>
-        </dl>
-
-        <div class="batch-completion-metric-sections">
-          <section class="batch-completion-section" aria-labelledby="batchCompletionFilesTitle">
-            <h4 id="batchCompletionFilesTitle">Dateien</h4>
-            <dl class="batch-completion-metrics">
-              <div><dt>Gesamt</dt><dd id="batchCompletionFilesTotal">0</dd></div>
-              <div><dt>Vollständig erfolgreich</dt><dd id="batchCompletionFilesFullySucceeded">0</dd></div>
-              <div><dt>Teilweise erfolgreich</dt><dd id="batchCompletionFilesPartiallySucceeded">0</dd></div>
-              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionFilesFailed">0</dd></div>
-            </dl>
-          </section>
-
-          <section class="batch-completion-section" aria-labelledby="batchCompletionJobsTitle">
-            <h4 id="batchCompletionJobsTitle">Aufträge</h4>
-            <dl class="batch-completion-metrics batch-completion-job-metrics">
-              <div><dt>Gesamt</dt><dd id="batchCompletionJobsTotal">0</dd></div>
-              <div><dt>Erfolgreich</dt><dd id="batchCompletionJobsSucceeded">0</dd></div>
-              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionJobsFailed">0</dd></div>
-              <div><dt>Übersprungen</dt><dd id="batchCompletionJobsSkipped">0</dd></div>
-              <div><dt>Abgebrochen</dt><dd id="batchCompletionJobsAborted">0</dd></div>
-            </dl>
-          </section>
-
-          <section class="batch-completion-section" aria-labelledby="batchCompletionCleanupTitle">
-            <h4 id="batchCompletionCleanupTitle">Quelldateien</h4>
-            <dl class="batch-completion-metrics">
-              <div><dt>Angefordert</dt><dd id="batchCompletionCleanupRequested">0</dd></div>
-              <div><dt>Gelöscht</dt><dd id="batchCompletionCleanupDeleted">0</dd></div>
-              <div><dt>Blockiert</dt><dd id="batchCompletionCleanupBlocked">0</dd></div>
-              <div><dt>Fehlgeschlagen</dt><dd id="batchCompletionCleanupFailed">0</dd></div>
-            </dl>
-          </section>
-        </div>
-
-        <section class="batch-completion-section batch-completion-hosters" aria-labelledby="batchCompletionHostersTitle">
-          <h4 id="batchCompletionHostersTitle">Hosterübersicht</h4>
-          <div class="batch-completion-table-scroll" tabindex="0">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Hoster</th>
-                  <th scope="col">Aufträge</th>
-                  <th scope="col">Erfolgreich</th>
-                  <th scope="col">Fehlgeschlagen</th>
-                  <th scope="col">Übersprungen</th>
-                  <th scope="col">Abgebrochen</th>
-                  <th scope="col">Übertragen</th>
-                </tr>
-              </thead>
-              <tbody id="batchCompletionHostersBody"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="batch-completion-section batch-completion-errors" id="batchCompletionErrorsSection" aria-labelledby="batchCompletionErrorsTitle" hidden>
-          <div class="batch-completion-section-heading">
-            <h4 id="batchCompletionErrorsTitle">Fehlerbeispiele</h4>
-            <span id="batchCompletionErrorsCount">0</span>
-          </div>
-          <ol id="batchCompletionErrorsList"></ol>
-          <p id="batchCompletionErrorsMore" hidden></p>
-        </section>
-      </div>
-      <div class="modal-footer batch-completion-footer">
-        <div class="batch-completion-export-actions">
-          <button class="btn btn-secondary" id="batchCompletionExportJsonBtn">JSON exportieren</button>
-          <button class="btn btn-secondary" id="batchCompletionExportCsvBtn">Fehler-CSV exportieren</button>
-        </div>
-        <button class="btn btn-primary" id="batchCompletionCloseBtn">Schließen</button>
-      </div>
-    </div>
-  </div>
-
   <div class="shutdown-overlay" id="shutdownOverlay" style="display:none" aria-hidden="true">
-    <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage" tabindex="-1">
+    <div class="shutdown-box" role="dialog" aria-modal="true" aria-labelledby="shutdownMessage">
       <p id="shutdownMessage">System wird heruntergefahren in <span id="shutdownSeconds">60</span>s...</p>
       <button class="btn btn-danger" id="cancelShutdownBtn">Abbrechen</button>
     </div>
   </div>
 
   <div class="modal-overlay" id="hosterModal" style="display:none" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hosterModalTitle" aria-describedby="hosterModalDescription" tabindex="-1">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hosterModalTitle" aria-describedby="hosterModalDescription">
       <div class="modal-header">
         <div>
           <h3 id="hosterModalTitle">Upload-Ziele auswählen</h3>
@@ -781,7 +666,6 @@
         <dl class="import-plan-summary" id="importPlanSummary" aria-label="Import-Vorabprüfung">
           <div><dt>Kandidaten</dt><dd id="importPlanCandidates">0</dd></div>
           <div><dt>Bereits vorhanden / dupliziert</dt><dd id="importPlanDuplicates">0</dd></div>
-          <div><dt>Durch Dateinamenfilter ausgeschlossen</dt><dd id="importPlanFiltered">0</dd></div>
           <div><dt>Fehlend / unlesbar / leer</dt><dd id="importPlanUnavailable">0</dd></div>
           <div><dt>Akzeptierte Dateien</dt><dd id="importPlanAccepted">0</dd></div>
           <div><dt>Ausgewählte Ziele</dt><dd id="importPlanTargets">0</dd></div>
@@ -807,10 +691,7 @@
   <script src="../lib/throttle-timer.js"></script>
   <script src="../lib/serialized-runner.js"></script>
   <script src="../lib/speed-history.js"></script>
-  <script src="../lib/upload-recovery.js"></script>
-  <script src="../lib/filename-filter.js"></script>
   <script src="../lib/import-preflight.js"></script>
-  <script src="../lib/upload-schedule.js"></script>
   <script src="account-submit.js"></script>
   <script src="account-status.js"></script>
   <script src="history-status.js"></script>

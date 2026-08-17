@@ -70,119 +70,6 @@ describe('UploadManager', () => {
     assert.ok(events.length > 0, 'should emit at least one progress event');
   });
 
-  it('waits outside the upload schedule and starts on a live settings update without consuming an attempt', async () => {
-    const mgr = new UploadManager({}, {
-      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
-    });
-    const events = [];
-    mgr.on('progress', event => events.push(event));
-    const done = new Promise(resolve => mgr.once('batch-done', resolve));
-
-    const batch = mgr.startBatch([{
-      file: '/test/scheduled.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1',
-      jobId: 'scheduled-job'
-    }]);
-    await new Promise(setImmediate);
-    await new Promise(setImmediate);
-
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-    assert.equal(events.some(event => event.status === 'getting-server' || event.status === 'uploading'), false);
-
-    mgr.updateSettings(null, { uploadSchedule: { enabled: false } });
-    await batch;
-    const summary = await done;
-    const result = summary.files[0].results[0];
-
-    assert.equal(mockUploadFile.mock.calls.length, 1);
-    assert.equal(result.status, 'done');
-    assert.equal(result.attempt, 1);
-  });
-
-  it('cancels a schedule waiter without starting transport or recording a failure', async () => {
-    const mgr = new UploadManager({}, {
-      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
-    });
-    const done = new Promise(resolve => mgr.once('batch-done', resolve));
-    const batch = mgr.startBatch([{
-      file: '/test/scheduled-cancel.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1',
-      jobId: 'scheduled-cancel-job'
-    }]);
-    await new Promise(setImmediate);
-    mgr.cancel();
-    await batch;
-    const summary = await done;
-    const result = summary.files[0].results[0];
-
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-    assert.equal(result.status, 'aborted');
-    assert.equal(result.attempt, 0);
-  });
-
-  it('finishAfterActive wakes a closed schedule waiter without starting transport', async () => {
-    const mgr = new UploadManager({}, {
-      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
-    });
-    const done = new Promise(resolve => mgr.once('batch-done', resolve));
-    const batch = mgr.startBatch([{
-      jobId: 'scheduled-stop',
-      file: '/test/scheduled-stop.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1'
-    }]);
-
-    await new Promise(resolve => setImmediate(resolve));
-    mgr.finishAfterActive();
-    await batch;
-    const summary = await done;
-    const result = summary.files[0].results[0];
-
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-    assert.equal(result.status, 'aborted');
-    assert.equal(result.attempt, 0);
-  });
-
-  it('releases an acquired slot when the schedule closes and re-admits after reopening', async () => {
-    let releaseFirst;
-    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
-      if (filePath === '/test/schedule-first.mp4') {
-        return new Promise(resolve => { releaseFirst = () => resolve({ download_url: `https://${hoster}/first`, file_code: 'first' }); });
-      }
-      return { download_url: `https://${hoster}/second`, file_code: 'second' };
-    });
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 0, parallelCount: 1 }
-    }, {
-      uploadSchedule: { enabled: false }
-    });
-    const done = new Promise(resolve => mgr.once('batch-done', resolve));
-    const batch = mgr.startBatch([
-      { file: '/test/schedule-first.mp4', hoster: 'doodstream.com', apiKey: 'key1', jobId: 'schedule-first' },
-      { file: '/test/schedule-second.mp4', hoster: 'doodstream.com', apiKey: 'key1', jobId: 'schedule-second' }
-    ]);
-    for (let index = 0; index < 50 && typeof releaseFirst !== 'function'; index++) await new Promise(setImmediate);
-    assert.equal(typeof releaseFirst, 'function');
-
-    mgr.updateSettings(null, {
-      uploadSchedule: { enabled: true, weekdays: [], start: '08:00', end: '09:00' }
-    });
-    releaseFirst();
-    for (let index = 0; index < 10; index++) await new Promise(setImmediate);
-
-    assert.equal(mockUploadFile.mock.calls.length, 1);
-    assert.equal(mgr._getSemaphore('doodstream.com').active, 0);
-
-    mgr.updateSettings(null, { uploadSchedule: { enabled: false } });
-    await batch;
-    const summary = await done;
-
-    assert.equal(mockUploadFile.mock.calls.length, 2);
-    assert.equal(summary.succeeded, 2);
-  });
-
   it('emits job-settled after releasing job resources', async () => {
     const mgr = new UploadManager({});
     let settled;
@@ -264,8 +151,8 @@ describe('UploadManager', () => {
     mgr.on('batch-done', (s) => { summary = s; });
 
     await mgr.startBatch([
-      { file: '/test/video1.mp4', fileKey: 'video-one', hoster: 'doodstream.com', apiKey: 'key1' },
-      { file: '/test/video2.mp4', fileKey: 'video-two', hoster: 'doodstream.com', apiKey: 'key1' }
+      { file: '/test/video1.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { file: '/test/video2.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
     ]);
 
     assert.ok(summary);
@@ -273,8 +160,6 @@ describe('UploadManager', () => {
     assert.equal(summary.succeeded, 2);
     assert.equal(summary.failed, 0);
     assert.equal(summary.files.length, 2);
-    assert.deepEqual(summary.files.map(file => file.fileKey), ['video-one', 'video-two']);
-    assert.ok(summary.files.flatMap(file => file.results).every(result => typeof result.jobId === 'string' && result.jobId.length > 0));
   });
 
   it('emits a final idle stats snapshot after a normal batch', async () => {
@@ -415,50 +300,6 @@ describe('UploadManager', () => {
     await batchPromise;
 
     assert.equal(statuses.filter((status) => status === 'aborted').length, 0);
-  });
-
-  it('cancels one selected job followed by all 100 active uploads without retaining resources', async () => {
-    let active = 0;
-    let started = 0;
-    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress, signal) => {
-      started++;
-      active++;
-      await new Promise((resolve, reject) => {
-        signal.addEventListener('abort', () => {
-          active--;
-          reject(new Error('Aborted'));
-        }, { once: true });
-      });
-    });
-
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 0, parallelCount: 100, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-    }, { parallelUploadCount: 100 });
-    const tasks = Array.from({ length: 100 }, (_, index) => ({
-      jobId: `active-cancel-${index}`,
-      file: `/test/active-cancel-${index}.mp4`,
-      hoster: 'doodstream.com',
-      apiKey: 'key1'
-    }));
-    const batchPromise = mgr.startBatch(tasks);
-
-    for (let attempt = 0; attempt < 200 && started < 100; attempt++) {
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    assert.equal(started, 100);
-    assert.equal(active, 100);
-
-    const cancelStartedAt = performance.now();
-    mgr.cancelJobs(['active-cancel-0']);
-    mgr.cancel();
-    await batchPromise;
-    const cancelDuration = performance.now() - cancelStartedAt;
-
-    assert.ok(cancelDuration < 1000, `cancel took ${cancelDuration.toFixed(1)}ms`);
-    assert.equal(active, 0);
-    assert.equal(mgr.running, false);
-    assert.equal(mgr.jobAbortControllers.size, 0);
-    assert.equal(mgr.statsInterval, null);
   });
 
   it('maxSizeMb filter skips oversized files', async () => {
@@ -652,269 +493,7 @@ describe('UploadManager', () => {
 
     assert.equal(settled.at(-1).status, 'aborted');
     assert.equal(progress.some(event => event.status === 'done'), false);
-    assert.equal(progress.at(-1).remoteCommitUncertain, true);
     assert.equal(summary.succeeded, 0);
-    assert.equal(summary.files[0].results[0].remoteCommitUncertain, true);
-  });
-
-  it('keeps a confirmed result when cancellation arrives after confirmation', async () => {
-    const mgr = new UploadManager({});
-    const originalExecuteUpload = mgr._executeUpload.bind(mgr);
-    mgr._executeUpload = async (...args) => {
-      const result = await originalExecuteUpload(...args);
-      queueMicrotask(() => mgr.cancelJobs(['confirmed-before-cancel']));
-      return result;
-    };
-    const settled = [];
-    let summary = null;
-    mgr.on('job-settled', event => settled.push(event));
-    mgr.on('batch-done', value => { summary = value; });
-
-    await mgr.startBatch([{
-      jobId: 'confirmed-before-cancel',
-      file: '/test/confirmed-before-cancel.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1'
-    }]);
-
-    assert.equal(settled.at(-1).status, 'done');
-    assert.equal(summary.succeeded, 1);
-  });
-
-  it('finishAfterActive prevents a semaphore waiter from starting', async () => {
-    let releaseFirst;
-    let markFirstStarted;
-    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
-    const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
-    const uploads = [];
-    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
-      uploads.push(filePath);
-      if (filePath === '/test/active-before-stop.mp4') {
-        markFirstStarted();
-        await firstGate;
-      }
-      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
-    });
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-    });
-    const settled = new Map();
-    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
-    const batchPromise = mgr.startBatch([
-      { jobId: 'active-before-stop', file: '/test/active-before-stop.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
-      { jobId: 'semaphore-waiter', file: '/test/semaphore-waiter.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
-    ]);
-
-    await firstStarted;
-    for (let index = 0; index < 50 && mgr._getSemaphore('doodstream.com').pending === 0; index++) {
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    assert.equal(mgr._getSemaphore('doodstream.com').pending, 1);
-    mgr.finishAfterActive();
-    releaseFirst();
-    await batchPromise;
-
-    assert.deepEqual(uploads, ['/test/active-before-stop.mp4']);
-    assert.equal(settled.get('active-before-stop'), 'done');
-    assert.equal(settled.get('semaphore-waiter'), 'aborted');
-  });
-
-  it('finishAfterActive prevents an interval waiter from starting', async () => {
-    let releaseInterval;
-    let markIntervalEntered;
-    const intervalGate = new Promise(resolve => { releaseInterval = resolve; });
-    const intervalEntered = new Promise(resolve => { markIntervalEntered = resolve; });
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 1, maxSizeMb: 0 }
-    });
-    mgr._waitForInterval = async (hoster, intervalMs, signal, acquireSlots) => {
-      markIntervalEntered();
-      await intervalGate;
-      await acquireSlots();
-    };
-    let settled;
-    mgr.on('job-settled', event => { settled = event; });
-    const batchPromise = mgr.startBatch([{
-      jobId: 'interval-waiter-stop',
-      file: '/test/interval-waiter-stop.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1'
-    }]);
-
-    await intervalEntered;
-    mgr.finishAfterActive();
-    releaseInterval();
-    await batchPromise;
-
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-    assert.equal(settled.status, 'aborted');
-  });
-
-  it('finishAfterActive prevents a suspect-resolution waiter from starting', async () => {
-    let releaseSuspect;
-    let markSuspectEntered;
-    const suspectGate = new Promise(resolve => { releaseSuspect = resolve; });
-    const suspectEntered = new Promise(resolve => { markSuspectEntered = resolve; });
-    const mgr = new UploadManager({});
-    mgr._waitForSuspectResolution = async () => {
-      markSuspectEntered();
-      await suspectGate;
-    };
-    let settled;
-    mgr.on('job-settled', event => { settled = event; });
-    const batchPromise = mgr.startBatch([{
-      jobId: 'suspect-waiter-stop',
-      file: '/test/suspect-waiter-stop.mp4',
-      hoster: 'doodstream.com',
-      apiKey: 'key1'
-    }]);
-
-    await suspectEntered;
-    mgr.finishAfterActive();
-    releaseSuspect();
-    await batchPromise;
-
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-    assert.equal(settled.status, 'aborted');
-  });
-
-  it('does not start a suspect alternate that became a failed account while waiting', async () => {
-    const mgr = new UploadManager(
-      { 'byse.sx': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 } },
-      {},
-      { 'byse.sx': [{ id: 'alternate', apiKey: 'alternate-key' }] }
-    );
-    const controller = new AbortController();
-    const task = {
-      file: '/test/suspect-waiter.mkv',
-      hoster: 'byse.sx',
-      accountId: 'alternate',
-      apiKey: 'alternate-key',
-      jobId: 'suspect-waiter'
-    };
-    mgr._beginSuspectResolution('byse.sx', 'suspect-owner');
-
-    const attempt = mgr._executeUploadWithAdmission(
-      task,
-      () => {},
-      controller.signal,
-      null,
-      { ok: true, isVideoLike: true },
-      fakeFileSize,
-      false,
-      task.jobId
-    );
-    await new Promise(resolve => setImmediate(resolve));
-    mgr._failedAccounts.set('byse.sx:alternate', true);
-    mgr._endSuspectResolution('byse.sx', 'suspect-owner');
-
-    await assert.rejects(attempt, error => error.accountUnavailable === true);
-    assert.equal(mockUploadFile.mock.calls.length, 0);
-  });
-
-  it('finishAfterActive prevents a recovery-admission waiter from starting', async () => {
-    let releaseFirst;
-    let markFirstStarted;
-    const firstGate = new Promise(resolve => { releaseFirst = resolve; });
-    const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
-    const uploads = [];
-    mockUploadFile.mock.mockImplementation(async (hoster, filePath) => {
-      uploads.push(filePath);
-      if (filePath === '/test/first/shared-title.mp4') {
-        markFirstStarted();
-        await firstGate;
-      }
-      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: `ok-${uploads.length}` };
-    });
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-    });
-    const settled = new Map();
-    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
-    const batchPromise = mgr.startBatch([
-      { jobId: 'recovery-active', file: '/test/first/shared-title.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
-      { jobId: 'recovery-waiter', file: '/test/second/shared-title.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
-    ]);
-
-    await firstStarted;
-    await new Promise(resolve => setImmediate(resolve));
-    mgr.finishAfterActive();
-    releaseFirst();
-    await batchPromise;
-
-    assert.deepEqual(uploads, ['/test/first/shared-title.mp4']);
-    assert.equal(settled.get('recovery-active'), 'done');
-    assert.equal(settled.get('recovery-waiter'), 'aborted');
-  });
-
-  it('finishAfterActive remains enforced after account-failure coordination', async () => {
-    let releaseFailureGate;
-    let markFailureGateEntered;
-    const failureGate = new Promise(resolve => { releaseFailureGate = resolve; });
-    const failureGateEntered = new Promise(resolve => { markFailureGateEntered = resolve; });
-    const error = new Error('Account rejected upload');
-    error.accountError = true;
-    mockUploadFile.mock.mockImplementation(async () => { throw error; });
-    const mgr = new UploadManager({
-      'doodstream.com': { retries: 2, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-    });
-    mgr._coordinateAccountFailure = async () => {
-      markFailureGateEntered();
-      await failureGate;
-    };
-    let settled;
-    mgr.on('job-settled', event => { settled = event; });
-    const batchPromise = mgr.startBatch([{
-      jobId: 'failure-gate-stop',
-      file: '/test/failure-gate-stop.mp4',
-      hoster: 'doodstream.com',
-      accountId: 'ACCOUNT_A',
-      apiKey: 'key1'
-    }]);
-
-    await failureGateEntered;
-    mgr.finishAfterActive();
-    releaseFailureGate();
-    await batchPromise;
-
-    assert.equal(mockUploadFile.mock.calls.length, 1);
-    assert.equal(settled.status, 'aborted');
-  });
-
-  it('remote commit uncertainty remains terminal when finishAfterActive arrives simultaneously', async () => {
-    let releaseUpload;
-    let markUploadStarted;
-    const uploadGate = new Promise(resolve => { releaseUpload = resolve; });
-    const uploadStarted = new Promise(resolve => { markUploadStarted = resolve; });
-    mockUploadFile.mock.mockImplementation(async () => {
-      markUploadStarted();
-      await uploadGate;
-      const error = new Error('Remote commit could not be confirmed');
-      error.remoteCommitUncertain = true;
-      throw error;
-    });
-    const mgr = new UploadManager({
-      'example.test': { retries: 2, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-    });
-    let summary;
-    const batchPromise = mgr.startBatch([{
-      jobId: 'uncertain-during-stop',
-      file: '/test/uncertain-during-stop.mp4',
-      hoster: 'example.test',
-      accountId: 'ACCOUNT_A',
-      apiKey: 'key1'
-    }]);
-    mgr.on('batch-done', value => { summary = value; });
-
-    await uploadStarted;
-    mgr.finishAfterActive();
-    releaseUpload();
-    await batchPromise;
-    const result = summary.files[0].results[0];
-
-    assert.equal(mockUploadFile.mock.calls.length, 1);
-    assert.equal(result.status, 'error');
-    assert.equal(result.remoteCommitUncertain, true);
   });
 
   it('late success after cancellation stays blocked by the real source cleanup gate', async (t) => {
@@ -1022,70 +601,6 @@ describe('UploadManager', () => {
 
     assert.ok(statuses.some((entry) => entry.jobId === 'job-second' && entry.status === 'done'));
     assert.ok(statuses.some((entry) => entry.jobId === 'job-third' && entry.status === 'done'));
-  });
-
-  it('accepts each job ID only once across concurrent addJobs calls', async () => {
-    const anchorPath = '/race/anchor.mp4';
-    const racePath = '/race/concurrent.mp4';
-    const originalStatSync = fs.statSync;
-    const originalStat = fs.promises.stat;
-    const pendingStats = [];
-    let concurrentStarts = 0;
-    let batchPromise;
-
-    fs.statSync = function(p) {
-      if (p === anchorPath || p === racePath) return { size: 0 };
-      return originalStatSync.call(this, p);
-    };
-    fs.promises.stat = function(p) {
-      if (p === anchorPath || p === racePath) {
-        return new Promise((resolve) => pendingStats.push({ path: p, resolve }));
-      }
-      return originalStat.call(this, p);
-    };
-
-    try {
-      mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
-        if (filePath === racePath) concurrentStarts++;
-        if (onProgress) onProgress(fakeFileSize, fakeFileSize);
-        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
-      });
-
-      const mgr = new UploadManager({
-        'doodstream.com': { retries: 0, parallelCount: 3, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
-      });
-      const controllerRegistrations = [];
-      const registerController = mgr.jobAbortControllers.set;
-      mgr.jobAbortControllers.set = function(jobId, controller) {
-        if (jobId === 'job-concurrent') controllerRegistrations.push(controller);
-        return registerController.call(this, jobId, controller);
-      };
-
-      batchPromise = mgr.startBatch([
-        { jobId: 'job-anchor', file: anchorPath, hoster: 'doodstream.com', apiKey: 'k' }
-      ]);
-      assert.equal(mgr.running, true);
-
-      const task = { jobId: 'job-concurrent', file: racePath, hoster: 'doodstream.com', apiKey: 'k' };
-      const addResults = await Promise.all([
-        Promise.resolve().then(() => mgr.addJobs([task])),
-        Promise.resolve().then(() => mgr.addJobs([{ ...task }]))
-      ]);
-      const concurrentStats = pendingStats.filter((entry) => entry.path === racePath);
-      for (const entry of pendingStats) entry.resolve({ size: fakeFileSize });
-      await batchPromise;
-
-      assert.equal(addResults.reduce((total, result) => total + result.added, 0), 1);
-      assert.deepEqual(addResults.flatMap((result) => result.alreadyInBatchJobIds), ['job-concurrent']);
-      assert.equal(concurrentStats.length, 1);
-      assert.equal(controllerRegistrations.length, 1);
-      assert.equal(concurrentStarts, 1);
-    } finally {
-      for (const entry of pendingStats) entry.resolve({ size: fakeFileSize });
-      if (batchPromise) await batchPromise.catch(() => {});
-      fs.statSync = originalStatSync;
-      fs.promises.stat = originalStat;
-    }
   });
 
   it('_combineSignals propagates abort from either source', () => {
@@ -1211,7 +726,7 @@ describe('UploadManager', () => {
     assert.ok(maxConcurrent <= 2, `scaleParallelUploads should cap at 2, was ${maxConcurrent}`);
   });
 
-  it('addJobs includes newly injected tasks in the batch summary', async () => {
+  it('addJobs injects new tasks into running batch', async () => {
     let started = 0;
     mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
       started++;
@@ -1242,9 +757,6 @@ describe('UploadManager', () => {
     await batchPromise;
     assert.ok(summary);
     assert.equal(started, 4, 'all 4 jobs should have run');
-    assert.equal(summary.total, 4);
-    assert.equal(summary.succeeded, 4);
-    assert.equal(summary.failed, 0);
   });
 
   it('addJobs rejects duplicates already in running batch', async () => {

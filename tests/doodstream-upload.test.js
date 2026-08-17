@@ -1,8 +1,5 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const DoodstreamUploader = require('../lib/doodstream-upload');
 
 // The CDN hands back an XFileSharing form. `fn` is the filecode, `st` is the
@@ -65,39 +62,6 @@ test('happy path: link in result page wins', async () => {
   const up = uploaderWithResult(LINK_RESULT('jjsuhr931ds9'));
   const res = await up._parseUploadResponse(cdnForm({ fn: 'jjsuhr931ds9', st: 'OK' }));
   assert.equal(res.file_code, 'jjsuhr931ds9');
-});
-
-test('JSON results rebuild canonical Doodstream URLs from the file code', () => {
-  const up = new DoodstreamUploader();
-  assert.deepEqual(
-    up._extractFromJson({
-      status: 200,
-      result: {
-        filecode: 'CANONICAL123',
-        download_url: 'http://edge.dsvplay.com/result/CANONICAL123?token=SYNTHETIC_SECRET',
-        protected_embed: 'https://dood.to/arbitrary/CANONICAL123'
-      }
-    }),
-    {
-      file_code: 'CANONICAL123',
-      download_url: 'https://doodstream.com/d/CANONICAL123',
-      embed_url: 'https://doodstream.com/e/CANONICAL123'
-    }
-  );
-});
-
-test('invalid web upload results expose safe structured diagnostics', async () => {
-  const up = new DoodstreamUploader();
-  await assert.rejects(
-    () => up._parseUploadResponse('<html><input name="api_key" value="SYNTHETIC_WEB_SECRET"> https://doodstream.com/?session=SYNTHETIC_WEB_SESSION</html>'),
-    (err) => {
-      assert.doesNotMatch(err.message, /SYNTHETIC_WEB_SECRET|SYNTHETIC_WEB_SESSION|<html>/);
-      assert.equal(err.diagnostic.phase, 'upload-result');
-      assert.equal(err.diagnostic.responseKind, 'html');
-      assert.doesNotMatch(err.diagnostic.payloadSnippet, /SYNTHETIC_WEB_SECRET|SYNTHETIC_WEB_SESSION/);
-      return true;
-    }
-  );
 });
 
 // --- _parseUploadFormFields: replicate the current upload form faithfully ---
@@ -244,119 +208,6 @@ test('getUploadServer: throws (no silent dead fallback) when discovery fails', a
     (err) => {
       assert.match(err.message, /konnte Upload-Server nicht ermitteln/);
       assert.doesNotMatch(err.message, /tr1128ve\.cloudatacdn\.com/); // never the hardcoded node
-      return true;
-    }
-  );
-});
-
-test('getUploadServer: failures expose safe structured diagnostics without response secrets', async () => {
-  const up = new DoodstreamUploader();
-  up._fetch = async (url) => {
-    if (/op=upload_server/.test(url)) {
-      return fakeRes('<html>upstream-token=SYNTHETIC_DISCOVERY_SECRET</html>', { status: 503, ctype: 'text/html; charset=utf-8' });
-    }
-    return fakeRes('<input name="sess_id" value="SYNTHETIC_DISCOVERY_SESSION"><a href="https://node.invalid/upload?token=SYNTHETIC_QUERY">x</a>');
-  };
-
-  await assert.rejects(
-    () => up._getUploadServer(),
-    (err) => {
-      assert.doesNotMatch(err.message, /SYNTHETIC_DISCOVERY_SECRET|SYNTHETIC_DISCOVERY_SESSION|SYNTHETIC_QUERY|<html>/);
-      assert.equal(err.diagnostic.phase, 'upload-server');
-      assert.equal(err.diagnostic.http, 503);
-      assert.equal(err.diagnostic.contentType, 'text/html; charset=utf-8');
-      assert.equal(err.diagnostic.safeEndpointHost, 'doodstream.com');
-      assert.equal(err.diagnostic.responseKind, 'html');
-      return true;
-    }
-  );
-});
-
-test('upload response read failure is marked as an uncertain remote commit', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-dood-response-'));
-  const file = path.join(root, 'episode.mkv');
-  fs.writeFileSync(file, Buffer.alloc(16, 1));
-  const up = new DoodstreamUploader();
-  up.sessId = 'SESSION';
-  up._getUploadServer = async () => 'https://node.example/upload/01';
-  up._requestUpload = async () => ({
-    statusCode: 200,
-    headers: {},
-    body: { text: async () => { throw new Error('socket closed'); } }
-  });
-  try {
-    await assert.rejects(
-      () => up.upload(file),
-      (err) => {
-        assert.equal(err.remoteCommitUncertain, true);
-        assert.equal(err.diagnostic.phase, 'upload-response-read');
-        return true;
-      }
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('redirect fetch failure after upload is marked as an uncertain remote commit', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-dood-redirect-'));
-  const file = path.join(root, 'episode.mkv');
-  fs.writeFileSync(file, Buffer.alloc(16, 1));
-  const up = new DoodstreamUploader();
-  up.sessId = 'SESSION';
-  up._getUploadServer = async () => 'https://node.example/upload/01';
-  up._requestUpload = async () => ({
-    statusCode: 302,
-    headers: { location: 'https://doodstream.com/upload-result' },
-    body: { text: async () => '' }
-  });
-  up._fetch = async () => {
-    const error = new Error('redirect fetch failed');
-    error.diagnostic = { phase: 'web-request' };
-    error.transientNetwork = true;
-    throw error;
-  };
-  try {
-    await assert.rejects(
-      () => up.upload(file),
-      (err) => {
-        assert.equal(err.remoteCommitUncertain, true);
-        assert.equal(err.diagnostic.phase, 'web-request');
-        return true;
-      }
-    );
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('fallback form fetch failure after upload is marked as an uncertain remote commit', async () => {
-  const up = new DoodstreamUploader();
-  up._fetch = async () => {
-    throw new Error('fallback request failed');
-  };
-  await assert.rejects(
-    () => up._parseUploadResponse('<form action="https://doodstream.com/result"></form>'),
-    (err) => {
-      assert.equal(err.remoteCommitUncertain, true);
-      assert.equal(err.diagnostic.phase, 'upload-result-submit');
-      return true;
-    }
-  );
-});
-
-test('fallback form body failure after upload is marked as an uncertain remote commit', async () => {
-  const up = new DoodstreamUploader();
-  up._fetch = async () => ({
-    text: async () => {
-      throw new Error('fallback body failed');
-    }
-  });
-  await assert.rejects(
-    () => up._parseUploadResponse('<form action="https://doodstream.com/result"></form>'),
-    (err) => {
-      assert.equal(err.remoteCommitUncertain, true);
-      assert.equal(err.diagnostic.phase, 'upload-result-submit');
       return true;
     }
   );

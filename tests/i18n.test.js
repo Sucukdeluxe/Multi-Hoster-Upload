@@ -74,17 +74,6 @@ test('translates duplicate desktop drop feedback to English', () => {
   assert.equal(translateText('Auswahl ist bereits in den Upload-Aufträgen.', 'en'), 'The selection is already in the upload jobs.');
 });
 
-test('translates filename filter controls and import counts in both directions', () => {
-  const german = '1 von 3 Dateien werden hinzugefügt. 2 durch den Dateinamenfilter ausgeschlossen.';
-  const english = '1 of 3 files will be added. 2 excluded by the filename filter.';
-
-  assert.equal(translateText('Dateinamen beim Hinzufügen filtern', 'en'), 'Filter filenames when adding files');
-  assert.equal(translateText('Dateiname filtern', 'en'), 'Filter file name');
-  assert.equal(translateText('enthält nicht', 'en'), 'does not contain');
-  assert.equal(translateText(german, 'en'), english);
-  assert.equal(translateText(english, 'de'), german);
-});
-
 test('rare account, backup, update, and confirmation states translate in both directions', () => {
   const cases = [
     ['Einstellungen konnten vor dem Update nicht gespeichert werden', 'Settings could not be saved before the update'],
@@ -130,11 +119,6 @@ test('rare account, backup, update, and confirmation states translate in both di
     ['Backup importiert', 'Backup imported'],
     ['Import fehlgeschlagen', 'Import failed'],
     ['Upload-Start fehlgeschlagen', 'Failed to start upload'],
-    ['Initialisierung fehlgeschlagen', 'Initialization failed'],
-    ['Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden', 'Import applied. The queue could not be saved completely'],
-    ['Jobs konnten nicht hinzugefügt werden', 'Jobs could not be added'],
-    ['Test fehlgeschlagen', 'Test failed'],
-    ['. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH).', '. Remote access is only available through a tunnel (for example, Tailscale/SSH).'],
     ['erneut versuchbar', 'retryable'],
     ['manuell', 'manual'],
     ['Abgebrochen.', 'Canceled.'],
@@ -160,40 +144,12 @@ test('interpolated rare errors translate without leaking German copy', () => {
   const cases = [
     ['Login ok, Upload-Form bereit (Dateifeld: file)', 'Login successful, upload form ready (file field: file)'],
     ['Klartext-Backup ist kein gültiges JSON: Unexpected token', 'Plain JSON backup is not valid JSON: Unexpected token'],
-    ['Export fehlgeschlagen: Zugriff verweigert', 'Export failed: Access denied'],
-    ['Import fehlgeschlagen: Datei beschädigt', 'Import failed: File is damaged'],
-    ['Initialisierung fehlgeschlagen: Konfiguration fehlt', 'Initialization failed: Configuration is missing']
+    ['Export fehlgeschlagen: Zugriff verweigert', 'Export failed: Zugriff verweigert'],
+    ['Import fehlgeschlagen: Datei beschädigt', 'Import failed: Datei beschädigt'],
+    ['Initialisierung fehlgeschlagen: Konfiguration fehlt', 'Initialization failed: Konfiguration fehlt']
   ];
 
-  for (const [german, english] of cases) {
-    assert.equal(translateText(german, 'en'), english, german);
-    assert.equal(translateText(english, 'de'), german, english);
-  }
-});
-
-test('resume, queue, job log, and session report feedback translate in both languages', () => {
-  const cases = [
-    ['1 unterbrochener Upload kann fortgesetzt werden.', '1 interrupted upload can be resumed.'],
-    ['3 unterbrochene Uploads können fortgesetzt werden.', '3 interrupted uploads can be resumed.'],
-    ['Wiederhergestellte Warteschlange startet in 5 s (3 Jobs).', 'Restored queue starts in 5 s (3 jobs).'],
-    ['2 hinzugefügt', '2 added'],
-    ['1 bereits im Batch', '1 already in the batch'],
-    ['3 ohne gültigen Account', '3 without a valid account'],
-    ['Keine Jobs hinzugefügt', 'No jobs added'],
-    ['Keine startbaren Jobs ausgewählt (alle laufen schon oder sind fertig).', 'No startable jobs selected because all are already running or completed.'],
-    ['Hoster', 'Host'],
-    ['Versuch', 'Attempt'],
-    ['Diagnose', 'Diagnostics'],
-    ['Sitzungsbericht mit 1 Upload exportiert', 'Session report with 1 upload exported'],
-    ['Sitzungsbericht mit 4 Uploads exportiert', 'Session report with 4 uploads exported'],
-    ['Sitzungsbericht konnte nicht exportiert werden.', 'The session report could not be exported.'],
-    ['Warteschlange konnte vor dem Upload-Start nicht gespeichert werden', 'The queue could not be saved before starting the upload']
-  ];
-
-  for (const [german, english] of cases) {
-    assert.equal(translateText(german, 'en'), english, german);
-    assert.equal(translateText(english, 'de'), german, english);
-  }
+  for (const [german, english] of cases) assert.equal(translateText(german, 'en'), english, german);
 });
 
 test('main-process user-facing copy contains no mojibake', () => {

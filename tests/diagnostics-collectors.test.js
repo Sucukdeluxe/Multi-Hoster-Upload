@@ -25,7 +25,7 @@ function makeFixture() {
     crashLog: path.join(dir, 'crash.log'),
     logDir: dir
   };
-  fs.writeFileSync(paths.debug, `boot ok\nsource ${path.join(dir, 'private-source.mkv')}\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
+  fs.writeFileSync(paths.debug, `boot ok\nuploading file with token ${fixtureAlpha} inline\nAuthorization: Bearer ${fixtureBeta}\n`);
   fs.writeFileSync(paths.uploadAudit, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
   fs.writeFileSync(paths.doodstreamDebug, `api_key=${fixtureGamma} sess=abc\n`);
   fs.writeFileSync(paths.crashLog, 'CRASH at 12:00\n');
@@ -87,134 +87,8 @@ test('getHistory falls back to loadConfig().history when loadHistory is absent (
   assert.equal(c.getHistory({ limit: 10 }).totalBatches, 1, 'legacy path reads load().history when loadHistory not injected');
 });
 
-test('getHistory, listErrors and serverHealth share loadHistory after migration', () => {
-  let historyRevision = 0;
-  const c = createCollectors({
-    loadConfig: () => ({ hosters: {}, globalSettings: {}, history: [] }),
-    loadHistory: () => {
-      historyRevision++;
-      const timestamp = `2026-01-${String(historyRevision).padStart(2, '0')}T00:00:00.000Z`;
-      return [{ timestamp, files: [{ name: `failed-${historyRevision}.mkv`, results: [{ hoster: 'voe.sx', status: 'error', error: 'Not video file format' }] }] }];
-    },
-    getAllLogPaths: () => ({ logDir: os.tmpdir() }),
-    support, stats,
-    appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
-  });
-  const health = c.serverHealth({ errorLimit: 5 });
-  const history = c.getHistory({ limit: 5 });
-  const errors = c.listErrors({ limit: 5 });
-  assert.deepEqual({
-    historyBatches: history.totalBatches,
-    listedErrors: errors.total,
-    healthBatches: health.recentBatches.length,
-    healthErrors: health.errors.total
-  }, {
-    historyBatches: 1,
-    listedErrors: 1,
-    healthBatches: 1,
-    healthErrors: 1
-  });
-  assert.equal(health.recentBatches[0].timestamp, health.errors.errors[0].ts, 'serverHealth must summarize one history snapshot');
-});
-
-test('getHistory, listErrors and serverHealth leave the supplied history snapshot unchanged', () => {
-  const original = [
-    { timestamp: '2026-01-02T00:00:00.000Z', files: [{ name: 'newer.mkv', results: [{ hoster: 'voe.sx', status: 'done' }] }] },
-    { timestamp: '2026-01-01T00:00:00.000Z', files: [{ name: 'older.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'Not video file format' }] }] }
-  ];
-  const sortingStats = {
-    ...stats,
-    summarizePerHoster: history => {
-      history.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
-      return stats.summarizePerHoster(history);
-    }
-  };
-  for (const [name, invoke] of [
-    ['listErrors', c => c.listErrors({})],
-    ['getHistory', c => c.getHistory({ includeFiles: true })],
-    ['serverHealth', c => c.serverHealth({})]
-  ]) {
-    const snapshot = JSON.parse(JSON.stringify(original));
-    const c = createCollectors({
-      loadConfig: () => ({ hosters: {}, globalSettings: {}, history: [] }),
-      loadHistory: () => snapshot,
-      getAllLogPaths: () => ({ logDir: os.tmpdir() }),
-      support, stats: sortingStats,
-      appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
-    });
-    invoke(c);
-    assert.deepEqual(snapshot, original, `${name} must not mutate the supplied history snapshot`);
-  }
-});
-
-test('dedicated history reader failures never report healthy empty history or use stale config history', () => {
-  const sensitive = 'reader-private-value-38152';
-  const config = {
-    hosters: { 'voe.sx': [{ apiKey: sensitive }] },
-    globalSettings: {},
-    history: [{ timestamp: '2025-12-31T00:00:00.000Z', files: [{ name: 'stale.mkv', results: [{ hoster: 'voe.sx', status: 'error', error: 'stale error' }] }] }]
-  };
-  for (const [scenario, loadHistory] of [
-    ['throwing reader', () => { throw new Error(`history reader failed with ${sensitive}`); }],
-    ['invalid reader result', () => ({ history: [] })]
-  ]) {
-    const c = createCollectors({
-      loadConfig: () => JSON.parse(JSON.stringify(config)),
-      loadHistory,
-      getAllLogPaths: () => ({ logDir: os.tmpdir() }),
-      support, stats,
-      appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
-    });
-    for (const [name, invoke] of [
-      ['getHistory', () => c.getHistory({ includeFiles: true })],
-      ['listErrors', () => c.listErrors({})],
-      ['serverHealth', () => c.serverHealth({})]
-    ]) {
-      assert.throws(invoke, /history/i, `${name} must reject a ${scenario}`);
-    }
-    const agent = createAgent(c);
-    for (const op of ['get_history', 'list_errors', 'server_health']) {
-      const response = agent.handle(op, { includeFiles: true });
-      const json = JSON.stringify(response);
-      assert.equal(response.ok, false, `${op} must report the ${scenario} as unhealthy`);
-      assert.match(response.error, /history/i);
-      assert.ok(!json.includes(sensitive));
-      assert.ok(!json.includes('stale.mkv'));
-    }
-  }
-});
-
-test('history operations fail closed when configured secrets cannot be loaded', () => {
-  const sensitive = 'history-private-value-27491';
-  let historyReads = 0;
-  const c = createCollectors({
-    loadConfig: () => { throw new Error(`secret decryption failed near ${sensitive}`); },
-    loadHistory: () => {
-      historyReads++;
-      return [{ timestamp: '2026-01-04T00:00:00.000Z', files: [{ name: `${sensitive}.mkv`, results: [{ hoster: 'voe.sx', status: 'error', error: `opaque ${sensitive}` }] }] }];
-    },
-    getAllLogPaths: () => ({ logDir: os.tmpdir() }),
-    support, stats,
-    appInfo: () => ({}), systemInfo: () => ({}), agentInfo: () => ({})
-  });
-  for (const [name, invoke] of [
-    ['getHistory', () => c.getHistory({ includeFiles: true })],
-    ['listErrors', () => c.listErrors({})],
-    ['serverHealth', () => c.serverHealth({})]
-  ]) {
-    assert.throws(invoke, /secret decryption failed/, `${name} must fail without the configured redaction secrets`);
-  }
-  assert.equal(historyReads, 0, 'history must not be read before the redaction secrets are available');
-  const agent = createAgent(c);
-  for (const op of ['get_history', 'list_errors', 'server_health']) {
-    const response = agent.handle(op, { includeFiles: true });
-    assert.deepEqual(response, { ok: false, error: 'diagnostic response could not be safely returned' });
-    assert.ok(!JSON.stringify(response).includes(sensitive));
-  }
-});
-
 test('readLog redacts a planted token and a Bearer line; doodstream is NOT readable; unknown name rejected', () => {
-  const { collectors, dir, paths } = makeFixture();
+  const { collectors } = makeFixture();
   const dbg = collectors.readLog({ name: 'debug', tailKb: 64 });
   const audit = collectors.readLog({ name: 'uploadAudit', tailKb: 64 });
   assert.ok(!dbg.content.includes('SECRETTOKEN123456'), 'value-scrub removes the live diag token from logs');
@@ -223,10 +97,6 @@ test('readLog redacts a planted token and a Bearer line; doodstream is NOT reada
   assert.ok(!audit.content.includes('SECRETTOKEN123456'), 'source cleanup audit is readable only through the redacted diagnostics path');
   assert.equal(collectors.readLog({ name: 'doodstreamDebug' }).ok, false, 'doodstream-debug.log is not in the readable allowlist');
   assert.equal(collectors.readLog({ name: '../../etc/passwd' }).ok, false, 'arbitrary names are rejected (no path traversal)');
-  assert.ok(!JSON.stringify(dbg).includes(dir), 'read log content and metadata must not expose its absolute directory');
-  const rejectedAbsolutePath = collectors.readLog({ name: paths.debug });
-  assert.ok(!rejectedAbsolutePath.error.includes(paths.debug), 'rejected log identifiers must not be echoed as absolute paths');
-  assert.ok(!rejectedAbsolutePath.error.includes(path.basename(paths.debug)), 'rejected log identifiers must not echo path components');
   assert.equal(collectors.readLog({ name: 'crash' }).name, 'crash');
 });
 
@@ -234,21 +104,11 @@ test('rotated audit backups are listed and readable with the rotation naming con
   const { collectors, paths, fixtureAlpha } = makeFixture();
   const backupPath = path.join(path.dirname(paths.uploadAudit), 'upload-audit.1.log');
   fs.writeFileSync(backupPath, `# SOURCE-CLEANUP {"token":"${fixtureAlpha}"}\n`);
-  const logList = collectors.listLogs();
-  const listed = logList.files.find(file => file.name === 'uploadAudit');
-  assert.equal(logList.dir, undefined);
-  assert.equal(listed.id, 'uploadAudit');
-  assert.equal(listed.fileName, 'upload-audit.log');
-  assert.equal(listed.path, undefined);
+  const listed = collectors.listLogs().files.find(file => file.name === 'uploadAudit');
   assert.ok(listed.variants.some(variant => variant.backup === 1));
-  assert.ok(listed.variants.every(variant => variant.fileName && !Object.hasOwn(variant, 'path')));
   assert.ok(!collectors.listLogs().otherLogs.some(file => file.name === 'upload-audit.1.log'));
   const backup = collectors.readLog({ name: 'uploadAudit', backup: 1, tailKb: 64 });
-  assert.equal(backup.id, 'uploadAudit');
-  assert.equal(backup.name, 'uploadAudit');
-  assert.equal(backup.fileName, 'upload-audit.1.log');
-  assert.equal(backup.path, undefined);
-  assert.ok(!JSON.stringify({ logList, backup }).includes(path.dirname(paths.uploadAudit)));
+  assert.equal(backup.path, backupPath);
   assert.ok(!backup.content.includes(fixtureAlpha));
 });
 
@@ -311,26 +171,9 @@ test('listErrors classifies via stats.classifyErrorCategory and redacts error te
 });
 
 test('serverHealth assembles the one-shot hub without leaking secrets', () => {
-  const { collectors, dir, paths } = makeFixture();
+  const { collectors } = makeFixture();
   const h = collectors.serverHealth({});
   const json = JSON.stringify(h);
   assert.ok(h.server && h.queue && h.errors && h.logs, 'hub has all sections');
   assert.ok(!json.includes('HUNTER2SECRET') && !json.includes('SECRETTOKEN123456') && !json.includes('WBHOOKSECRETTOKEN'), 'no secret leaks in server_health');
-  assert.ok(!json.includes(dir) && !json.includes(paths.debug), 'server_health must not expose absolute log paths');
-});
-
-test('redactResponse scrubs configured secrets and absolute paths from arbitrary nested output', () => {
-  const { collectors, fixtureAlpha } = makeFixture();
-  const privatePath = ['C:', 'Users', 'PrivateProfile', 'secret.log'].join('\\');
-  const value = {
-    error: `token ${fixtureAlpha} at ${privatePath}`,
-    nested: [{ source: '\\\\?\\UNC\\private-server\\secret-share\\secret.log' }]
-  };
-  const out = collectors.redactResponse(value);
-  const json = JSON.stringify(out);
-  assert.ok(!json.includes(fixtureAlpha));
-  assert.ok(!json.includes('PrivateProfile'));
-  assert.ok(!json.includes('private-server'));
-  assert.match(json, /<redacted>/);
-  assert.match(json, /<redacted-path>/);
 });

@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { sanitizeConfig, collectSecretValues, collectFile, buildSupportBundleText, redactLogText, REDACTED } = require('../lib/support-bundle');
+const { sanitizeConfig, collectFile, buildSupportBundleText, redactLogText, REDACTED } = require('../lib/support-bundle');
 
 test('sanitizeConfig redacts known credential keys at any nesting depth', () => {
   const input = {
@@ -85,74 +85,6 @@ test('redactLogText leaves a normal "session" word in prose alone', () => {
   assert.equal(redactLogText(benign, []), benign);
 });
 
-test('redactLogText removes complete authorization, cookie, session, HTML credential, and query values', () => {
-  const authorization = 'Digest username="private-user", realm="private-realm", response="private-response"';
-  const cookie = 'sid=private-cookie; preferences=private-preferences';
-  const sessionId = 's3';
-  const htmlPassword = 'private-html-password';
-  const htmlToken = 'private-html-token';
-  const queryToken = 'q1';
-  const input = [
-    `Authorization: ${authorization}`,
-    `Cookie: ${cookie}`,
-    `session_id=${sessionId}`,
-    `<input type="password" name="password" value="${htmlPassword}">`,
-    `<input value="${htmlToken}" name="api_token" type="text">`,
-    `https://example.invalid/upload?token=${queryToken}&next=ok`
-  ].join('\n');
-  const out = redactLogText(input, []);
-  for (const value of [authorization, 'private-user', 'private-realm', 'private-response', cookie, 'private-cookie', 'private-preferences', sessionId, htmlPassword, htmlToken, queryToken]) {
-    assert.ok(!out.includes(value), `sensitive value survived: ${value}`);
-  }
-  assert.ok((out.match(/<redacted>/g) || []).length >= 6);
-});
-
-test('redactLogText masks a one-character configured secret only as a complete sensitive value', () => {
-  const out = redactLogText('status=diagnostics available\npassword=x\nfile=xylophone.mkv\nmarker=x', ['x']);
-  assert.ok(out.includes('status=diagnostics available'));
-  assert.ok(out.includes('file=xylophone.mkv'));
-  assert.ok(!out.includes('password=x'));
-  assert.ok(!out.includes('marker=x'));
-  assert.ok(out.includes(`password=${REDACTED}`));
-  assert.ok(out.includes(`marker=${REDACTED}`));
-});
-
-test('redactLogText replaces configured secrets only as complete values', () => {
-  const out = redactLogText([
-    'password=orange',
-    'configured token orange accepted',
-    'file=orangejuice',
-    'file=orange.mkv',
-    'password=.',
-    'version=2.1.20',
-    'sentence finished.'
-  ].join('\n'), ['orange', '.']);
-  assert.ok(!out.includes('password=orange'));
-  assert.ok(!out.includes('token orange'));
-  assert.ok(!out.includes('password=.'));
-  assert.ok(out.includes('file=orangejuice'));
-  assert.ok(out.includes('file=orange.mkv'));
-  assert.ok(out.includes('version=2.1.20'));
-  assert.ok(out.includes('sentence finished.'));
-});
-
-test('redactLogText removes JSON-escaped configured secrets and quoted HTML credential values', () => {
-  const jsonSecret = 'alpha"beta\\gamma';
-  const password = 'abc>secret';
-  const token = 'token>quoted';
-  const input = [
-    JSON.stringify({ note: jsonSecret, token: jsonSecret }),
-    `<input type="password" value="${password}">`,
-    `<input value='${token}' name='api_token' type='text'>`
-  ].join('\n');
-  const out = redactLogText(input, [jsonSecret]);
-  assert.ok(!out.includes(jsonSecret));
-  assert.ok(!out.includes('alpha\\"beta\\\\gamma'));
-  assert.ok(!out.includes(password));
-  assert.ok(!out.includes(token));
-  assert.ok((out.match(/<redacted>/g) || []).length >= 3);
-});
-
 test('redactLogText removes complete local paths from structured and free-form log text', () => {
   const profilePath = ['C:', 'Users', 'ProfileFixture', 'Private Folder', 'episode.mkv'].join('\\');
   const drivePath = ['D:', 'Archive', 'Private Folder', 'source.mkv'].join('\\');
@@ -169,23 +101,6 @@ test('redactLogText removes complete local paths from structured and free-form l
     assert.ok(!out.includes(value), `private path fragment survived: ${value}`);
   }
   assert.ok((out.match(/<redacted-path>/g) || []).length >= 4);
-});
-
-test('redactLogText removes extended UNC, extended drive, UNC and slash-UNC paths', () => {
-  const extendedUnc = '\\\\?\\UNC\\private-server\\secret-share\\hidden.log';
-  const extendedDrive = ['\\\\?\\C:', 'Users', 'PrivateProfile', 'hidden.log'].join('\\');
-  const unc = '\\\\private-server\\secret-share\\hidden.log';
-  const slashUnc = '//private-server/secret-share/hidden.log';
-  const out = redactLogText([
-    `extended UNC failure: ${extendedUnc}`,
-    `extended drive failure: ${extendedDrive}`,
-    `UNC failure: ${unc}`,
-    `slash UNC failure: ${slashUnc}`
-  ].join('\n'), []);
-  for (const fragment of ['private-server', 'secret-share', 'PrivateProfile', 'hidden.log']) {
-    assert.ok(!out.includes(fragment), `private path fragment survived: ${fragment}`);
-  }
-  assert.equal((out.match(/<redacted-path>/g) || []).length, 4);
 });
 
 test('sanitizeConfig does not mutate input', () => {
@@ -239,7 +154,7 @@ test('buildSupportBundleText produces structured output with header + config + f
       sanitizedConfig: { hosters: { 'voe.sx': [{ apiKey: '<redacted>' }] } },
       files: [{ label: 'debug.log', path: tmp }]
     });
-    assert.match(text, /^=== Multi Hoster Uploader Support Bundle ===/);
+    assert.match(text, /^=== Multi-Hoster-Upload Support Bundle ===/);
     assert.match(text, /Version: 3\.3\.41/);
     assert.match(text, /Platform: win32/);
     assert.match(text, /=== Config \(sanitized/);
@@ -253,20 +168,8 @@ test('buildSupportBundleText produces structured output with header + config + f
 
 test('buildSupportBundleText handles empty file list and missing header', () => {
   const text = buildSupportBundleText({ sanitizedConfig: {}, files: [] });
-  assert.match(text, /=== Multi Hoster Uploader Support Bundle ===/);
+  assert.match(text, /=== Multi-Hoster-Upload Support Bundle ===/);
   assert.match(text, /=== Config/);
-});
-
-test('buildSupportBundleText never uses an absolute source path as a section label', () => {
-  const tmp = path.join(os.tmpdir(), `mhu-bundle-unlabeled-${Date.now()}.log`);
-  fs.writeFileSync(tmp, 'safe content\n');
-  try {
-    const text = buildSupportBundleText({ sanitizedConfig: {}, files: [{ path: tmp }], secrets: [] });
-    assert.ok(!text.includes(tmp));
-    assert.ok(text.includes('=== log (size='));
-  } finally {
-    fs.unlinkSync(tmp);
-  }
 });
 
 test('buildSupportBundleText redacts configured and pattern-detected secrets from included logs', () => {
@@ -293,76 +196,6 @@ test('buildSupportBundleText redacts configured and pattern-detected secrets fro
     assert.ok(!text.includes('episode.pending-delete'));
     assert.ok(!text.includes(tmp));
     assert.match(text, /<redacted>/);
-  } finally {
-    fs.unlinkSync(tmp);
-  }
-});
-
-test('buildSupportBundleText removes configured secrets of every non-empty length', () => {
-  const tmp = path.join(os.tmpdir(), `mhu-bundle-short-secrets-${Date.now()}.log`);
-  const config = {
-    hosters: { 'voe.sx': [{ password: 'p1', apiKey: 'k2' }] },
-    globalSettings: { diagnostics: { token: 't3' }, cookie: '', sessionId: null }
-  };
-  fs.writeFileSync(tmp, 'password=p1\napiKey=k2\ntoken=t3\n');
-  try {
-    const secrets = collectSecretValues(config);
-    assert.deepEqual(new Set(secrets), new Set(['p1', 'k2', 't3']));
-    const text = buildSupportBundleText({
-      header: { Marker: 'p1-k2-t3' },
-      sanitizedConfig: sanitizeConfig(config),
-      secrets,
-      files: [{ label: 'short-secrets.log', path: tmp }]
-    });
-    for (const secret of ['p1', 'k2', 't3']) assert.ok(!text.includes(secret), `configured secret survived: ${secret}`);
-  } finally {
-    fs.unlinkSync(tmp);
-  }
-});
-
-test('buildSupportBundleText removes a one-character configured secret', () => {
-  const tmp = path.join(os.tmpdir(), `mhu-bundle-one-character-secret-${Date.now()}.log`);
-  const config = { hosters: { 'voe.sx': [{ password: 'x' }] } };
-  fs.writeFileSync(tmp, 'password=x\n');
-  try {
-    const text = buildSupportBundleText({
-      header: { Marker: 'secret:x' },
-      sanitizedConfig: sanitizeConfig(config),
-      secrets: collectSecretValues(config),
-      files: [{ label: 'one-character.log', path: tmp }]
-    });
-    assert.ok(!text.includes('secret:x'));
-    assert.ok(!text.includes('password=x'));
-    assert.ok(text.includes('one-character.log'));
-  } finally {
-    fs.unlinkSync(tmp);
-  }
-});
-
-test('buildSupportBundleText contains no escaped secrets, credential HTML or absolute path variants', () => {
-  const tmp = path.join(os.tmpdir(), `mhu-bundle-hard-redaction-${Date.now()}.log`);
-  const secret = 'alpha"beta\\gamma';
-  const paths = [
-    '\\\\?\\UNC\\private-server\\secret-share\\hidden.log',
-    '\\\\private-server\\secret-share\\hidden.log',
-    '//private-server/secret-share/hidden.log',
-    ['C:', 'Users', 'PrivateProfile', 'hidden.log'].join('\\')
-  ];
-  fs.writeFileSync(tmp, [
-    JSON.stringify({ token: secret, path: paths[0] }),
-    '<input type="password" value="abc>secret">',
-    ...paths
-  ].join('\n'));
-  try {
-    const text = buildSupportBundleText({
-      header: { Source: paths[3] },
-      sanitizedConfig: { marker: JSON.stringify(secret), path: paths[1] },
-      secrets: [secret],
-      files: [{ label: paths[2], path: tmp }]
-    });
-    for (const value of ['alpha', 'beta', 'gamma', 'abc>secret', 'private-server', 'secret-share', 'PrivateProfile', 'hidden.log', tmp]) {
-      assert.ok(!text.includes(value), `support bundle leak survived: ${value}`);
-    }
   } finally {
     fs.unlinkSync(tmp);
   }

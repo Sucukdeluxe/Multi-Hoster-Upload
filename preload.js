@@ -9,8 +9,6 @@ contextBridge.exposeInMainWorld('api', {
   pruneHistory: (retention, opts) => ipcRenderer.invoke('prune-history', { retention, dryRun: !!(opts && opts.dryRun) }),
   exportHistory: (format) => ipcRenderer.invoke('export-history', format),
   exportSessionReport: (format) => ipcRenderer.invoke('export-session-report', format),
-  getLastBatchCompletionReport: () => ipcRenderer.invoke('get-last-batch-completion-report'),
-  exportBatchCompletionReport: (reportId, format) => ipcRenderer.invoke('export-batch-completion-report', reportId, format),
   saveTextFile: (defaultName, content, filters) => ipcRenderer.invoke('save-text-file', defaultName, content, filters),
 
   // Hoster settings
@@ -29,7 +27,6 @@ contextBridge.exposeInMainWorld('api', {
     });
   },
   signalCloseHandshakeReady: () => ipcRenderer.send('app:close-handshake-ready'),
-  signalRendererInitializationFailed: (details) => ipcRenderer.send('app:renderer-initialization-failed', details),
 
   // Always on top
   setAlwaysOnTop: (value) => ipcRenderer.invoke('set-always-on-top', value),
@@ -120,9 +117,6 @@ contextBridge.exposeInMainWorld('api', {
   onUploadBatchDone: (callback) => {
     ipcRenderer.on('upload-batch-done', (_event, data) => callback(data));
   },
-  onUploadBatchReport: (callback) => {
-    ipcRenderer.on('upload-batch-report', (_event, data) => callback(data));
-  },
   onUploadStats: (callback) => {
     ipcRenderer.on('upload-stats', (_event, data) => callback(data));
   },
@@ -169,7 +163,6 @@ contextBridge.exposeInMainWorld('api', {
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('upload-progress');
     ipcRenderer.removeAllListeners('upload-batch-done');
-    ipcRenderer.removeAllListeners('upload-batch-report');
     ipcRenderer.removeAllListeners('upload-stats');
     ipcRenderer.removeAllListeners('app:update-available');
     ipcRenderer.removeAllListeners('app:update-progress');

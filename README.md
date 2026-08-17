@@ -1,30 +1,28 @@
-# Multi Hoster Uploader
+# Multi-Hoster-Upload
 
-Multi Hoster Uploader is a Windows desktop application for sending file batches to several supported video hosts from one queue. Add files or folders, choose one or more destinations, manage multiple accounts, and follow every upload from preparation to its final link.
+Multi-Hoster-Upload is a Windows desktop application for sending file batches to several supported video hosts from one queue. Add files or folders, choose one or more destinations, manage multiple accounts, and follow every upload from preparation to its final link.
 
-![Multi Hoster Uploader product overview](assets/product-overview.png)
+![Multi-Hoster-Upload product overview](assets/product-overview.png)
 
 ## Download
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.23. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.24. Use the release page for the executables and the full English changelog.
 
 ## Features
 
 ### Upload workspace
 
 - Add individual files, complete folders, or files by drag and drop.
-- Inspect imports before queue creation and review readable, duplicate, filtered, and host-size-limited files in one summary.
-- Filter new imports by file name with reusable include or exclude conditions before upload jobs are created.
-- Review how many selected files were accepted or excluded before choosing upload destinations.
+- Review candidates, duplicates, unavailable files, accepted files, destinations, resulting jobs, and configured size-limit omissions before confirming an import.
 - Build one job per selected file and destination.
 - Upload to several supported hosts from the same queue.
 - Filter the workspace by all, active, queued, completed, or failed jobs.
 - Search and filter queue entries by file name, host, and status.
 - Open per-upload diagnostics with the selected account, retry count, and safe error details.
 - Track status, smoothly interpolated progress, transferred size, speed, and the selected host account.
-- Read remaining, total, running, connection, completed, and failed upload activity from the persistent sidebar telemetry.
+- Read total, remaining, running, completed, and failed upload activity from the persistent sidebar telemetry.
 - Follow current upload speed in the sidebar and the synchronized header graph.
 - Reorder selected jobs, start selected jobs, retry finished jobs, or stop active work.
 - Copy completed links individually or together.
@@ -35,14 +33,12 @@ The latest public release is version 2.1.23. Use the release page for the execut
 - Keep multiple named accounts for each host.
 - Validate credentials before a new or edited account is saved.
 - Run health checks for one account or all configured accounts.
-- Review recent host reliability, throughput, last success, and account availability in a dedicated health overview.
 - Complete an OTP check in the account view when a host requests it.
 - Enable, disable, prioritize, and reorder accounts.
 - Rotate files across enabled accounts or keep the first enabled account as the primary account.
 - Switch to an available fallback account when an account-specific upload error is detected.
 - Apply retries, concurrency, bandwidth, file-size, and pacing settings per host.
 - Monitor a folder for new files and start matching uploads automatically.
-- Restrict new upload starts to configurable weekday and local-time windows while allowing active transfers to finish.
 
 ### History, transfer, and updates
 
@@ -51,7 +47,6 @@ The latest public release is version 2.1.23. Use the release page for the execut
 - Retain all history, a time window, or the latest 100 or 1,000 uploads.
 - Export history as CSV or JSON.
 - Export a per-session CSV or JSON report with host success rates, duration, bytes, attempts, and errors.
-- Review a final post-cleanup batch report with file, job, host, transfer, and source-cleanup totals, then export the complete report as JSON or sanitized errors as CSV.
 - Clearly mark interrupted uploads after a restart so they can be resumed deliberately.
 - Use the complete interface in English or German and switch at runtime.
 - Export settings locally or transfer them with an encrypted online backup key.
@@ -131,7 +126,7 @@ Successful jobs can remain visible or be removed automatically. History is store
 
 **Settings > Uploads** can permanently delete a source file after every destination selected for that file has completed successfully. This option is disabled by default and requires an explicit warning confirmation before it can be enabled.
 
-Cleanup remains blocked while any required destination is unfinished, failed, canceled, skipped, or missing valid confirmation. The application records the original file identity, preserves successful destinations across retries and restarts, waits for active file handles to close, and refuses deletion if the source was replaced or modified. Every cleanup decision and result is written to `upload-audit.log`, while the FileUploader and MDU session logs remain limited to successful links. Deletion bypasses the Recycle Bin and cannot be undone.
+Cleanup remains blocked while any required destination is unfinished, failed, canceled, skipped, or missing valid confirmation. The application records the original file identity, preserves successful destinations across retries and restarts, waits for active file handles to close, and refuses deletion if the source was replaced or modified. Every cleanup decision and result is written to the upload log. Deletion bypasses the Recycle Bin and cannot be undone.
 
 ## Folder monitoring
 
@@ -200,7 +195,7 @@ Treat the generated key like a password: anyone with it can restore the encrypte
 
 Open **Settings > General** or **Help** and select **Check for updates**. When a newer version is available, the application shows the installed and available versions, download progress, and release notes. The update dialog requests the changelog for the matching version from the public GitHub release and uses the release's fallback description if that changelog is unavailable.
 
-Installation is refused unless `latest.yml` contains the matching version, installer name, file size, and a valid SHA-512 checksum. The downloaded Setup executable must match those values and contain a valid Windows executable header before it can be launched.
+The downloaded Setup executable is checked as a Windows executable. When `latest.yml` contains a SHA-512 value, the downloaded file is also checked against it before installation starts.
 
 You can always install manually from the [GitHub releases page](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases).
 

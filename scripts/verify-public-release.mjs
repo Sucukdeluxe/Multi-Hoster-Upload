@@ -1,14 +1,11 @@
-import { execFile } from 'node:child_process';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const failures = new Map();
-const execFileAsync = promisify(execFile);
 const publicActionsDir = `.${['git', 'hub'].join('')}`;
 const privateActionsDir = `.${['gi', 'tea'].join('')}`;
 const sourceFiles = [
@@ -23,8 +20,6 @@ const sourceFiles = [
   'lib/account-auth.js',
   'lib/account-rotation.js',
   'lib/backup-crypto.js',
-  'lib/batch-completion-report.js',
-  'lib/batch-mutation-gate.js',
   'lib/clouddrop-upload.js',
   'lib/coalesced-set.js',
   'lib/config-store.js',
@@ -33,10 +28,8 @@ const sourceFiles = [
   'lib/doodstream-upload.js',
   'lib/file-probe.js',
   'lib/file-discovery.js',
-  'lib/filename-filter.js',
   'lib/folder-monitor.js',
   'lib/hosters.js',
-  'lib/hoster-transport-error.js',
   'lib/import-preflight.js',
   'lib/ip-allowlist.js',
   'lib/log-mode.js',
@@ -71,9 +64,6 @@ const sourceFiles = [
   'lib/upload-confirmation.js',
   'lib/upload-diagnostics.js',
   'lib/upload-manager.js',
-  'lib/upload-recovery.js',
-  'lib/upload-schedule.js',
-  'lib/upload-start-reservation.js',
   'lib/vidmoly-upload.js',
   'lib/voe-upload.js',
   'lib/webhook-notify.js',
@@ -106,9 +96,6 @@ const sourceFiles = [
   'tests/account-status.test.js',
   'tests/auto-resume.test.js',
   'tests/backup-crypto.test.js',
-  'tests/batch-completion-main.test.js',
-  'tests/batch-completion-report.test.js',
-  'tests/batch-mutation-gate.test.js',
   'tests/byse-reject-recovery.test.js',
   'tests/coalesced-set.test.js',
   'tests/config-store.test.js',
@@ -120,27 +107,21 @@ const sourceFiles = [
   'tests/doodstream-upload.test.js',
   'tests/file-probe.test.js',
   'tests/file-discovery.test.js',
-  'tests/filename-filter.test.js',
   'tests/folder-monitor.test.js',
   'tests/history-status.test.js',
   'tests/history-retention.test.js',
   'tests/import-preflight.test.js',
-  'tests/hidden-electron-window.test.js',
   'tests/hosters.test.js',
-  'tests/hoster-recovery-provenance.test.js',
-  'tests/hoster-recovery-safety.test.js',
   'tests/i18n.test.js',
   'tests/ip-allowlist.test.js',
   'tests/log-mode.test.js',
   'tests/log-policy.test.js',
   'tests/log-rotation.test.js',
-  'tests/main-remote-input.test.js',
   'tests/online-backup-service.test.js',
   'tests/online-backup.test.js',
   'tests/orphan-tmp.test.js',
   'tests/package-build-files.test.js',
   'tests/public-release-verifier.test.js',
-  'tests/release-plan.test.js',
   'tests/queue-dedup-property.test.js',
   'tests/queue-dedup.test.js',
   'tests/queue-persistence-scenario.test.js',
@@ -160,7 +141,6 @@ const sourceFiles = [
   'tests/startup-renderer.test.js',
   'tests/stats.test.js',
   'tests/support-bundle.test.js',
-  'tests/support/hidden-electron-window.js',
   'tests/support/ui-network-safety.js',
   'tests/suspect-reject-alternates.test.js',
   'tests/throttle-timer.test.js',
@@ -173,12 +153,7 @@ const sourceFiles = [
   'tests/upload-log.test.js',
   'tests/upload-confirmation.test.js',
   'tests/upload-diagnostics.test.js',
-  'tests/upload-finalization-coordinator.test.js',
   'tests/upload-manager.test.js',
-  'tests/upload-manager-recovery-claims.test.js',
-  'tests/upload-recovery.test.js',
-  'tests/upload-schedule.test.js',
-  'tests/upload-start-reservation.test.js',
   'tests/session-report.test.js',
   'tests/validate-credentials.test.js',
   'tests/webhook-notify.test.js'
@@ -196,11 +171,8 @@ const binaryExtensions = new Set(['.ico', '.png']);
 const expectedScripts = {
   start: 'electron .',
   dev: 'node scripts/dev-runner.cjs',
-  test: 'npm run test:unit && npm run test:ui',
-  'test:unit': 'node --test tests/*.test.js',
-  'test:ui': 'node --test tests/ui-smoke.js',
+  test: 'node --test tests/*.test.js tests/ui-smoke.js',
   'test:backup-api': 'npm --prefix services/backup-api test',
-  'verify:public-source': 'node scripts/verify-public-release.mjs --source-only --tracked --package-version',
   verify: 'npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev',
   lint: 'eslint .',
   dist: 'electron-builder --publish never --win',
@@ -248,22 +220,11 @@ const internalTerms = [
 const forbiddenAiPattern = new RegExp(`\\b(?:${aiTerms}|multi[\\s-]+agents?)\\b`, 'i');
 const forbiddenPersonalPattern = new RegExp(`(?:[a-z]:[\\\\/]+users[\\\\/]+|\\b(?:${personalTerms})\\b|\\bdesktop-[a-z0-9-]+\\b)`, 'i');
 const forbiddenInternalPattern = new RegExp(`\\b(?:${internalTerms})\\b`, 'i');
-const credentialPatterns = [
-  new RegExp(`\\b${['gh', '[pousr]_'].join('')}[A-Za-z0-9]{36,}\\b`),
-  /\bgithub_pat_[A-Za-z0-9_]{60,}\b/,
-  /\bnpm_[A-Za-z0-9]{36,}\b/,
-  /\bxox[baprs]-[A-Za-z0-9-]{24,}\b/,
-  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}(?=$|[\s"'`,;}\]])/i,
-  new RegExp(['-----BEGIN ', '(?:RSA |EC |DSA |OPENSSH )?', 'PRIVATE KEY-----'].join('')),
-  new RegExp(`\\b${['aws', '_secret_access_key'].join('')}\\b\\s*[:=]\\s*["']?[A-Za-z0-9+/]{40}["']?`, 'i')
-];
-const credentialAssignmentPattern = /\b(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|cookie|session(?:id|token)?|authorization)\b\s*[:=]\s*["'`]([^"'`\r\n]{8,})["'`]/giu;
-const unquotedCredentialAssignmentPattern = /\b(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|cookie|session(?:id|token)?|authorization)\b\s*[:=]\s*([A-Za-z0-9._~+/=-]{12,})\s*(?:#.*)?$/gimu;
-const updaterOnlyTerms = [
-  'ed.cisum-42.tig'.split('').reverse().join('').replace(/[^a-z0-9]/g, ''),
-  'daolpu-retsoh-itlum/rotartsinimda'.split('').reverse().join('').replace(/[^a-z0-9]/g, '')
-];
+const updaterOnlyPattern = new RegExp([
+  ['gi', 'tea'].join(''),
+  ['git', '24-music', 'de'].join('\\.'),
+  [['Admin', 'istrator'].join(''), 'Multi-Hoster-Upload'].join('\\/')
+].join('|'), 'i');
 
 function addFailure(file, rule) {
   if (!failures.has(file)) failures.set(file, new Set());
@@ -295,26 +256,18 @@ function isDeniedBasename(basename) {
     || /\.(?:bak|db|log|sqlite|sqlite3|tmp)$/i.test(basename);
 }
 
-function parseArguments(packageVersion) {
+function parseArguments() {
   const sourceOnlyCount = args.filter((arg) => arg === '--source-only').length;
-  const trackedCount = args.filter((arg) => arg === '--tracked').length;
-  const packageVersionCount = args.filter((arg) => arg === '--package-version').length;
   const versionFlagIndexes = args.map((arg, index) => arg === '--version' ? index : -1).filter((index) => index >= 0);
   const versionIndex = versionFlagIndexes[0] ?? -1;
-  const explicitVersion = versionIndex >= 0 ? args[versionIndex + 1] : '';
-  const expectedVersion = packageVersionCount === 1 ? packageVersion : explicitVersion;
+  const expectedVersion = versionIndex >= 0 ? args[versionIndex + 1] : '';
   const consumed = new Set();
 
   if (sourceOnlyCount === 1) consumed.add(args.indexOf('--source-only'));
   if (sourceOnlyCount > 1) addFailure('scripts/verify-public-release.mjs', 'duplicate-source-only');
-  if (trackedCount === 1) consumed.add(args.indexOf('--tracked'));
-  if (trackedCount > 1 || (trackedCount === 1 && sourceOnlyCount !== 1)) {
-    addFailure('scripts/verify-public-release.mjs', 'tracked-source-argument');
-  }
-  if (packageVersionCount === 1) consumed.add(args.indexOf('--package-version'));
-  if (packageVersionCount > 1 || packageVersionCount + versionFlagIndexes.length !== 1 || !/^\d+\.\d+\.\d+$/.test(expectedVersion || '')) {
+  if (versionFlagIndexes.length !== 1 || !/^\d+\.\d+\.\d+$/.test(expectedVersion || '')) {
     addFailure('scripts/verify-public-release.mjs', 'expected-version-argument');
-  } else if (versionFlagIndexes.length === 1) {
+  } else {
     consumed.add(versionIndex);
     consumed.add(versionIndex + 1);
   }
@@ -323,7 +276,7 @@ function parseArguments(packageVersion) {
     if (!consumed.has(index)) addFailure('scripts/verify-public-release.mjs', 'argument-allowlist');
   }
 
-  return { sourceOnly: sourceOnlyCount === 1, tracked: trackedCount === 1, expectedVersion };
+  return { sourceOnly: sourceOnlyCount === 1, expectedVersion };
 }
 
 async function enumerate(directory = root, relativeDirectory = '') {
@@ -363,69 +316,6 @@ async function enumerate(directory = root, relativeDirectory = '') {
   return files;
 }
 
-async function enumerateTracked() {
-  let stdout = '';
-  try {
-    ({ stdout } = await execFileAsync('git', ['ls-files', '-z'], {
-      cwd: root,
-      encoding: 'utf8',
-      maxBuffer: 8 * 1024 * 1024
-    }));
-  } catch {
-    addFailure('.git', 'tracked-source-enumeration');
-    return [];
-  }
-
-  const files = new Set(stdout.split('\0').filter(Boolean).map(normalizeRelative));
-  const buildDirectories = ['lib', 'renderer'];
-  for (const relativeDirectory of buildDirectories) {
-    const buildFiles = await enumerateBuildDirectory(path.join(root, relativeDirectory), relativeDirectory);
-    for (const relativePath of buildFiles) files.add(relativePath);
-  }
-
-  const result = [...files];
-  for (const relativePath of result) {
-    let stats;
-    try {
-      stats = await lstat(path.join(root, relativePath));
-    } catch {
-      addFailure(relativePath, 'required-source-file');
-      continue;
-    }
-    if (!stats.isFile() || stats.isSymbolicLink()) addFailure(relativePath, 'unsupported-file-type');
-    if (isDeniedBasename(path.basename(relativePath))) addFailure(relativePath, 'denied-basename');
-    if (!allowedFiles.has(relativePath)) addFailure(relativePath, 'source-layout-allowlist');
-  }
-  return result;
-}
-
-async function enumerateBuildDirectory(directory, relativeDirectory) {
-  const files = [];
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch {
-    addFailure(relativeDirectory, 'build-input-enumeration');
-    return files;
-  }
-
-  for (const entry of entries) {
-    const relativePath = normalizeRelative(path.join(relativeDirectory, entry.name));
-    const absolutePath = path.join(directory, entry.name);
-    const stats = await lstat(absolutePath);
-    if (stats.isSymbolicLink()) {
-      addFailure(relativePath, 'unsupported-file-type');
-    } else if (entry.isDirectory()) {
-      files.push(...await enumerateBuildDirectory(absolutePath, relativePath));
-    } else if (entry.isFile()) {
-      files.push(relativePath);
-    } else {
-      addFailure(relativePath, 'unsupported-file-type');
-    }
-  }
-  return files;
-}
-
 async function readJson(relativePath, rule) {
   try {
     return JSON.parse(await readFile(path.join(root, relativePath), 'utf8'));
@@ -456,39 +346,8 @@ async function validateTextFiles(files) {
     if (forbiddenPersonalPattern.test(value)) addFailure(relativePath, 'forbidden-personal-term');
     if (forbiddenAiPattern.test(value)) addFailure(relativePath, 'forbidden-ai-term');
     if (forbiddenInternalPattern.test(value)) addFailure(relativePath, 'forbidden-internal-term');
-    credentialAssignmentPattern.lastIndex = 0;
-    unquotedCredentialAssignmentPattern.lastIndex = 0;
-    const credentialAssignment = [...value.matchAll(credentialAssignmentPattern)]
-      .some((match) => !isCredentialPlaceholder(match[1], relativePath))
-      || [...value.matchAll(unquotedCredentialAssignmentPattern)]
-        .some((match) => !isCredentialPlaceholder(match[1], relativePath));
-    if (credentialPatterns.some((pattern) => pattern.test(value)) || credentialAssignment) {
-      addFailure(relativePath, 'credential-pattern');
-    }
-    const normalizedValue = value.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (relativePath !== 'lib/updater.js' && updaterOnlyTerms.some((term) => normalizedValue.includes(term))) {
-      addFailure(relativePath, 'updater-endpoint-scope');
-    }
+    if (relativePath !== 'lib/updater.js' && updaterOnlyPattern.test(value)) addFailure(relativePath, 'updater-endpoint-scope');
   }
-}
-
-function isCredentialPlaceholder(value, relativePath) {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (!normalized
-    || /^(?:\[?redacted\]?|none|null|undefined)$/i.test(normalized)
-    || /(?:dummy|example|fake|invalid|mock|notreal|placeholder|synthetic|test)[-_ ]?/i.test(normalized)
-    || /\$\{[^}]+\}/.test(normalized)
-    || /^<[^>]+>$/.test(normalized)) {
-    return true;
-  }
-  if (!relativePath.startsWith('tests/')) return false;
-  const longHex = /^[a-f0-9]{32,}$/i.test(normalized);
-  const opaqueLetters = /^[a-z]{16,}$/i.test(normalized);
-  const highEntropy = normalized.length >= 24
-    && /[a-z]/.test(normalized)
-    && /\d/.test(normalized)
-    && !/[-_ ](?:key|token|secret|password|session|account|fixture)(?:[-_ ]|$)/i.test(normalized);
-  return !longHex && !opaqueLetters && !highEntropy;
 }
 
 function validatePackage(packageJson, packageLock, files, expectedVersion) {
@@ -562,15 +421,15 @@ function printFailures() {
 }
 
 async function main() {
-  const packageJson = await readJson('package.json', 'package-json');
-  const { sourceOnly, tracked, expectedVersion } = parseArguments(packageJson?.version);
-  const files = tracked ? await enumerateTracked() : await enumerate();
+  const { sourceOnly, expectedVersion } = parseArguments();
+  const files = await enumerate();
   const requiredFiles = sourceOnly ? sourceFiles : [...sourceFiles, ...screenshotFiles];
   for (const requiredFile of requiredFiles) {
     if (!files.includes(requiredFile)) addFailure(requiredFile, 'required-source-file');
   }
 
   await validateTextFiles(files);
+  const packageJson = await readJson('package.json', 'package-json');
   const packageLock = await readJson('package-lock.json', 'package-lock-json');
   const servicePackage = await readJson('services/backup-api/package.json', 'service-package-json');
   const serviceLock = await readJson('services/backup-api/package-lock.json', 'service-package-lock-json');

@@ -16,25 +16,6 @@ function localizeUiText(value) {
   return window.I18n.translateText(value, uiLocalizer.getLanguage());
 }
 
-function getLocalizedErrorDetail(error) {
-  const raw = String(error?.message || error || '').trim();
-  if (raw) {
-    const translated = localizeUiText(raw);
-    if (translated !== raw) return translated;
-    const oppositeLanguage = uiLocalizer.getLanguage() === 'de' ? 'en' : 'de';
-    if (window.I18n.translateText(raw, oppositeLanguage) !== raw) return raw;
-  }
-  return localizeUiText('Unbekannter Fehler');
-}
-
-function formatLocalizedError(prefix, error) {
-  return `${localizeUiText(prefix)}: ${getLocalizedErrorDetail(error)}`;
-}
-
-function getCopiedLinksMessage(count) {
-  return count === 1 ? '1 Link kopiert' : `${count} Links kopiert`;
-}
-
 function formatRemoteClientStatus(port, count) {
   const clients = count === 1 ? '1 Client' : `${count} Clients`;
   return localizeUiText(`Aktiv auf Port ${port} — ${clients} verbunden`);
@@ -57,11 +38,9 @@ function refreshLocalizedRuntimeUi() {
   const historyContainer = document.getElementById('historyContainer');
   if (historyContainer && historyRowsData.length) renderHistoryTable(historyContainer);
   updateStatusBar();
-  if (document.getElementById('uploadScheduleEnabledInput')) syncUploadScheduleControls();
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
-  if (_activeBatchCompletionReport) renderBatchCompletionReport(_activeBatchCompletionReport);
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -81,8 +60,6 @@ let selectedUploadHosters = [];
 let config = { hosters: {}, hosterSettings: {}, globalSettings: {} };
 let hosterSettings = {};
 let uploading = false;
-let sourceCleanupFinalizationPending = false;
-let sourceCleanupRevocationPending = false;
 let healthCheckRunning = false;
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
@@ -359,6 +336,17 @@ const _sessionDoneJobs = new Set(); // Job IDs already counted for uploadedBytes
 const _completedUploadKeys = new Set(); // 'filepath|hoster' keys for done uploads (survives removeFromQueueOnDone)
 const _suppressedPreviewKeys = new Set();
 const _deletedJobIds = new Set(); // IDs of jobs explicitly deleted by user (prevents re-creation from stale progress callbacks)
+// Coalesce removeFromQueueOnDone removals into one filter pass per microtask
+// to avoid O(N²) behaviour when a burst of jobs finish at once. Logic now
+// lives in lib/coalesced-set.js so it can be unit-tested with a manual
+// scheduler. Optional-chained so the renderer still works if the script
+// failed to load — falls back to immediate per-event filter (legacy slow
+// path), better than crashing.
+const _doneRemovalCoalescer = window.CoalescedSet
+  ? window.CoalescedSet.makeCoalescedSet({
+      apply: (drop) => { queueJobs = queueJobs.filter(j => !drop.has(j.id)); }
+    })
+  : null;
 const queueSortState = { key: 'filename', direction: 'asc' };
 let uploadSidebarFilter = 'all';
 let queueSearchQuery = '';
@@ -376,363 +364,10 @@ let historySidebarFilter = 'all';
 let _knownUpdateInfo = null;
 let _updateCheckBusy = false;
 let _updateInstallBusy = false;
+let _updateDialogReturnFocus = null;
+let _updateDialogInertState = [];
 let _startupAutoResumeController = null;
 let _startupAutoResumeCanceled = false;
-
-const modalController = (() => {
-  const stack = [];
-  const baselineInert = new Map();
-  const focusSelector = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-  const resolveOverlay = value => typeof value === 'string' ? document.getElementById(value) : value;
-  const getDialog = overlay => overlay?.querySelector('[role="dialog"]') || overlay;
-  const isFocusable = element => {
-    if (!(element instanceof HTMLElement) || element.hidden || element.matches(':disabled')) return false;
-    const style = window.getComputedStyle(element);
-    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
-  };
-  const getFocusable = overlay => Array.from(getDialog(overlay)?.querySelectorAll(focusSelector) || []).filter(isFocusable);
-  const resolveFocusTarget = (entry, value) => {
-    const candidate = typeof value === 'function'
-      ? value()
-      : typeof value === 'string'
-        ? entry.overlay.querySelector(value) || document.querySelector(value)
-        : value;
-    return isFocusable(candidate) ? candidate : null;
-  };
-  const syncIsolation = () => {
-    const top = stack.at(-1);
-    if (!top) {
-      baselineInert.forEach((inert, element) => {
-        if (element.isConnected) element.inert = inert;
-      });
-      baselineInert.clear();
-      return;
-    }
-    Array.from(document.body.children).forEach(element => {
-      if (!baselineInert.has(element)) baselineInert.set(element, element.inert);
-      element.inert = element !== top.overlay;
-    });
-  };
-  const focusEntry = entry => {
-    if (!entry || stack.at(-1) !== entry) return;
-    const dialog = getDialog(entry.overlay);
-    const target = resolveFocusTarget(entry, entry.options.initialFocus) || getFocusable(entry.overlay)[0] || dialog;
-    if (target instanceof HTMLElement && !target.matches(':disabled')) target.focus();
-  };
-  const open = (value, options = {}) => {
-    const overlay = resolveOverlay(value);
-    if (!overlay) return false;
-    let entry = stack.find(item => item.overlay === overlay);
-    if (entry) {
-      entry.options = { ...entry.options, ...options };
-      stack.splice(stack.indexOf(entry), 1);
-      stack.push(entry);
-    } else {
-      entry = {
-        overlay,
-        options,
-        returnFocus: options.returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
-      };
-      stack.push(entry);
-    }
-    overlay.style.display = options.display || 'flex';
-    overlay.setAttribute('aria-hidden', 'false');
-    overlay.inert = false;
-    syncIsolation();
-    if (!getDialog(overlay)?.contains(document.activeElement)) focusEntry(entry);
-    requestAnimationFrame(() => {
-      if (stack.at(-1) === entry && !getDialog(overlay)?.contains(document.activeElement)) focusEntry(entry);
-    });
-    return true;
-  };
-  const close = (value, options = {}) => {
-    const overlay = resolveOverlay(value);
-    const index = stack.findIndex(item => item.overlay === overlay);
-    if (index < 0) {
-      if (overlay) {
-        overlay.style.display = 'none';
-        overlay.setAttribute('aria-hidden', 'true');
-      }
-      return false;
-    }
-    const wasTop = index === stack.length - 1;
-    const [entry] = stack.splice(index, 1);
-    overlay.style.display = 'none';
-    overlay.setAttribute('aria-hidden', 'true');
-    syncIsolation();
-    if (wasTop && options.restoreFocus !== false) {
-      const fallback = resolveFocusTarget(entry, options.fallbackFocus ?? entry.options.fallbackFocus);
-      const target = resolveFocusTarget(entry, entry.returnFocus) || fallback;
-      if (target) target.focus();
-      else if (stack.length > 0) focusEntry(stack.at(-1));
-    }
-    return true;
-  };
-  const isOpen = value => {
-    const overlay = resolveOverlay(value);
-    return Boolean(overlay && stack.some(item => item.overlay === overlay));
-  };
-  const handleKeydown = event => {
-    const entry = stack.at(-1);
-    if (!entry) return;
-    const dialog = getDialog(entry.overlay);
-    if (!dialog) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      entry.options.onEscape?.();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const focusable = getFocusable(entry.overlay);
-    event.stopImmediatePropagation();
-    if (focusable.length === 0) {
-      event.preventDefault();
-      dialog.focus();
-      return;
-    }
-    const first = focusable[0];
-    const last = focusable.at(-1);
-    if (!dialog.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    }
-  };
-  const handleClick = event => {
-    const entry = stack.at(-1);
-    if (!entry || event.target !== entry.overlay || typeof entry.options.onBackdrop !== 'function') return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    entry.options.onBackdrop();
-  };
-
-  document.addEventListener('keydown', handleKeydown, true);
-  document.addEventListener('click', handleClick, true);
-  return { open, close, isOpen };
-})();
-
-const _shownBatchCompletionReportIds = new Set();
-let _activeBatchCompletionReport = null;
-let _batchCompletionReportUiReady = false;
-
-function batchReportNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : 0;
-}
-
-function batchReportInteger(value) {
-  return Math.max(0, Math.trunc(batchReportNumber(value)));
-}
-
-function setBatchCompletionValue(id, value) {
-  const element = document.getElementById(id);
-  if (element) element.textContent = batchReportInteger(value).toLocaleString(getUiLocale());
-}
-
-function getBatchCompletionOutcome(report) {
-  const files = report?.files || {};
-  const jobs = report?.jobs || {};
-  const cleanup = report?.cleanup || {};
-  return batchReportInteger(files.partiallySucceeded) > 0
-    || batchReportInteger(files.failed) > 0
-    || batchReportInteger(jobs.failed) > 0
-    || batchReportInteger(jobs.skipped) > 0
-    || batchReportInteger(jobs.aborted) > 0
-    || batchReportInteger(cleanup.blocked) > 0
-    || batchReportInteger(cleanup.failed) > 0
-    || (Array.isArray(report?.errors) && report.errors.length > 0)
-    ? 'mixed'
-    : 'success';
-}
-
-function getBatchErrorCategoryLabel(category) {
-  const labels = {
-    network: 'Netzwerk',
-    'hoster-transient': 'Temporärer Hosterfehler',
-    'file-rejected': 'Datei abgelehnt',
-    'account-error': 'Account-Fehler',
-    aborted: 'Abgebrochen',
-    unknown: 'Unbekannt'
-  };
-  return localizeUiText(labels[String(category || '')] || 'Unbekannt');
-}
-
-function getBatchErrorStatusLabel(status) {
-  const labels = {
-    done: 'Erfolgreich',
-    error: 'Fehlgeschlagen',
-    skipped: 'Übersprungen',
-    aborted: 'Abgebrochen'
-  };
-  return localizeUiText(labels[String(status || '')] || 'Fehlgeschlagen');
-}
-
-function renderBatchCompletionHosters(report) {
-  const body = document.getElementById('batchCompletionHostersBody');
-  if (!body) return;
-  const rows = Object.entries(report?.hosters && typeof report.hosters === 'object' ? report.hosters : {}).map(([hoster, values]) => {
-    const row = document.createElement('tr');
-    row.dataset.hoster = hoster;
-    const host = document.createElement('th');
-    host.scope = 'row';
-    host.textContent = getHosterLabel(hoster);
-    row.appendChild(host);
-    [
-      batchReportInteger(values?.total).toLocaleString(getUiLocale()),
-      batchReportInteger(values?.succeeded).toLocaleString(getUiLocale()),
-      batchReportInteger(values?.failed).toLocaleString(getUiLocale()),
-      batchReportInteger(values?.skipped).toLocaleString(getUiLocale()),
-      batchReportInteger(values?.aborted).toLocaleString(getUiLocale()),
-      formatBytes(batchReportNumber(values?.successfulBytes))
-    ].forEach(value => {
-      const cell = document.createElement('td');
-      cell.textContent = value;
-      row.appendChild(cell);
-    });
-    return row;
-  });
-  body.replaceChildren(...rows);
-}
-
-function renderBatchCompletionErrors(report) {
-  const section = document.getElementById('batchCompletionErrorsSection');
-  const list = document.getElementById('batchCompletionErrorsList');
-  const count = document.getElementById('batchCompletionErrorsCount');
-  const more = document.getElementById('batchCompletionErrorsMore');
-  if (!section || !list || !count || !more) return;
-  const errors = Array.isArray(report?.errors) ? report.errors : [];
-  section.hidden = errors.length === 0;
-  count.textContent = errors.length.toLocaleString(getUiLocale());
-  const items = errors.slice(0, 5).map(error => {
-    const item = document.createElement('li');
-    const head = document.createElement('div');
-    head.className = 'batch-completion-error-head';
-    const file = document.createElement('strong');
-    file.className = 'batch-completion-error-file';
-    file.textContent = String(error?.fileName || localizeUiText('Unbekannt'));
-    const hoster = document.createElement('span');
-    hoster.textContent = getHosterLabel(String(error?.hoster || ''));
-    head.append(file, hoster);
-    const meta = document.createElement('div');
-    meta.className = 'batch-completion-error-meta';
-    const status = document.createElement('span');
-    status.textContent = getBatchErrorStatusLabel(error?.status);
-    const category = document.createElement('span');
-    category.textContent = getBatchErrorCategoryLabel(error?.category);
-    meta.append(status, category);
-    const attempt = batchReportInteger(error?.attempt);
-    const maxAttempts = batchReportInteger(error?.maxAttempts);
-    if (attempt > 0 || maxAttempts > 0) {
-      const attemptLabel = document.createElement('span');
-      attemptLabel.textContent = `${localizeUiText('Versuch')} ${attempt}${maxAttempts > 0 ? `/${maxAttempts}` : ''}`;
-      meta.appendChild(attemptLabel);
-    }
-    if (error?.remoteCommitUncertain === true) {
-      const uncertain = document.createElement('span');
-      uncertain.className = 'batch-completion-error-uncertain';
-      uncertain.textContent = localizeUiText('Remote-Abschluss unklar');
-      meta.appendChild(uncertain);
-    }
-    const message = document.createElement('p');
-    message.className = 'batch-completion-error-message';
-    message.textContent = String(error?.message || localizeUiText('Unbekannter Fehler'));
-    item.append(head, meta, message);
-    return item;
-  });
-  list.replaceChildren(...items);
-  const remaining = Math.max(0, errors.length - items.length);
-  more.hidden = remaining === 0;
-  more.textContent = remaining === 1 ? localizeUiText('1 weiterer Fehler') : localizeUiText(`${remaining} weitere Fehler`);
-}
-
-function renderBatchCompletionReport(report) {
-  const modal = document.getElementById('batchCompletionModal');
-  if (!modal || !report) return false;
-  _activeBatchCompletionReport = report;
-  const outcome = getBatchCompletionOutcome(report);
-  modal.dataset.reportId = String(report.reportId);
-  modal.dataset.outcome = outcome;
-  const outcomeLabel = document.getElementById('batchCompletionOutcome');
-  if (outcomeLabel) outcomeLabel.textContent = localizeUiText(outcome === 'success' ? 'Erfolgreich' : 'Mit Problemen');
-  const fileCount = batchReportInteger(report.files?.total);
-  const jobCount = batchReportInteger(report.jobs?.total);
-  const summary = document.getElementById('batchCompletionSummary');
-  if (summary) summary.textContent = `${fileCount.toLocaleString(getUiLocale())} ${localizeUiText(fileCount === 1 ? 'Datei' : 'Dateien')} · ${jobCount.toLocaleString(getUiLocale())} ${localizeUiText(jobCount === 1 ? 'Auftrag' : 'Aufträge')} · ${formatDateTime(report.completedAt).text}`;
-  setBatchCompletionValue('batchCompletionFilesTotal', report.files?.total);
-  setBatchCompletionValue('batchCompletionFilesFullySucceeded', report.files?.fullySucceeded);
-  setBatchCompletionValue('batchCompletionFilesPartiallySucceeded', report.files?.partiallySucceeded);
-  setBatchCompletionValue('batchCompletionFilesFailed', report.files?.failed);
-  setBatchCompletionValue('batchCompletionJobsTotal', report.jobs?.total);
-  setBatchCompletionValue('batchCompletionJobsSucceeded', report.jobs?.succeeded);
-  setBatchCompletionValue('batchCompletionJobsFailed', report.jobs?.failed);
-  setBatchCompletionValue('batchCompletionJobsSkipped', report.jobs?.skipped);
-  setBatchCompletionValue('batchCompletionJobsAborted', report.jobs?.aborted);
-  setBatchCompletionValue('batchCompletionCleanupRequested', report.cleanup?.requested);
-  setBatchCompletionValue('batchCompletionCleanupDeleted', report.cleanup?.deleted);
-  setBatchCompletionValue('batchCompletionCleanupBlocked', report.cleanup?.blocked);
-  setBatchCompletionValue('batchCompletionCleanupFailed', report.cleanup?.failed);
-  const duration = document.getElementById('batchCompletionDuration');
-  const bytes = document.getElementById('batchCompletionSuccessfulBytes');
-  const speed = document.getElementById('batchCompletionAverageSpeed');
-  if (duration) duration.textContent = formatDuration(Math.round(batchReportNumber(report.durationSec)));
-  if (bytes) bytes.textContent = formatBytes(batchReportNumber(report.transfer?.successfulBytes));
-  if (speed) speed.textContent = `${formatBytes(batchReportNumber(report.transfer?.averageBytesPerSecond))}/s`;
-  renderBatchCompletionHosters(report);
-  renderBatchCompletionErrors(report);
-  uiLocalizer.translate(modal);
-  return true;
-}
-
-function closeBatchCompletionReport() {
-  modalController.close('batchCompletionModal', { fallbackFocus: '#addFilesBtn' });
-}
-
-function showBatchCompletionReport(report) {
-  const reportId = typeof report?.reportId === 'string' ? report.reportId.trim() : '';
-  if (!reportId || _shownBatchCompletionReportIds.has(reportId)) return false;
-  _shownBatchCompletionReportIds.add(reportId);
-  if (!renderBatchCompletionReport({ ...report, reportId })) return false;
-  return modalController.open('batchCompletionModal', {
-    initialFocus: '#batchCompletionHeaderCloseBtn',
-    fallbackFocus: '#addFilesBtn',
-    onEscape: closeBatchCompletionReport
-  });
-}
-
-async function exportVisibleBatchCompletionReport(format, button) {
-  const reportId = _activeBatchCompletionReport?.reportId;
-  if (!reportId || !window.api?.exportBatchCompletionReport) return;
-  button.disabled = true;
-  try {
-    const result = await window.api.exportBatchCompletionReport(reportId, format);
-    if (result?.ok) showCopyToast(format === 'json' ? 'JSON-Bericht exportiert' : 'Fehler-CSV exportiert');
-    else if (!result?.canceled) await showAppAlert(result?.error || 'Batch-Bericht konnte nicht exportiert werden.', 'Export fehlgeschlagen');
-  } catch (error) {
-    await showAppAlert(getLocalizedErrorDetail(error), 'Export fehlgeschlagen');
-  } finally {
-    button.disabled = false;
-  }
-}
-
-function setupBatchCompletionReportUi() {
-  if (_batchCompletionReportUiReady) return;
-  _batchCompletionReportUiReady = true;
-  document.getElementById('batchCompletionHeaderCloseBtn')?.addEventListener('click', closeBatchCompletionReport);
-  document.getElementById('batchCompletionCloseBtn')?.addEventListener('click', closeBatchCompletionReport);
-  const jsonButton = document.getElementById('batchCompletionExportJsonBtn');
-  const csvButton = document.getElementById('batchCompletionExportCsvBtn');
-  jsonButton?.addEventListener('click', () => exportVisibleBatchCompletionReport('json', jsonButton));
-  csvButton?.addEventListener('click', () => exportVisibleBatchCompletionReport('csv', csvButton));
-  window.api?.onUploadBatchReport?.(showBatchCompletionReport);
-}
-
-async function showLastBatchCompletionReport() {
-  if (!window.api?.getLastBatchCompletionReport) return;
-  try {
-    showBatchCompletionReport(await window.api.getLastBatchCompletionReport());
-  } catch {}
-}
 
 // Session-specific files for the "Files" panel (resets each session)
 let sessionFilesData = [];
@@ -765,7 +400,7 @@ async function init() {
   try {
     config = await window.api.getConfig();
   } catch (error) {
-    await showAppAlert(getLocalizedErrorDetail(error), 'Zugangsdaten gesperrt');
+    await showAppAlert(error.message || String(error), 'Zugangsdaten gesperrt');
     throw error;
   }
   setUiLanguage(config.globalSettings?.language);
@@ -789,7 +424,6 @@ async function init() {
   renderRecentUploadsPanel();
   updateUploadView();
   updateStatusBar();
-  await showLastBatchCompletionReport();
   const interruptedCount = queueJobs.filter(job => job.interrupted).length;
   if (interruptedCount > 0) showCopyToast(interruptedCount === 1 ? '1 unterbrochener Upload kann fortgesetzt werden.' : `${interruptedCount} unterbrochene Uploads können fortgesetzt werden.`, 7000);
 
@@ -811,18 +445,16 @@ async function init() {
   }
   window.api.onUploadBatchDone(async (data) => {
     const summary = data && data.summary ? data.summary : data;
-    const requiresFinalization = Boolean(data && data.finalizationId && window.api.completeUploadFinalization);
-    if (!requiresFinalization) {
-      handleBatchDone(summary);
-      return;
-    }
-    sourceCleanupFinalizationPending = true;
-    try {
-      handleBatchDone(summary, { deferPersistence: true, historyPersisted: data.historyPersisted === true });
-      await completeSourceCleanupFinalization(data);
-    } finally {
-      sourceCleanupFinalizationPending = false;
-      updateQueueActionButtons();
+    handleBatchDone(summary);
+    if (data && data.finalizationId && window.api.completeUploadFinalization) {
+      if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
+      queuePersistThrottle.cancel();
+      await window.api.completeUploadFinalization({
+        finalizationId: data.finalizationId,
+        pendingQueue: queueJobs.some((job) => !['done', 'skipped'].includes(job.status))
+          ? buildPersistedQueueState()
+          : null
+      });
     }
   });
   window.api.onUploadStats((data) => {
@@ -858,7 +490,7 @@ async function init() {
   });
 
   // Folder monitor: auto-queue new files
-  window.api.onFolderMonitorNewFiles(async (files) => {
+  window.api.onFolderMonitorNewFiles((files) => {
     window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
     const fm = config.globalSettings && config.globalSettings.folderMonitor;
     const fmHosters = fm && Array.isArray(fm.hosters) && fm.hosters.length > 0 ? fm.hosters : [];
@@ -876,29 +508,35 @@ async function init() {
         const name = p.split('\\').pop().split('/').pop();
         newFiles.push({ path: p, name, size: null });
       }
-      const admitted = admitFilenameFilter(newFiles);
-      if (admitted.accepted.length > 0) {
-        const newPaths = new Set(admitted.accepted.map(f => f.path));
+      if (newFiles.length > 0) {
+        const newPaths = new Set(newFiles.map(f => f.path));
         clearDedupKeysForPaths(newPaths);
-        selectedFiles.push(...admitted.accepted);
+        selectedFiles.push(...newFiles);
         buildQueuePreview();
         updateUploadView();
-        if (admitted.active && admitted.excluded.length > 0) showFilenameFilterResult(admitted);
         if (fm.autoStart && !uploading && !healthCheckRunning) {
           startUpload();
         } else if (uploading) {
           // Inject new preview jobs into the running batch
           const newJobs = queueJobs.filter(j => j.status === 'preview' && newPaths.has(j.file));
           if (newJobs.length > 0) {
-            await startSelectedUpload(newJobs);
+            const cleanupPreparation = prepareSourceCleanup(newJobs);
+            newJobs.forEach(j => { j.status = 'queued'; });
+            renderQueueTable();
+            window.api.addJobsToBatch({
+              jobs: newJobs.map(serializeUploadJob),
+              sourceCleanupGroups: cleanupPreparation.groups
+            }).then(result => {
+              _markSkippedJobs(result);
+              if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+            }).catch(() => {});
+            persistQueueStateSoon(true);
           }
         }
-      } else if (admitted.active && admitted.total > 0) {
-        showFilenameFilterResult(admitted);
       }
     } else {
       // No pre-selected hosters: open modal
-      await addPathsToQueue(files);
+      addPathsToQueue(files);
     }
   });
 
@@ -908,8 +546,8 @@ async function init() {
   });
 
   // Drop target window: files dropped on the small floating window
-  window.api.onDropTargetFiles((entries) => {
-    addDropTargetEntries(entries).catch(console.error);
+  window.api.onDropTargetFiles((paths) => {
+    addPathsToQueue(paths);
   });
 
   // Remote client count updates (registered once, not per renderSettings call)
@@ -1141,8 +779,8 @@ async function _handleMenuAction(action) {
         const res = await window.api.createSupportBundle();
         if (res && res.ok) showCopyToast(`Diagnose-Paket gespeichert (${(res.bytes / 1024).toFixed(1)} KB)`);
         else if (res && res.canceled) showCopyToast('Abgebrochen');
-        else showCopyToast(formatLocalizedError('Fehler', res?.error));
-      } catch (err) { showCopyToast(formatLocalizedError('Fehler', err)); }
+        else showCopyToast(`Fehler: ${(res && res.error) || 'unbekannt'}`);
+      } catch (err) { showCopyToast(`Fehler: ${err.message || err}`); }
       break;
     }
     case 'check-updates': {
@@ -1486,7 +1124,6 @@ function renderHosterModal() {
       renderImportPlanSummary();
     });
   });
-
   renderImportPlanSummary();
 }
 
@@ -1494,26 +1131,19 @@ function openHosterModal() {
   syncSelectedUploadHosters();
   renderHosterModal();
   const description = document.getElementById('hosterModalDescription');
-  if (description) {
-    description.textContent = localizeUiText('Vorabprüfung abgeschlossen. Wähle jetzt die Hoster für den Upload.');
-  }
-  modalController.open('hosterModal', {
-    initialFocus: '#cancelHosterModalBtn',
-    fallbackFocus: '#addFilesBtn',
-    onEscape: cancelHosterModal,
-    onBackdrop: cancelHosterModal
-  });
+  if (description) description.textContent = 'Vorabprüfung abgeschlossen. Wähle jetzt die Hoster für den Upload.';
+  document.getElementById('hosterModal').style.display = 'flex';
 }
 
 function closeHosterModal() {
-  modalController.close('hosterModal', { fallbackFocus: '#addFilesBtn' });
+  const modal = document.getElementById('hosterModal');
+  if (modal) modal.style.display = 'none';
 }
 
-async function applyHosterSelection() {
+function applyHosterSelection() {
   if (isImportConfirmationBlocked()) return false;
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
-  // Move pending files to selectedFiles on confirm
   const admittedFiles = _pendingFiles.filter(file => window.ImportPreflight
     .getEligibleImportHosters(file, selectedUploadHosters, hosterSettings).length > 0);
   const pendingPaths = new Set(admittedFiles.map(f => f.path));
@@ -1531,14 +1161,25 @@ async function applyHosterSelection() {
     buildQueuePreview(); // creates 'preview' jobs for new files
     const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
     if (newJobs.length > 0) {
-      await startSelectedUpload(newJobs);
+      const cleanupPreparation = prepareSourceCleanup(newJobs);
+      newJobs.forEach(j => { j.status = 'queued'; });
+      renderQueueTable();
+      window.api.addJobsToBatch({
+        jobs: newJobs.map(serializeUploadJob),
+        sourceCleanupGroups: cleanupPreparation.groups
+      }).then(result => {
+        _markSkippedJobs(result);
+        if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+      }).catch(() => {});
+      persistQueueStateSoon(true);
     }
   }
 
   updateUploadView();
   persistQueueStateSoon(true); // immediate persist after adding files
-  closeHosterModal();
   _pendingImportInspection = null;
+  document.getElementById('hosterModal').style.display = 'none';
+  return true;
 }
 
 function cancelHosterModal() {
@@ -1587,53 +1228,35 @@ function restoreQueueStateFromConfig() {
       .map(file => ({ path: file.path, name: file.name || file.path.split(/[\\/]/).pop(), size: file.size || 0 }))
     : [];
 
-  const uploadRecovery = config?.globalSettings?.uploadRecovery || null;
+  const interruptedJobIds = new Set(Array.isArray(config?.globalSettings?.uploadRecovery?.jobIds) ? config.globalSettings.uploadRecovery.jobIds : []);
   const rawJobs = Array.isArray(pending.queueJobs)
     ? pending.queueJobs
       .filter(job => job && job.fileName && job.hoster)
-      .map(job => {
-        const id = job.id || `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const recoveryOutcome = window.UploadRecovery.getRecoveryOutcome({ ...job, id }, uploadRecovery);
-        const status = normalizeRestoredJobStatus(recoveryOutcome.status);
-        return {
-          id,
-          uploadId: null,
-          file: job.file || '',
-          fileName: job.fileName,
-          hoster: job.hoster,
-          status,
-          bytesUploaded: status === 'done' ? (job.bytesTotal || 0) : 0,
-          bytesTotal: job.bytesTotal || 0,
-          speedKbs: 0,
-          elapsed: 0,
-          remaining: 0,
-          error: Object.hasOwn(recoveryOutcome, 'error') ? recoveryOutcome.error : (job.error || null),
-          failureDetails: Object.hasOwn(recoveryOutcome, 'failureDetails') ? recoveryOutcome.failureDetails : (job.failureDetails || null),
-          remoteCommitUncertain: Object.hasOwn(recoveryOutcome, 'remoteCommitUncertain')
-            ? recoveryOutcome.remoteCommitUncertain === true
-            : job.remoteCommitUncertain === true,
-          historyPending: Object.hasOwn(recoveryOutcome, 'historyPending')
-            ? recoveryOutcome.historyPending === true
-            : job.historyPending === true,
-          interrupted: recoveryOutcome.interrupted === true,
-          result: Object.hasOwn(recoveryOutcome, 'result') ? recoveryOutcome.result : (job.result || null),
-          sourceCleanupMetadataVersion: job.sourceCleanupMetadataVersion === 2 ? 2 : null,
-          sourceCleanupToken: job.sourceCleanupToken || null,
-          sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
-          sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
-            ? [...job.sourceCleanupConfirmedHosters]
-            : [],
-          sourceCleanupProvisionalHosters: [],
-          sourceCleanupStartedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupStartedHosters)
-            ? [...job.sourceCleanupStartedHosters]
-            : undefined,
-          sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
-          attempt: 0,
-          maxAttempts: job.maxAttempts || 0,
-          link: '',
-          progress: status === 'done' ? 1 : 0
-        };
-      })
+      .map(job => ({
+        id: job.id || `restored-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        uploadId: null,
+        file: job.file || '',
+        fileName: job.fileName,
+        hoster: job.hoster,
+        status: normalizeRestoredJobStatus(job.status),
+        bytesUploaded: job.status === 'done' ? (job.bytesTotal || 0) : 0,
+        bytesTotal: job.bytesTotal || 0,
+        speedKbs: 0,
+        elapsed: 0,
+        remaining: 0,
+        error: job.error || null,
+        failureDetails: job.failureDetails || null,
+        interrupted: interruptedJobIds.size > 0 && !['done', 'error', 'skipped'].includes(job.status),
+        result: job.result || null,
+        sourceCleanupToken: job.sourceCleanupToken || null,
+        sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
+        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
+        sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
+        attempt: 0,
+        maxAttempts: job.maxAttempts || 0,
+        link: '',
+        progress: job.status === 'done' ? 1 : 0
+      }))
     : [];
 
   // Deduplicate: keep the job with the best status for each file+hoster pair
@@ -1650,10 +1273,8 @@ function restoreQueueStateFromConfig() {
   rebuildJobIndex();
 }
 
-function buildPersistedQueueState({ historyPersisted = true } = {}) {
-  const persistableJobs = historyPersisted
-    ? queueJobs.filter(job => !['done', 'skipped'].includes(job.status) || job.historyPending === true)
-    : queueJobs;
+function buildPersistedQueueState() {
+  const persistableJobs = queueJobs.filter(job => !['done', 'skipped'].includes(job.status));
   const selectedFileMap = new Map(selectedFiles.map(file => [file.path, file]));
 
   for (const job of persistableJobs) {
@@ -1666,7 +1287,7 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
     }
   }
 
-  if (historyPersisted && selectedFileMap.size === 0 && queueJobs.every(job => ['done', 'skipped'].includes(job.status) && job.historyPending !== true)) {
+  if (selectedFileMap.size === 0 && queueJobs.every(job => ['done', 'skipped'].includes(job.status))) {
     return null;
   }
 
@@ -1692,7 +1313,7 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
     selectedFiles: Array.from(selectedFileMap.values()),
     completedKeys,
     suppressedKeys,
-    queueJobs: persistableJobs.map(job => {
+    queueJobs: queueJobs.map(job => {
       const isTerminal = TERMINAL.has(job.status);
       return {
         id: job.id,
@@ -1703,18 +1324,10 @@ function buildPersistedQueueState({ historyPersisted = true } = {}) {
         bytesTotal: job.bytesTotal || 0,
         error: isTerminal ? (job.error || null) : null,
         failureDetails: isTerminal ? (job.failureDetails || null) : null,
-        remoteCommitUncertain: job.remoteCommitUncertain === true,
-        historyPending: job.historyPending === true,
         result: isTerminal ? (job.result || null) : null,
-        sourceCleanupMetadataVersion: job.sourceCleanupToken ? 2 : null,
         sourceCleanupToken: job.sourceCleanupToken || null,
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
-        sourceCleanupConfirmedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupConfirmedHosters)
-          ? [...job.sourceCleanupConfirmedHosters]
-          : [],
-        sourceCleanupStartedHosters: job.sourceCleanupMetadataVersion === 2 && Array.isArray(job.sourceCleanupStartedHosters)
-          ? [...job.sourceCleanupStartedHosters]
-          : undefined,
+        sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         maxAttempts: job.maxAttempts || 0
       };
@@ -1783,43 +1396,15 @@ function setupDragDrop() {
   });
 }
 
-let _pendingFiles = []; // Files waiting for hoster modal confirmation
+let _pendingFiles = [];
 let _pendingImportInspection = null;
 let _importCoordination = Promise.resolve();
 let _importGeneration = 0;
 let _pendingImportInspections = 0;
-
 let _addingDropped = false;
 
-function admitFilenameFilter(files) {
-  return window.FilenameFilter.applyFilenameFilter(files, config?.globalSettings?.filenameFilter);
-}
-
-function formatFilenameFilterResult(result) {
-  const accepted = Array.isArray(result.accepted) ? result.accepted.length : Number(result.accepted) || 0;
-  const excluded = Array.isArray(result.excluded) ? result.excluded.length : Number(result.excluded) || 0;
-  return localizeUiText(`${accepted} von ${result.total} Dateien werden hinzugefügt. ${excluded} durch den Dateinamenfilter ausgeschlossen.`);
-}
-
-function showFilenameFilterResult(result) {
-  showCopyToast(formatFilenameFilterResult(result), 6500);
-}
-
-function mergePendingImportInspection(result) {
-  const current = _pendingImportInspection || {
-    candidateCount: 0,
-    duplicateCount: 0,
-    filteredCount: 0,
-    unavailableCount: 0,
-    accepted: []
-  };
-  _pendingImportInspection = {
-    candidateCount: current.candidateCount + result.candidateCount,
-    duplicateCount: current.duplicateCount + result.duplicateCount,
-    filteredCount: current.filteredCount + result.filteredCount,
-    unavailableCount: current.unavailableCount + result.unavailableCount,
-    accepted: current.accepted.concat(result.accepted)
-  };
+function existingImportPaths() {
+  return [...selectedFiles.map(file => file.path), ..._pendingFiles.map(file => file.path), ...queueJobs.map(job => job.file)];
 }
 
 function getImportPlanHosters() {
@@ -1854,7 +1439,6 @@ function renderImportPlanSummary() {
   const values = {
     importPlanCandidates: summary.candidateCount,
     importPlanDuplicates: summary.duplicateCount,
-    importPlanFiltered: summary.filteredCount,
     importPlanUnavailable: summary.unavailableCount,
     importPlanAccepted: summary.acceptedCount,
     importPlanTargets: summary.targetCount,
@@ -1863,7 +1447,7 @@ function renderImportPlanSummary() {
   };
   for (const [id, value] of Object.entries(values)) {
     const element = document.getElementById(id);
-    if (element) element.textContent = String(value);
+    if (element) element.textContent = (Number(value) || 0).toLocaleString(getUiLocale());
   }
 }
 
@@ -1871,18 +1455,28 @@ function formatRejectedImportBalance(inspection) {
   const values = [
     ['Kandidaten', inspection.candidateCount],
     ['Bereits vorhanden / dupliziert', inspection.duplicateCount],
-    ['Durch Dateinamenfilter ausgeschlossen', inspection.filteredCount],
     ['Fehlend / unlesbar / leer', inspection.unavailableCount],
     ['Akzeptierte Dateien', inspection.acceptedCount]
   ];
-  return values.map(([label, value]) => `${localizeUiText(label)}: ${Number(value) || 0}`).join(' · ');
+  return values.map(([label, value]) => `${localizeUiText(label)}: ${(Number(value) || 0).toLocaleString(getUiLocale())}`).join(' · ');
 }
 
-function existingImportPaths() {
-  return [...selectedFiles.map(file => file.path), ..._pendingFiles.map(file => file.path), ...queueJobs.map(job => job.file)];
+function mergePendingImportInspection(result) {
+  const current = _pendingImportInspection || {
+    candidateCount: 0,
+    duplicateCount: 0,
+    unavailableCount: 0,
+    accepted: []
+  };
+  _pendingImportInspection = {
+    candidateCount: current.candidateCount + result.candidateCount,
+    duplicateCount: current.duplicateCount + result.duplicateCount,
+    unavailableCount: current.unavailableCount + result.unavailableCount,
+    accepted: current.accepted.concat(result.accepted)
+  };
 }
 
-function coordinateImportEntries(entries, inspectEntries) {
+function coordinateImportEntries(entries) {
   const candidates = Array.isArray(entries) ? entries : [];
   if (candidates.length === 0) return Promise.resolve(null);
   const generation = _importGeneration;
@@ -1892,10 +1486,7 @@ function coordinateImportEntries(entries, inspectEntries) {
     if (generation !== _importGeneration) return null;
     let inspection;
     try {
-      const inspect = typeof inspectEntries === 'function'
-        ? inspectEntries
-        : (values, existingPaths) => window.api.inspectImportFiles(values, existingPaths);
-      inspection = await inspect(candidates, existingImportPaths());
+      inspection = await window.api.inspectImportFiles(candidates, existingImportPaths());
     } catch {
       if (generation !== _importGeneration) return null;
       showCopyToast('Vorabprüfung fehlgeschlagen.', 6500);
@@ -1911,11 +1502,8 @@ function coordinateImportEntries(entries, inspectEntries) {
       const acceptedPaths = new Set(inspection.accepted.map(file => file.path));
       clearDedupKeysForPaths(acceptedPaths);
       _pendingFiles.push(...inspection.accepted);
-      if (document.getElementById('hosterModal')?.style.display === 'flex') {
-        renderHosterModal();
-      } else {
-        openHosterModal();
-      }
+      if (document.getElementById('hosterModal')?.style.display === 'flex') renderHosterModal();
+      else openHosterModal();
     } else if (_pendingFiles.length > 0) {
       renderImportPlanSummary();
     } else {
@@ -1934,55 +1522,25 @@ function coordinateImportEntries(entries, inspectEntries) {
   return pending;
 }
 
-async function addDropTargetEntries(entries) {
-  const files = [];
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    const filePath = typeof entry === 'string' ? entry : entry?.path;
-    if (!filePath) continue;
-    if (entry && typeof entry === 'object' && entry.isDirectory) {
-      try {
-        const folderFiles = await window.api.resolveFolderFiles(filePath);
-        if (Array.isArray(folderFiles)) files.push(...folderFiles);
-      } catch {}
-      continue;
-    }
-    files.push(entry);
-  }
-  await addPathsToQueue(files);
-}
-
 async function addDroppedFiles(fileList) {
   if (_addingDropped) return;
   _addingDropped = true;
   try {
-    const files = Array.from(fileList);
     const entries = [];
-
-    for (const file of files) {
+    for (const file of Array.from(fileList)) {
       let filePath = '';
       try { filePath = window.api.getPathForFile(file); } catch { filePath = file.path || ''; }
       if (!filePath) continue;
-
-      // Detect folders: directories report size 0 and empty type in Electron drag-and-drop
       if (file.type === '' && file.size === 0) {
         try {
           const folderFiles = await window.api.resolveFolderFiles(filePath);
           if (folderFiles && folderFiles.length > 0) {
-            for (const fp of folderFiles) {
-              const p = typeof fp === 'string' ? fp : (fp && fp.path);
-              if (!p) continue;
-              const name = typeof fp === 'string' ? p.split('\\').pop().split('/').pop() : (fp.name || p.split('\\').pop().split('/').pop());
-              const size = typeof fp === 'string' ? null : (fp.size || 0);
-              entries.push({ path: p, name, size });
-            }
+            entries.push(...folderFiles);
             continue;
           }
         } catch {}
       }
-
-      // Regular file
-      const fileName = file.name || '';
-      entries.push({ path: filePath, name: fileName, size: file.size });
+      entries.push({ path: filePath, name: file.name || '', size: file.size });
     }
     await addPathsToQueue(entries);
   } finally {
@@ -1998,13 +1556,13 @@ async function pickFiles() {
 
 async function pickFolder() {
   const richFiles = window.api.selectFolderWithSizes ? await window.api.selectFolderWithSizes() : null;
-  if (richFiles && Array.isArray(richFiles)) { await addPathsToQueue(richFiles); return; }
+  if (richFiles && Array.isArray(richFiles)) return addPathsToQueue(richFiles);
   const paths = await window.api.selectFolder();
   if (!paths) return;
-  await addPathsToQueue(paths);
+  return addPathsToQueue(paths);
 }
 
-async function addPathsToQueue(paths) {
+function addPathsToQueue(paths) {
   return coordinateImportEntries(paths);
 }
 
@@ -2033,7 +1591,7 @@ function updateStartButton() {
   const hosters = getSelectedHosters();
   const hasQueuedJobs = queueJobs.some(isStartableQueueJob);
   const canBuildQueueFromSelection = selectedFiles.length > 0 && hosters.length > 0;
-  btn.disabled = uploading || sourceCleanupFinalizationPending || !(hasQueuedJobs || canBuildQueueFromSelection);
+  btn.disabled = uploading || !(hasQueuedJobs || canBuildQueueFromSelection);
 }
 
 const _UPLOAD_SELECTION_STATUSES = new Set(['done', 'error', 'aborted', 'skipped']);
@@ -2069,8 +1627,8 @@ function updateQueueActionButtons() {
   const moveDownBtn = document.getElementById('moveDownBtn');
   const moveBottomBtn = document.getElementById('moveBottomBtn');
 
-  if (startSelectedBtn) startSelectedBtn.disabled = uploading || sourceCleanupFinalizationPending || !hasStartableSelection;
-  if (reuploadBtn) reuploadBtn.disabled = sourceCleanupFinalizationPending || !hasUploadSelection;
+  if (startSelectedBtn) startSelectedBtn.disabled = uploading || !hasStartableSelection;
+  if (reuploadBtn) reuploadBtn.disabled = !hasUploadSelection;
   if (abortSelectedBtn) abortSelectedBtn.disabled = !hasAbortSelection;
   if (finishStopBtn) finishStopBtn.disabled = !uploading;
   if (abortAllBtn) abortAllBtn.disabled = !uploading;
@@ -2127,8 +1685,9 @@ function buildQueuePreview() {
 
     for (const file of selectedFiles) {
       for (const hoster of hosters) {
+        if (!window.ImportPreflight.isImportPairEligible(file, hoster, hosterSettings)) continue;
         const key = `${file.path}|${hoster}`;
-        if (window.ImportPreflight.isImportPairEligible(file, hoster, hosterSettings) && !existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
+        if (!existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
           const job = {
             id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             file: file.path, fileName: file.name, hoster,
@@ -2714,8 +2273,7 @@ function getAccountLabel(job) {
 }
 
 function getStatusText(job) {
-  const rawError = job.error ? String(job.error).replace(/\s+/g, ' ').slice(0, 100) : '';
-  const shortErr = rawError ? getLocalizedErrorDetail(rawError) : '';
+  const shortErr = job.error ? String(job.error).replace(/\s+/g, ' ').slice(0, 100) : '';
   const acc = getAccountLabel(job);
   const accSuffix = acc ? ` · ${acc}` : '';
   let text;
@@ -2731,7 +2289,7 @@ function getStatusText(job) {
     }
     case 'done': text = 'Fertig'; break;
     case 'aborted': text = shortErr || 'Abgebrochen'; break;
-    case 'error': text = shortErr ? (/^(?:Fehlgeschlagen|Failed)(?::|$)/.test(shortErr) ? shortErr : `Fehlgeschlagen: ${shortErr}`) : 'Fehlgeschlagen'; break;
+    case 'error': text = shortErr ? (/^Fehlgeschlagen(?::|$)/.test(shortErr) ? shortErr : `Fehlgeschlagen: ${shortErr}`) : 'Fehlgeschlagen'; break;
     case 'skipped': text = shortErr ? `Übersprungen: ${shortErr}` : 'Übersprungen'; break;
     default: text = job.status;
   }
@@ -2821,12 +2379,8 @@ function showContextMenu(x, y) {
   const n = selectedJobIds.size;
   const delItem = menu.querySelector('[data-action="delete-selected"]');
   if (delItem) delItem.textContent = n > 1 ? `Entfernen (${n})` : 'Entfernen';
-  const copyableLinkCount = getSelectedJobLinks().length;
   const copyItem = menu.querySelector('[data-action="copy-links"]');
-  if (copyItem) {
-    copyItem.textContent = copyableLinkCount > 1 ? `Links kopieren (${copyableLinkCount})` : 'Link kopieren';
-    copyItem.style.display = copyableLinkCount > 0 ? '' : 'none';
-  }
+  if (copyItem) copyItem.textContent = n > 1 ? `Links kopieren (${n})` : 'Link kopieren';
   menu.querySelectorAll('[data-action="retry-selected"]').forEach(el => {
     el.textContent = n > 1 ? `Erneut versuchen (${n})` : 'Erneut versuchen';
   });
@@ -2884,12 +2438,8 @@ function showRecentContextMenu(row, x, y) {
     applyRecentSelectionClasses();
   }
   const menu = document.getElementById('recentContextMenu');
-  const copyableLinkCount = getSelectedRecentLinks().length;
   const copyItem = menu.querySelector('[data-action="recent-copy-links"]');
-  if (copyItem) {
-    copyItem.textContent = copyableLinkCount > 1 ? `Links kopieren (${copyableLinkCount})` : 'Link kopieren';
-    copyItem.style.display = copyableLinkCount > 0 ? '' : 'none';
-  }
+  if (copyItem) copyItem.textContent = selectedRecentIds.size > 1 ? `Links kopieren (${selectedRecentIds.size})` : 'Link kopieren';
   menu.style.display = 'block';
   menu.style.left = Math.min(x, window.innerWidth - menu.offsetWidth - 5) + 'px';
   menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 5) + 'px';
@@ -2958,20 +2508,16 @@ async function exportAllRecentFiles() {
     ]);
     if (result && result.ok) showCopyToast(`${rows.length} Einträge exportiert`);
   } catch (err) {
-    await showAppAlert(formatLocalizedError('Export fehlgeschlagen', err), 'Export fehlgeschlagen');
+    await showAppAlert('Export fehlgeschlagen: ' + (err.message || err), 'Export fehlgeschlagen');
   }
 }
 
-function getSelectedRecentLinks() {
-  return sessionFilesData
+function copySelectedRecentLinks() {
+  const links = sessionFilesData
     .filter(r => selectedRecentIds.has(r.order) && !r.isError)
     .map(r => r.link)
     .filter(Boolean);
-}
-
-function copySelectedRecentLinks() {
-  const links = getSelectedRecentLinks();
-  if (links.length) { window.api.copyToClipboard(links.join('\n')); showCopyToast(getCopiedLinksMessage(links.length)); }
+  if (links.length) { window.api.copyToClipboard(links.join('\n')); showCopyToast(`${links.length} Links kopiert`); }
 }
 
 // --- Backup export / import ---
@@ -3004,7 +2550,7 @@ async function doBackupExport() {
       showCopyToast('Backup exportiert');
     }
   } catch (err) {
-    await showAppAlert(formatLocalizedError('Export fehlgeschlagen', err), 'Export fehlgeschlagen');
+    await showAppAlert('Export fehlgeschlagen: ' + (err.message || err), 'Export fehlgeschlagen');
   }
 }
 
@@ -3058,7 +2604,7 @@ async function persistImportedQueueState() {
 }
 
 function showImportQueuePersistenceError(error) {
-  showCopyToast(formatLocalizedError('Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden', error), 8000);
+  showCopyToast(`Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden: ${error.message || error}`, 8000);
 }
 
 function setOnlineBackupStatus(message, state = '') {
@@ -3249,10 +2795,10 @@ async function doBackupImport(legacyPassword) {
       }
       if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
     } else if (result.error) {
-      await showAppAlert(formatLocalizedError('Import fehlgeschlagen', result.error), 'Import fehlgeschlagen');
+      await showAppAlert('Import fehlgeschlagen: ' + result.error, 'Import fehlgeschlagen');
     }
   } catch (err) {
-    await showAppAlert(formatLocalizedError('Import fehlgeschlagen', err), 'Import fehlgeschlagen');
+    await showAppAlert('Import fehlgeschlagen: ' + (err.message || err), 'Import fehlgeschlagen');
   }
 }
 
@@ -3260,8 +2806,21 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.context-menu')) hideContextMenu();
 });
 document.addEventListener('keydown', (e) => {
+  if (_isUpdateDialogVisible()) return;
+  const accountModal = document.getElementById('accountModal');
+  if (e.key === 'Tab' && accountModal && accountModal.style.display !== 'none') {
+    const focusable = Array.from(accountModal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (first && last && ((!e.shiftKey && document.activeElement === last) || (e.shiftKey && document.activeElement === first))) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    }
+  }
   if (e.key === 'Escape') {
     hideContextMenu();
+    cancelHosterModal();
+    if (accountModal && accountModal.style.display !== 'none') closeAccountModal();
   }
   if (e.target instanceof window.Element && e.target.closest('input, textarea, select')) return;
   const activeView = document.querySelector('.view.active');
@@ -3305,18 +2864,13 @@ document.getElementById('contextMenu').addEventListener('click', (e) => {
   handleContextAction(action);
 });
 
-function removeSourceCleanupRequirements(jobs) {
-  if (!window.SourceCleanupPolicy || !Array.isArray(jobs)) return;
-  for (const job of jobs) window.SourceCleanupPolicy.removeRequirement(queueJobs, job, 'win32');
-}
-
 async function handleContextAction(action) {
   _normalizeQueueSelectionToVisible();
   if (action === 'start-selected') {
     startSelectedUpload();
   } else if (action === 'copy-links') {
     const links = getSelectedJobLinks();
-    if (links.length) { window.api.copyToClipboard(links.join('\n')); showCopyToast(getCopiedLinksMessage(links.length)); }
+    if (links.length) { window.api.copyToClipboard(links.join('\n')); showCopyToast(`${links.length} Links kopiert`); }
   } else if (action === 'retry-selected') {
     retrySelectedJobs();
   } else if (action === 'show-log') {
@@ -3329,8 +2883,6 @@ async function handleContextAction(action) {
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
     });
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
-    const removedJobs = queueJobs.filter(j => selectedJobIds.has(j.id));
-    removeSourceCleanupRequirements(removedJobs);
     const _deletedKeys = [];
     queueJobs = queueJobs.filter(j => {
       if (selectedJobIds.has(j.id)) {
@@ -3358,7 +2910,6 @@ async function handleContextAction(action) {
       await window.api.cancelUpload();
       uploading = false;
     }
-    removeSourceCleanupRequirements(queueJobs);
     queueJobs.forEach(j => removeJobFromIndex(j));
     queueJobs = [];
     selectedJobIds.clear();
@@ -3381,7 +2932,6 @@ async function handleContextAction(action) {
       .filter(j => j.hoster === hoster && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server' || j.status === 'preview'))
       .map(j => j.id);
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
-    removeSourceCleanupRequirements(queueJobs.filter(j => j.hoster === hoster));
     // Remove ALL jobs for this hoster
     queueJobs = queueJobs.filter(j => {
       if (j.hoster === hoster) { removeJobFromIndex(j); return false; }
@@ -3409,76 +2959,8 @@ function getSelectedJobLinks() {
 
 // --- Upload ---
 function prepareSourceCleanup(jobs) {
-  if (!window.SourceCleanupPolicy) return { groups: [] };
-  const enabled = config.globalSettings?.deleteSourceAfterSuccessfulUpload === true;
-  const hasMetadata = Array.isArray(jobs) && jobs.some((job) => job?.sourceCleanupToken);
-  if (!enabled && !hasMetadata) return { groups: [] };
-  const preparation = window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
-  return enabled ? preparation : { ...preparation, groups: [] };
-}
-
-async function persistSourceCleanupRevocations(preparation) {
-  if (Array.isArray(preparation?.revokedHosters) && preparation.revokedHosters.length > 0) {
-    sourceCleanupRevocationPending = true;
-  }
-  if (!sourceCleanupRevocationPending) return false;
-  await _persistQueueSnapshotBeforeUploadStart();
-  return true;
-}
-
-async function persistQueueBeforeUploadStart(preparation) {
-  if (await persistSourceCleanupRevocations(preparation)) return;
-  await _persistQueueSnapshotBeforeUploadStart();
-}
-
-async function _persistQueueSnapshotBeforeUploadStart() {
-  try {
-    queuePersistThrottle.cancel();
-    await persistQueueStateNow();
-    await flushConfigWrites();
-    sourceCleanupRevocationPending = false;
-  } catch (cause) {
-    const error = cause instanceof Error ? cause : new Error(String(cause));
-    error.queuePersistenceFailure = true;
-    throw error;
-  }
-}
-
-async function completeSourceCleanupFinalization(data) {
-  if (!data?.finalizationId || !window.api.completeUploadFinalization) return false;
-  queuePersistThrottle.cancel();
-  let writesReady = true;
-  try {
-    await flushConfigWrites();
-  } catch {
-    writesReady = false;
-  }
-  const persist = async () => {
-    if (!writesReady) {
-      try {
-        await window.api.completeUploadFinalization({
-          finalizationId: data.finalizationId,
-          deliveryId: data.deliveryId,
-          historyPersisted: data.historyPersisted === true,
-          ready: false
-        });
-      } catch {}
-      return false;
-    }
-    return window.api.completeUploadFinalization({
-      finalizationId: data.finalizationId,
-      deliveryId: data.deliveryId,
-      historyPersisted: data.historyPersisted === true,
-      pendingQueue: data.historyPersisted !== true || queueJobs.some((job) => !['done', 'skipped'].includes(job.status) || job.historyPending === true)
-        ? buildPersistedQueueState({ historyPersisted: data.historyPersisted === true })
-        : null
-    });
-  };
-  if (!window.SourceCleanupPolicy?.persistRoundCompletions) return Boolean(await persist());
-  return window.SourceCleanupPolicy.persistRoundCompletions(queueJobs, {
-    historyPersisted: data.historyPersisted === true,
-    persist
-  });
+  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [] };
+  return window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
 }
 
 function serializeUploadJob(job) {
@@ -3487,19 +2969,15 @@ function serializeUploadJob(job) {
     file: job.file,
     fileName: job.fileName,
     hoster: job.hoster,
-    sourceCleanupMetadataVersion: job.sourceCleanupToken ? 2 : null,
     sourceCleanupToken: job.sourceCleanupToken || null,
     sourceCleanupRequiredHosters: job.sourceCleanupRequiredHosters || [],
-    sourceCleanupConfirmedHosters: job.sourceCleanupConfirmedHosters || [],
-    sourceCleanupStartedHosters: Array.isArray(job.sourceCleanupStartedHosters)
-      ? [...job.sourceCleanupStartedHosters]
-      : undefined,
+    sourceCleanupCompletedHosters: job.sourceCleanupCompletedHosters || [],
     sourceCleanupFingerprint: job.sourceCleanupFingerprint || null
   };
 }
 
 async function startUpload(opts) {
-  if (uploading || sourceCleanupFinalizationPending) return;
+  if (uploading) return;
   if (!(opts && opts._restoredAutoStart)) cancelStartupQueueAutoStart();
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
   else _cancelAutoRetry(false);
@@ -3518,18 +2996,8 @@ async function startUpload(opts) {
     buildQueuePreview();
   }
 
-  const scopedJobs = Array.isArray(opts?.jobs) ? opts.jobs : queueJobs;
-  const automaticStart = opts?._autoRetry === true || opts?._restoredAutoStart === true;
-  const startableJobs = scopedJobs.filter((job) => isStartableQueueStatus(job.status));
-  const jobsToStart = automaticStart
-    ? startableJobs.filter((job) => job.remoteCommitUncertain !== true)
-    : startableJobs;
+  const jobsToStart = queueJobs.filter((job) => isStartableQueueStatus(job.status));
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
-  if (!automaticStart && !await confirmRemoteCommitRetry(jobsToStart)) {
-    uploading = false;
-    updateQueueActionButtons();
-    return;
-  }
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3547,7 +3015,6 @@ async function startUpload(opts) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
-    await persistQueueBeforeUploadStart(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
@@ -3560,10 +3027,10 @@ async function startUpload(opts) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
-    if (result?.finalized !== true) persistQueueStateSoon();
+    persistQueueStateSoon();
 
     if (result && result.error) {
-      await showAppAlert(getLocalizedErrorDetail(result.error), 'Upload-Start fehlgeschlagen');
+      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
       uploading = false;
       updateQueueActionButtons();
       updateStatusBar();
@@ -3572,8 +3039,7 @@ async function startUpload(opts) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Upload-Start fehlgeschlagen';
-    await showAppAlert(formatLocalizedError(prefix, err), 'Upload-Start fehlgeschlagen');
+    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -3589,17 +3055,15 @@ function _markSkippedJobs(result) {
   renderQueueTable();
 }
 
-async function startSelectedUpload(explicitJobs, options = {}) {
-  if (sourceCleanupFinalizationPending) return;
+async function startSelectedUpload(explicitJobs) {
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();
     const addable = scopedJobs.filter(j => isStartableQueueStatus(j.status));
     if (addable.length === 0) {
       if (selectedJobIds.size > 0) showCopyToast('Keine startbaren Jobs ausgewählt (alle laufen schon oder sind fertig).');
-      return false;
+      return;
     }
-    if (options.remoteRetryConfirmed !== true && !await confirmRemoteCommitRetry(addable)) return false;
     {
       const cleanupPreparation = prepareSourceCleanup(addable);
       addable.forEach(j => {
@@ -3609,15 +3073,13 @@ async function startSelectedUpload(explicitJobs, options = {}) {
       renderQueueTable();
       let result = null;
       try {
-        await persistQueueBeforeUploadStart(cleanupPreparation);
         result = await window.api.addJobsToBatch({
           jobs: addable.map(serializeUploadJob),
           sourceCleanupGroups: cleanupPreparation.groups
         });
       } catch (err) {
-        const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Jobs konnten nicht hinzugefügt werden';
-        showCopyToast(formatLocalizedError(prefix, err));
-        return false;
+        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${err.message}`);
+        return;
       }
 
       // If the batch ended between UI-state and IPC call, start a fresh batch immediately
@@ -3625,7 +3087,8 @@ async function startSelectedUpload(explicitJobs, options = {}) {
         uploading = false;
         updateQueueActionButtons();
         updateStatusBar();
-        return startSelectedUpload(addable, { remoteRetryConfirmed: true });
+        await startSelectedUpload(addable);
+        return;
       }
       _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
@@ -3633,22 +3096,23 @@ async function startSelectedUpload(explicitJobs, options = {}) {
       }
       persistQueueStateSoon();
       const added = Number(result && result.added) || 0;
+      // Use ASCII-only toast text here to avoid encoding artifacts on some systems.
       const skipped = Array.isArray(result && result.skippedJobs) ? result.skippedJobs.length : 0;
       const alreadyInBatch = Array.isArray(result && result.alreadyInBatchJobIds)
         ? result.alreadyInBatchJobIds.length
         : Math.max(0, addable.length - added - skipped);
       const toastParts = [];
-      if (added > 0) toastParts.push(localizeUiText(`${added} hinzugefügt`));
-      if (alreadyInBatch > 0) toastParts.push(localizeUiText(`${alreadyInBatch} bereits im Batch`));
-      if (skipped > 0) toastParts.push(localizeUiText(`${skipped} ohne gültigen Account`));
+      if (added > 0) toastParts.push(`${added} hinzugefuegt`);
+      if (alreadyInBatch > 0) toastParts.push(`${alreadyInBatch} bereits im Batch`);
+      if (skipped > 0) toastParts.push(`${skipped} ohne gueltigen Account`);
       if (result && result.error) {
-        showCopyToast(formatLocalizedError('Jobs konnten nicht hinzugefügt werden', result.error));
+        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${result.error}`);
       } else if (toastParts.length > 0) {
         showCopyToast(`Jobs: ${toastParts.join(', ')}`);
       } else {
-        showCopyToast('Keine Jobs hinzugefügt');
+        showCopyToast('Keine Jobs hinzugefuegt');
       }
-      return !(result && result.error);
+      return;
     }
   }
   uploading = true; // set immediately to prevent double-click race
@@ -3656,12 +3120,7 @@ async function startSelectedUpload(explicitJobs, options = {}) {
 
   const hosters = getSelectedHosters();
   const jobsToStart = scopedJobs.filter(job => isStartableQueueStatus(job.status));
-  if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return false; }
-  if (options.remoteRetryConfirmed !== true && !await confirmRemoteCommitRetry(jobsToStart)) {
-    uploading = false;
-    updateQueueActionButtons();
-    return false;
-  }
+  if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3677,35 +3136,30 @@ async function startSelectedUpload(explicitJobs, options = {}) {
     updateQueueActionButtons();
     renderQueueTable();
     updateStatusBar();
-    await persistQueueBeforeUploadStart(cleanupPreparation);
 
     const uploadPayload = {
       hosters,
       jobs: jobsToStart.map(serializeUploadJob),
       sourceCleanupGroups: cleanupPreparation.groups
-    };
+  };
     const result = await window.api.startUpload(uploadPayload);
     if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
-    if (result?.finalized !== true) persistQueueStateSoon();
+    persistQueueStateSoon();
 
     if (result && result.error) {
-      await showAppAlert(getLocalizedErrorDetail(result.error), 'Upload-Start fehlgeschlagen');
+      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
       uploading = false;
       updateQueueActionButtons();
       updateStatusBar();
-      return false;
     }
-    return true;
   } catch (err) {
     uploading = false;
     updateQueueActionButtons();
     updateStatusBar();
-    const prefix = err?.queuePersistenceFailure ? 'Warteschlange konnte vor dem Upload-Start nicht gespeichert werden' : 'Upload-Start fehlgeschlagen';
-    await showAppAlert(formatLocalizedError(prefix, err), 'Upload-Start fehlgeschlagen');
-    return false;
+    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
   }
 }
 
@@ -3741,31 +3195,26 @@ function handleProgress(data) {
   }
 }
 function _handleProgressImpl(data) {
-  const hasJobId = data.jobId !== undefined && data.jobId !== null && data.jobId !== '';
-  let job = hasJobId ? _jobIndexById.get(data.jobId) : null;
-  if (hasJobId && !job) return;
-  if (!hasJobId && data.uploadId) {
-    job = _jobIndexByUploadId.get(data.uploadId);
-    if (!job && _deletedJobIds.has(data.uploadId)) return;
-  }
+  let job = data.jobId ? _jobIndexById.get(data.jobId) : null;
+  if (!job && data.uploadId) job = _jobIndexByUploadId.get(data.uploadId);
   if (!job) {
-    const candidates = queueJobs.filter(candidate =>
-      candidate.fileName === data.fileName &&
-      candidate.hoster === data.hoster &&
-      candidate.status !== 'done' &&
-      candidate.status !== 'skipped'
+    job = queueJobs.find(j =>
+      j.fileName === data.fileName && j.hoster === data.hoster && j.status === 'queued'
+    ) || queueJobs.find(j =>
+      j.fileName === data.fileName && j.hoster === data.hoster && j.status === 'preview'
     );
-    if (candidates.length > 1) return;
-    job = candidates.length === 1 ? candidates[0] : null;
     if (job && data.uploadId) {
       job.uploadId = data.uploadId;
       _jobIndexByUploadId.set(data.uploadId, job);
     }
   }
   if (!job) {
-    if (['done', 'error', 'aborted', 'skipped'].includes(data.status)) return;
+    // Don't re-create jobs that were explicitly deleted by the user
+    if ((data.jobId && _deletedJobIds.has(data.jobId)) || (data.uploadId && _deletedJobIds.has(data.uploadId))) {
+      return;
+    }
     job = {
-      id: data.uploadId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: data.jobId || data.uploadId || `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       uploadId: data.uploadId,
       file: '', fileName: data.fileName, hoster: data.hoster,
       status: data.status, bytesUploaded: 0, bytesTotal: data.bytesTotal || 0,
@@ -3777,7 +3226,7 @@ function _handleProgressImpl(data) {
   }
 
   // Don't regress from terminal states (stale callbacks can arrive after completion)
-  if (['done', 'error', 'aborted', 'skipped'].includes(job.status)) return;
+  if (job.status === 'done' || job.status === 'skipped') return;
 
   // Update job state
   job.status = data.status;
@@ -3794,7 +3243,6 @@ function _handleProgressImpl(data) {
   job.remaining = data.remaining || 0;
   job.error = data.error || null;
   job.failureDetails = data.failureDetails || job.failureDetails || null;
-  job.remoteCommitUncertain = window.UploadRecovery.resolveRemoteCommitUncertainty(job.remoteCommitUncertain, data);
   job.result = data.result || job.result;
   job.attempt = data.attempt || 0;
   job.maxAttempts = data.maxAttempts || 0;
@@ -3826,6 +3274,23 @@ function _handleProgressImpl(data) {
     _completedUploadKeys.add(`${job.file}|${job.hoster}`);
   }
 
+  // Remove finished jobs from queue if setting is enabled. Coalesce the
+  // actual array filter into one microtask: a burst of 500 done events
+  // would otherwise fire 500 individual O(N) filters = O(N²) work, visible
+  // as a brief UI freeze when a big batch finishes. Index/selection are
+  // updated synchronously so subsequent lookups see the right state — only
+  // the array rewrite is deferred.
+  if (job.status === 'done' && config.globalSettings && config.globalSettings.removeFromQueueOnDone) {
+    removeJobFromIndex(job, true);
+    selectedJobIds.delete(job.id);
+    if (_doneRemovalCoalescer) {
+      _doneRemovalCoalescer.add(job.id);
+    } else {
+      // Legacy slow path: immediate filter when the lib script didn't load.
+      queueJobs = queueJobs.filter(j => j !== job);
+    }
+  }
+
   // Status changes (done/error/etc) get one coalesced update per frame so a
   // burst of 500 parallel jobs flipping state doesn't fire 2000 sync DOM
   // updates. Ongoing uploading progress is throttled at 200ms.
@@ -3837,9 +3302,9 @@ function _handleProgressImpl(data) {
   persistQueueStateSoon();
 }
 
-function handleBatchDone(summary, options = {}) {
+function handleBatchDone(summary) {
   uploading = false;
-  applySummaryResults(summary, options.historyPersisted !== false);
+  applySummaryResults(summary);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
   // Prune session-stats sets to current queue contents. Without this, IDs
   // of jobs that were removed from queueJobs (via removeFromQueueOnDone
@@ -3868,19 +3333,20 @@ function handleBatchDone(summary, options = {}) {
 
   syncSelectedFilesFromQueue();
   updateQueueActionButtons();
+  renderQueueTable();
   renderRecentUploadsPanel();
   // History is only visible on the Verlauf tab. Mark it dirty and refresh when
   // the user actually switches to it — skips an IPC + full table rebuild per
   // batch-done when the user is watching the upload view.
   _historyDirty = true;
-  if (options.historyPersisted !== false || _isHistoryTabActive()) loadHistory();
+  if (_isHistoryTabActive()) loadHistory();
 
   const removeOnDone = config.globalSettings && config.globalSettings.removeFromQueueOnDone;
-  if (options.historyPersisted !== false && removeOnDone) {
+  if (removeOnDone) {
     // Single pass: build the keep-list and clean up the index for removed jobs.
     const nextJobs = [];
     for (const job of queueJobs) {
-      if (job.status === 'done' && job.historyPending !== true) {
+      if (job.status === 'done') {
         removeJobFromIndex(job, true);
         selectedJobIds.delete(job.id);
       } else {
@@ -3888,7 +3354,8 @@ function handleBatchDone(summary, options = {}) {
       }
     }
     queueJobs = nextJobs;
-  } else if (options.historyPersisted !== false) {
+    renderQueueTable();
+  } else {
     // Auto-prune for the default (removeOnDone=false) too: cap terminal
     // jobs (done/skipped/error/aborted) at the most recent N so the queue
     // can't grow unbounded across long sessions. The algorithm lives in
@@ -3899,23 +3366,19 @@ function handleBatchDone(summary, options = {}) {
     // Optional-chain so the renderer still works if the prune script fails
     // to load (e.g. file:// path issues during dev) — falls back to no-prune
     // rather than crashing on every batch-done.
-    const result = window.QueuePrune?.pruneOldestTerminalJobs(queueJobs.filter(job => job.historyPending !== true), TERMINAL_KEEP_LIMIT);
+    const result = window.QueuePrune?.pruneOldestTerminalJobs(queueJobs, TERMINAL_KEEP_LIMIT);
     if (result) {
-      const droppedIds = new Set(result.dropped.map(job => job.id));
       for (const j of result.dropped) {
         removeJobFromIndex(j, true);
         selectedJobIds.delete(j.id);
       }
-      queueJobs = queueJobs.filter(job => !droppedIds.has(job.id));
+      queueJobs = result.kept;
+      renderQueueTable();
     }
   }
 
-  renderQueueTable();
-
-  if (!options.deferPersistence) {
-    if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status) || job.historyPending === true)) persistQueueStateSoon(true);
-    else clearPersistedQueueStateSoon();
-  }
+  if (queueJobs.some((job) => !['done', 'skipped'].includes(job.status))) persistQueueStateSoon(true);
+  else clearPersistedQueueStateSoon();
 
   lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: lastUploadStats.totalBytes, elapsed: lastUploadStats.elapsed, activeJobs: 0 };
   updateStatusBar();
@@ -3933,7 +3396,6 @@ function _cancelAutoRetry(resetRound) {
 function _collectAutoRetryableJobs() {
   if (!window.Stats) return [];
   return queueJobs.filter(j => j.status === 'error'
-    && j.remoteCommitUncertain !== true
     && window.Stats.isRetryableCategory(window.Stats.classifyErrorCategory(j.error)));
 }
 function _scheduleAutoRetryIfNeeded() {
@@ -3953,11 +3415,10 @@ function _scheduleAutoRetryIfNeeded() {
     if (jobs.length === 0) { _autoRetryState.round = 0; return; }
     for (const j of jobs) {
       j.status = 'queued'; j.error = null; j.result = null;
-      j.remoteCommitUncertain = false;
       j.bytesUploaded = 0; j.speedKbs = 0; j.progress = 0; j.uploadId = null;
     }
     renderQueueTable();
-    startUpload({ _autoRetry: true, jobs });
+    startUpload({ _autoRetry: true });
   }, waitMin * 60_000);
 }
 async function _refreshSessionFailedSnapshot() {
@@ -4006,35 +3467,34 @@ function _maybeShowBatchSummary(summary) {
 
   const close = () => { modal.style.display = 'none'; };
   closeBtn.onclick = close;
-  retryAllBtn.onclick = async () => { if (await _retryFailedFromBuckets(buckets, false)) close(); };
-  retryTransientBtn.onclick = async () => { if (await _retryFailedFromBuckets(buckets, true)) close(); };
+  retryAllBtn.onclick = () => { _retryFailedFromBuckets(buckets, false); close(); };
+  retryTransientBtn.onclick = () => { _retryFailedFromBuckets(buckets, true); close(); };
   modal.style.display = 'flex';
 }
 
-async function _retryFailedFromBuckets(buckets, transientOnly) {
-  if (sourceCleanupFinalizationPending) return;
+function _retryFailedFromBuckets(buckets, transientOnly) {
   const cats = transientOnly ? ['hoster-transient', 'network', 'unknown'] : ['hoster-transient', 'network', 'unknown', 'file-rejected', 'account-error'];
   const toRetry = [];
   for (const cat of cats) {
     for (const item of (buckets[cat] || [])) toRetry.push(item);
   }
-  if (toRetry.length === 0) return false;
+  if (toRetry.length === 0) return;
   const jobsToRetry = [];
   for (const item of toRetry) {
-    const job = item.jobId
-      ? queueJobs.find(candidate => candidate.id === item.jobId && candidate.status === 'error')
-      : (() => {
-          const candidates = queueJobs.filter(candidate => candidate.fileName === item.fileName && candidate.hoster === item.hoster && candidate.status === 'error');
-          return candidates.length === 1 ? candidates[0] : null;
-        })();
-    if (job && !jobsToRetry.includes(job)) jobsToRetry.push(job);
+    const job = queueJobs.find(j => (j.fileName === item.fileName) && (j.hoster === item.hoster) && j.status === 'error');
+    if (job) {
+      job.status = 'queued';
+      job.progress = 0;
+      job.bytesUploaded = 0;
+      job.error = null;
+      job.result = null;
+      jobsToRetry.push(job);
+    }
   }
-  if (jobsToRetry.length === 0) { showCopyToast('Keine passenden Jobs für Retry gefunden.'); return false; }
-  if (!await confirmRemoteCommitRetry(jobsToRetry)) return false;
-  const started = await startSelectedUpload(jobsToRetry, { remoteRetryConfirmed: true });
-  if (!started) return false;
+  if (jobsToRetry.length === 0) { showCopyToast('Keine passenden Jobs für Retry gefunden.'); return; }
+  renderQueueTable();
   showCopyToast(jobsToRetry.length === 1 ? '1 Job zum erneuten Upload zurückgesetzt' : `${jobsToRetry.length} Jobs zum erneuten Upload zurückgesetzt`);
-  return true;
+  if (typeof startUpload === 'function') startUpload();
 }
 
 function handleStats(data) {
@@ -4079,9 +3539,6 @@ function _handleStatsImpl(data) {
 }
 
 // --- Per-job log modal ---
-let _jobLogGeneration = 0;
-let _jobLogJobId = null;
-
 async function showJobLogModal() {
   const selectedJobs = _getVisibleSelectedQueueJobs();
   if (selectedJobs.length === 0) return;
@@ -4089,28 +3546,20 @@ async function showJobLogModal() {
   // make sense here.
   const job = selectedJobs[0];
   const jobId = job.id;
-  const generation = ++_jobLogGeneration;
-  _jobLogJobId = jobId;
   const modal = document.getElementById('jobLogModal');
   const titleEl = document.getElementById('jobLogTitle');
   const bodyEl = document.getElementById('jobLogBody');
   if (!modal || !titleEl || !bodyEl) return;
 
   titleEl.textContent = job && job.fileName ? `Log · ${job.fileName}` : 'Upload-Log';
-  bodyEl.textContent = localizeUiText('Lade…');
-  modalController.open(modal, {
-    initialFocus: '#closeJobLogBtn',
-    fallbackFocus: '#addFilesBtn',
-    onEscape: hideJobLogModal,
-    onBackdrop: hideJobLogModal
-  });
+  bodyEl.textContent = 'Lade…';
+  modal.style.display = 'flex';
 
   let entries = [];
   try { entries = await window.api.getJobLog(jobId); } catch {}
-  if (generation !== _jobLogGeneration || _jobLogJobId !== jobId || !modalController.isOpen(modal) || _jobIndexById.get(jobId) !== job) return;
 
   if (!Array.isArray(entries) || entries.length === 0) {
-    bodyEl.textContent = localizeUiText('Keine Log-Einträge für diesen Job (entweder noch nichts passiert oder aus vorherigem Batch und schon geräumt).');
+    bodyEl.textContent = 'Keine Log-Einträge für diesen Job (entweder noch nichts passiert oder aus vorherigem Batch und schon geräumt).';
     return;
   }
 
@@ -4134,19 +3583,18 @@ async function showJobLogModal() {
     ? Object.entries(job.failureDetails).map(([key, value]) => `${key}: ${value}`).join('\n')
     : '';
   const summary = [
-    `${localizeUiText('Hoster')}: ${job.hoster || '–'}`,
-    `${localizeUiText('Account')}: ${getAccountLabel(job) || job.accountId || '–'}`,
-    `${localizeUiText('Versuch')}: ${job.attempt || '–'} / ${job.maxAttempts || '–'}`,
-    job.error ? `${localizeUiText('Fehler')}: ${job.error}` : '',
-    details ? `${localizeUiText('Diagnose')}:\n${details}` : ''
+    `Hoster: ${job.hoster || '–'}`,
+    `Account: ${getAccountLabel(job) || job.accountId || '–'}`,
+    `Versuch: ${job.attempt || '–'} / ${job.maxAttempts || '–'}`,
+    job.error ? `Fehler: ${job.error}` : '',
+    details ? `Diagnose:\n${details}` : ''
   ].filter(Boolean).join('\n');
   bodyEl.textContent = `${summary}\n\n${entries.map(fmt).join('\n')}`;
 }
 
 function hideJobLogModal() {
-  _jobLogGeneration++;
-  _jobLogJobId = null;
-  modalController.close('jobLogModal', { fallbackFocus: '#addFilesBtn' });
+  const m = document.getElementById('jobLogModal');
+  if (m) m.style.display = 'none';
 }
 
 async function copyJobLogToClipboard() {
@@ -4156,29 +3604,15 @@ async function copyJobLogToClipboard() {
 }
 
 // --- Retry ---
-async function confirmRemoteCommitRetry(jobs) {
-  const count = jobs.filter(job => job.remoteCommitUncertain === true).length;
-  if (count === 0) return true;
-  return showAppConfirm({
-    title: 'Uploadstatus konnte nicht bestätigt werden',
-    message: count === 1
-      ? 'Der Upload könnte beim Hoster bereits abgeschlossen sein. Ein erneuter Upload kann ein Duplikat erzeugen.'
-      : `${count} Uploads könnten bei den Hostern bereits abgeschlossen sein. Erneute Uploads können Duplikate erzeugen.`,
-    confirmText: 'Trotzdem erneut hochladen',
-    danger: true
-  });
-}
-
 async function retrySelectedJobs() {
-  if (sourceCleanupFinalizationPending) return;
   _normalizeQueueSelectionToVisible();
-  const retryJobs = queueJobs.filter(j => selectedJobIds.has(j.id) && ['error', 'done', 'aborted', 'skipped'].includes(j.status));
-  if (retryJobs.length === 0 || !await confirmRemoteCommitRetry(retryJobs)) return;
+  const retryJobs = [];
   // Build a Set for O(1) selectedFiles dedup below.
   const existingFilePaths = new Set();
   for (const f of selectedFiles) existingFilePaths.add(f.path);
 
-  retryJobs.forEach(j => {
+  queueJobs.forEach(j => {
+    if (selectedJobIds.has(j.id) && ['error', 'done', 'aborted', 'skipped'].includes(j.status)) {
       // Invalidate the old uploadId: retire the index entry and mark it so
       // any late progress event from the previous (cancelled/completed)
       // upload can't overwrite the freshly-reset state.
@@ -4195,11 +3629,14 @@ async function retrySelectedJobs() {
       j.remaining = 0;
       j.progress = 0;
       j.uploadId = null;
+      retryJobs.push(j);
       if (!existingFilePaths.has(j.file)) {
         selectedFiles.push({ path: j.file, name: j.fileName, size: j.bytesTotal });
         existingFilePaths.add(j.file);
       }
+    }
   });
+  if (retryJobs.length === 0) return;
   for (const j of retryJobs) {
     if (j.file && j.hoster) {
       _completedUploadKeys.delete(`${j.file}|${j.hoster}`);
@@ -4215,7 +3652,7 @@ async function retrySelectedJobs() {
   retryJobs.forEach(j => selectedJobIds.add(j.id));
   selectionAnchorJobId = retryJobs[0]?.id || null;
   persistQueueStateSoon();
-  await startSelectedUpload(retryJobs, { remoteRetryConfirmed: true });
+  await startSelectedUpload(retryJobs);
 }
 
 async function abortSelectedJobs() {
@@ -4356,25 +3793,19 @@ function maybeAddSessionFile(job) {
 
 }
 
-function applySummaryResults(summary, historyPersisted = true) {
+function applySummaryResults(summary) {
   const files = Array.isArray(summary?.files) ? summary.files : [];
-  const jobById = new Map();
-  const jobsByLegacyKey = new Map();
+  // Build a (fileName + hoster) → job map once so the per-result lookup is O(1)
+  // instead of O(|queueJobs|). Big batches (hundreds of files × multiple hosters)
+  // otherwise become O(n²).
+  const jobByKey = new Map();
   for (const j of queueJobs) {
-    jobById.set(j.id, j);
-    const key = `${j.fileName}\u0001${j.hoster}`;
-    const candidates = jobsByLegacyKey.get(key);
-    if (candidates) candidates.push(j);
-    else jobsByLegacyKey.set(key, [j]);
+    jobByKey.set(`${j.fileName}\u0001${j.hoster}`, j);
   }
   for (const file of files) {
     for (const result of file.results || []) {
-      const hasJobId = result.jobId !== undefined && result.jobId !== null && result.jobId !== '';
-      const candidates = hasJobId ? null : jobsByLegacyKey.get(`${file.name}\u0001${result.hoster}`);
-      const job = hasJobId ? jobById.get(result.jobId) : (candidates?.length === 1 ? candidates[0] : null);
+      const job = jobByKey.get(`${file.name}\u0001${result.hoster}`);
       if (!job) continue;
-      job.remoteCommitUncertain = window.UploadRecovery.resolveRemoteCommitUncertainty(job.remoteCommitUncertain, result);
-      job.historyPending = historyPersisted !== true;
       if (result.status === 'done') {
         job.status = 'done';
         job.result = {
@@ -4642,23 +4073,16 @@ function _setRollingUploadMetric(id, value) {
 
   const direction = numericValue > previousValue ? 'up' : 'down';
   const previousText = element.getAttribute('aria-label') || previousValue.toLocaleString(getUiLocale());
-  element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
-  element.dataset.numericValue = String(numericValue);
-  element.setAttribute('aria-label', nextText);
-  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
-    const settled = document.createElement('span');
-    settled.textContent = nextText;
-    element.replaceChildren(settled);
-    element.dataset.direction = 'none';
-    return;
-  }
   const outgoing = document.createElement('span');
   const incoming = document.createElement('span');
   outgoing.textContent = previousText;
   incoming.textContent = nextText;
   outgoing.className = 'upload-rolling-outgoing';
   incoming.className = 'upload-rolling-incoming';
+  element.querySelectorAll(':scope > span').forEach(span => span.getAnimations().forEach(animation => animation.cancel()));
+  element.dataset.numericValue = String(numericValue);
   element.dataset.direction = direction;
+  element.setAttribute('aria-label', nextText);
   element.replaceChildren(outgoing, incoming);
 
   const distance = direction === 'up' ? -1 : 1;
@@ -4764,8 +4188,8 @@ function updateStatusBar() {
   _setRollingUploadMetric('uploadTelemetryConnections', lastUploadStats.activeJobs || 0);
   _setRollingUploadMetric('uploadTelemetryRemaining', stats.remaining);
   _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
-  _setRollingUploadMetric('uploadTelemetryCompleted', stats.done);
-  _setRollingUploadMetric('uploadTelemetryFailed', stats.errors);
+  _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
+  _setRollingUploadMetric('uploadTelemetryFailed', Math.max(_sessionErrorCount, stats.errors));
   updateUploadSpeedDisplays();
   _setUploadTelemetryText('uploadTelemetryEta', etaSeconds > 0 ? formatTime(etaSeconds) : '--:--');
   updateUploadSidebarSummary(stats);
@@ -4779,13 +4203,37 @@ function renderHealthCheckResults(_results) {
 }
 
 let _appAlertResolve = null;
+let _appAlertReturnFocus = null;
+let _appAlertInertState = [];
+
+function _setAppAlertBackgroundInert(active) {
+  const modal = document.getElementById('appAlertModal');
+  if (!modal) return;
+  if (active) {
+    if (_appAlertInertState.length > 0) return;
+    _appAlertInertState = Array.from(document.body.children)
+      .filter(element => element !== modal && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    _appAlertInertState.forEach(({ element }) => { element.inert = true; });
+    return;
+  }
+  _appAlertInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  _appAlertInertState = [];
+}
 
 function closeAppAlert(result = false) {
   const modal = document.getElementById('appAlertModal');
   if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  _setAppAlertBackgroundInert(false);
   const resolve = _appAlertResolve;
   _appAlertResolve = null;
-  modalController.close(modal);
+  const returnFocus = _appAlertReturnFocus;
+  _appAlertReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
   if (resolve) resolve(result);
 }
 
@@ -4798,6 +4246,7 @@ function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelT
   const alternate = document.getElementById('appAlertAlternateBtn');
   if (!modal || !titleEl || !messageEl || !confirm || !cancel || !alternate) return Promise.resolve(false);
   if (_appAlertResolve) closeAppAlert(false);
+  _appAlertReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   titleEl.textContent = localizeUiText(title);
   messageEl.textContent = localizeUiText(String(message || ''));
   confirm.textContent = localizeUiText(confirmText);
@@ -4806,11 +4255,10 @@ function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelT
   cancel.hidden = !showCancel;
   alternate.textContent = localizeUiText(alternateText);
   alternate.hidden = !alternateText;
-  modalController.open(modal, {
-    initialFocus: () => showCancel ? cancel : confirm,
-    onEscape: () => closeAppAlert(false),
-    onBackdrop: () => closeAppAlert(false)
-  });
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  _setAppAlertBackgroundInert(true);
+  (showCancel ? cancel : confirm).focus();
   return new Promise(resolve => { _appAlertResolve = resolve; });
 }
 
@@ -4824,23 +4272,6 @@ function showAppConfirm({ message, title = 'Bestätigen', confirmText = 'Bestät
 
 function showAppChoice({ message, title, confirmText, alternateText, cancelText = 'Abbrechen' } = {}) {
   return showAppDialog({ message, title, confirmText, alternateText, cancelText, showCancel: true });
-}
-
-let _appAlertListenersReady = false;
-
-function setupAppAlertListeners() {
-  if (_appAlertListenersReady) return;
-  const confirm = document.getElementById('appAlertConfirmBtn');
-  const alternate = document.getElementById('appAlertAlternateBtn');
-  const cancel = document.getElementById('appAlertCancelBtn');
-  const close = document.getElementById('appAlertCloseBtn');
-  const modal = document.getElementById('appAlertModal');
-  if (!confirm || !alternate || !cancel || !close || !modal) return;
-  _appAlertListenersReady = true;
-  confirm.addEventListener('click', () => closeAppAlert(true));
-  alternate.addEventListener('click', () => closeAppAlert('alternate'));
-  cancel.addEventListener('click', () => closeAppAlert(false));
-  close.addEventListener('click', () => closeAppAlert(false));
 }
 
 async function executeHealthCheck(hosters, _mode, generations) {
@@ -4935,140 +4366,11 @@ async function _renderLogPathsList(el) {
       });
     });
   } catch (err) {
-    el.innerHTML = `<span class="hint">${escapeHtml(formatLocalizedError('Fehler', err))}</span>`;
+    el.innerHTML = `<span class="hint">Fehler: ${escapeHtml(err.message || String(err))}</span>`;
   }
-}
-
-function filenameFilterConditionRowHtml(condition = {}) {
-  const operator = condition.operator === 'notContains' ? 'notContains' : 'contains';
-  return `
-    <div class="filename-filter-condition" data-filename-filter-condition>
-      <div class="filename-filter-rule-field">
-        <span class="filename-filter-rule-label" data-filename-filter-value-label>Dateiname filtern</span>
-        <input type="text" class="key-input settings-autosave" data-filename-filter-value value="${escapeAttr(condition.value || '')}" placeholder="z. B. 720p" aria-label="Dateiname filtern">
-      </div>
-      <div class="filename-filter-rule-field">
-        <span class="filename-filter-rule-label" data-filename-filter-operator-label>Vergleich</span>
-        <select class="hs-input settings-autosave" data-filename-filter-operator aria-label="Dateinamen-Bedingung">
-          <option value="contains" ${operator === 'contains' ? 'selected' : ''}>enthält</option>
-          <option value="notContains" ${operator === 'notContains' ? 'selected' : ''}>enthält nicht</option>
-        </select>
-      </div>
-      <button type="button" class="btn btn-xs btn-danger" data-filename-filter-remove aria-label="Bedingung entfernen">Entfernen</button>
-    </div>`;
-}
-
-function readFilenameFilterSettings() {
-  const conditions = Array.from(document.querySelectorAll('[data-filename-filter-condition]')).map(row => ({
-    operator: row.querySelector('[data-filename-filter-operator]')?.value || 'contains',
-    value: row.querySelector('[data-filename-filter-value]')?.value || ''
-  }));
-  return window.FilenameFilter.normalizeFilenameFilter({
-    enabled: document.getElementById('filenameFilterEnabledInput')?.checked === true,
-    action: document.getElementById('filenameFilterActionInput')?.value,
-    matchMode: document.getElementById('filenameFilterMatchModeInput')?.value,
-    conditions
-  });
-}
-
-function syncFilenameFilterControls() {
-  const enabled = document.getElementById('filenameFilterEnabledInput')?.checked === true;
-  const panel = document.getElementById('filenameFilterBuilder');
-  if (panel) panel.classList.toggle('disabled', !enabled);
-  const rows = Array.from(document.querySelectorAll('[data-filename-filter-condition]'));
-  document.querySelectorAll('#filenameFilterBuilder select, #filenameFilterBuilder input, #addFilenameFilterConditionBtn').forEach(control => {
-    control.disabled = !enabled;
-  });
-  rows.forEach(row => {
-    const remove = row.querySelector('[data-filename-filter-remove]');
-    if (remove) remove.disabled = !enabled || rows.length === 1;
-  });
-}
-
-function wireFilenameFilterConditionRow(row) {
-  if (!row || row.dataset.wired === 'true') return;
-  row.dataset.wired = 'true';
-  row.querySelectorAll('.settings-autosave').forEach(control => {
-    const eventName = control.tagName === 'SELECT' ? 'change' : 'input';
-    control.addEventListener(eventName, markSettingsDirty);
-  });
-  row.querySelector('[data-filename-filter-remove]')?.addEventListener('click', () => {
-    row.remove();
-    syncFilenameFilterControls();
-    markSettingsDirty();
-  });
-}
-
-function appendFilenameFilterCondition(condition = {}) {
-  const list = document.getElementById('filenameFilterConditions');
-  if (!list) return;
-  const template = document.createElement('template');
-  template.innerHTML = filenameFilterConditionRowHtml(condition).trim();
-  const row = template.content.firstElementChild;
-  list.appendChild(row);
-  wireFilenameFilterConditionRow(row);
-  syncFilenameFilterControls();
-  row.querySelector('[data-filename-filter-value]')?.focus();
-  markSettingsDirty();
-}
-
-let uploadScheduleStatusTimer = null;
-
-function readUploadScheduleSettings(fallback = config.globalSettings?.uploadSchedule) {
-  if (!window.UploadSchedule) return fallback || { enabled: false };
-  const enabledInput = document.getElementById('uploadScheduleEnabledInput');
-  if (!enabledInput) return window.UploadSchedule.normalizeUploadSchedule(fallback);
-  return window.UploadSchedule.normalizeUploadSchedule({
-    enabled: enabledInput.checked,
-    weekdays: Array.from(document.querySelectorAll('[data-upload-schedule-day]:checked')).map(input => Number(input.value)),
-    start: document.getElementById('uploadScheduleStartInput')?.value,
-    end: document.getElementById('uploadScheduleEndInput')?.value
-  });
-}
-
-function syncUploadScheduleControls() {
-  if (!window.UploadSchedule) return;
-  const schedule = readUploadScheduleSettings();
-  const state = window.UploadSchedule.evaluateUploadSchedule(schedule, new Date());
-  const enabled = schedule.enabled;
-  document.querySelectorAll('[data-upload-schedule-dependent]').forEach(control => {
-    control.disabled = !enabled;
-  });
-  const status = document.getElementById('uploadScheduleStatus');
-  const badge = document.getElementById('uploadScheduleStatusBadge');
-  if (!status || !badge) return;
-  let text;
-  let badgeText;
-  let stateClass = '';
-  if (!enabled) {
-    text = localizeUiText('Deaktiviert. Neue Uploads starten sofort.');
-    badgeText = localizeUiText('Inaktiv');
-  } else if (!state.valid) {
-    text = state.reason === 'weekdays'
-      ? localizeUiText('Ungültig. Wähle mindestens einen Wochentag aus.')
-      : state.reason === 'equal-times'
-        ? localizeUiText('Ungültig. Start und Ende müssen unterschiedlich sein.')
-        : localizeUiText('Ungültig. Prüfe Start- und Endzeit.');
-    badgeText = localizeUiText('Ungültig');
-    stateClass = ' warning';
-  } else if (state.allowed) {
-    text = localizeUiText('Geöffnet. Neue Uploads dürfen starten.');
-    badgeText = localizeUiText('Geöffnet');
-    stateClass = ' active';
-  } else {
-    const nextStart = state.nextStart ? formatDateTime(state.nextStart.toISOString()) : '—';
-    text = `${localizeUiText('Geschlossen. Nächster erlaubter Start:')} ${nextStart}`;
-    badgeText = localizeUiText('Geschlossen');
-    stateClass = ' warning';
-  }
-  status.textContent = text;
-  badge.textContent = badgeText;
-  badge.className = `panel-status${stateClass}`;
 }
 
 function renderSettings() {
-  clearInterval(uploadScheduleStatusTimer);
-  uploadScheduleStatusTimer = null;
   const container = document.getElementById('settingsHosters');
   container.innerHTML = '';
 
@@ -5076,16 +4378,11 @@ function renderSettings() {
   const configuredAccounts = getAvailableHosters();
   const fm = globalSettings.folderMonitor || {};
   const remoteSettings = globalSettings.remote || {};
-  const filenameFilter = window.FilenameFilter.normalizeFilenameFilter(globalSettings.filenameFilter);
-  const uploadSchedule = window.UploadSchedule.normalizeUploadSchedule(globalSettings.uploadSchedule);
-  const filenameFilterConditions = filenameFilter.conditions.length > 0
-    ? filenameFilter.conditions
-    : [{ operator: 'contains', value: '' }];
 
   const pageDefinitions = [
     { id: 'allgemein', label: 'Allgemein', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
-    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster dateiname filename filter enthält contains ausschließen exclude' },
-    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen zeitfenster schedule wochentage weekdays start ende ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
+    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
+    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
     { id: 'remote', label: 'Fernsteuerung', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
@@ -5216,41 +4513,6 @@ function renderSettings() {
         </div>
         <input type="checkbox" class="settings-autosave" id="autoStartRestoredQueueInput" ${globalSettings.autoStartRestoredQueue ? 'checked' : ''}>
       </div>
-      <div class="settings-section-label">Dateinamenfilter</div>
-      <div class="filename-filter-panel">
-        <div class="settings-option filename-filter-toggle">
-          <div class="settings-option-copy">
-            <label for="filenameFilterEnabledInput">Dateinamen beim Hinzufügen filtern</label>
-            <span class="settings-option-description">Prüft neue Dateien aus Auswahl, Ordnern, Drag-and-drop und Ordnerüberwachung, bevor sie in die Upload-Liste gelangen.</span>
-          </div>
-          <input type="checkbox" class="settings-autosave" id="filenameFilterEnabledInput" ${filenameFilter.enabled ? 'checked' : ''}>
-        </div>
-        <div class="filename-filter-builder" id="filenameFilterBuilder">
-          <div class="filename-filter-conditions" id="filenameFilterConditions">
-            ${filenameFilterConditions.map(filenameFilterConditionRowHtml).join('')}
-          </div>
-          <div class="filename-filter-footer">
-            <button type="button" class="btn btn-xs btn-secondary" id="addFilenameFilterConditionBtn">+ Bedingung</button>
-            <span class="hint">Groß- und Kleinschreibung werden ignoriert. Leere Bedingungen werden nicht gespeichert.</span>
-          </div>
-          <div class="filename-filter-policy">
-            <div class="filename-filter-field">
-              <label for="filenameFilterMatchModeInput">Bedingungen</label>
-              <select class="hs-input settings-autosave" id="filenameFilterMatchModeInput">
-                <option value="all" ${filenameFilter.matchMode === 'all' ? 'selected' : ''}>alle müssen passen</option>
-                <option value="any" ${filenameFilter.matchMode === 'any' ? 'selected' : ''}>mindestens eine muss passen</option>
-              </select>
-            </div>
-            <div class="filename-filter-field">
-              <label for="filenameFilterActionInput">Wenn passend</label>
-              <select class="hs-input settings-autosave" id="filenameFilterActionInput">
-                <option value="include" ${filenameFilter.action === 'include' ? 'selected' : ''}>Dateien hinzufügen</option>
-                <option value="exclude" ${filenameFilter.action === 'exclude' ? 'selected' : ''}>Dateien nicht hinzufügen</option>
-              </select>
-            </div>
-          </div>
-        </div>
-      </div>
       <div class="settings-section-label">Quelldateien</div>
       <div class="settings-option source-delete-option">
         <div class="settings-option-copy">
@@ -5263,7 +4525,7 @@ function renderSettings() {
   `;
 
   pages.automatik.innerHTML = `
-      ${pageHeader('Automatik', 'Wiederholungen, Upload-Zeitfenster und überwachte Ordner für unbeaufsichtigte Uploads.')}
+      ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
       <div class="settings-row automation-retry-row">
         <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
@@ -5278,31 +4540,6 @@ function renderSettings() {
           <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
           <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
         </div>
-      </div>
-      <div class="settings-section-label">Upload-Zeitfenster <span class="panel-status" id="uploadScheduleStatusBadge">Inaktiv</span></div>
-      <div class="upload-schedule-panel">
-        <div class="settings-option upload-schedule-toggle">
-          <div class="settings-option-copy">
-            <label for="uploadScheduleEnabledInput">Neue Uploads nur im Zeitfenster starten</label>
-            <span class="settings-option-description">Laufende Uploads dürfen fertig werden. Wartende Uploads starten automatisch bei der nächsten Öffnung.</span>
-          </div>
-          <input type="checkbox" class="settings-autosave" id="uploadScheduleEnabledInput" data-upload-schedule-control ${uploadSchedule.enabled ? 'checked' : ''}>
-        </div>
-        <div class="upload-schedule-days" role="group" aria-label="Erlaubte Wochentage">
-          <label><input type="checkbox" class="settings-autosave" value="1" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(1) ? 'checked' : ''}><span>Mo</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="2" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(2) ? 'checked' : ''}><span>Di</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="3" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(3) ? 'checked' : ''}><span>Mi</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="4" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(4) ? 'checked' : ''}><span>Do</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="5" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(5) ? 'checked' : ''}><span>Fr</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="6" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(6) ? 'checked' : ''}><span>Sa</span></label>
-          <label><input type="checkbox" class="settings-autosave" value="0" data-upload-schedule-day data-upload-schedule-control data-upload-schedule-dependent ${uploadSchedule.weekdays.includes(0) ? 'checked' : ''}><span>So</span></label>
-        </div>
-        <div class="upload-schedule-times">
-          <label for="uploadScheduleStartInput"><span>Start</span><input type="time" class="hs-input settings-autosave" id="uploadScheduleStartInput" data-upload-schedule-control data-upload-schedule-dependent value="${escapeAttr(uploadSchedule.start)}"></label>
-          <label for="uploadScheduleEndInput"><span>Ende</span><input type="time" class="hs-input settings-autosave" id="uploadScheduleEndInput" data-upload-schedule-control data-upload-schedule-dependent value="${escapeAttr(uploadSchedule.end)}"></label>
-          <span class="hint">Lokale Systemzeit · Zeitfenster über Mitternacht werden unterstützt</span>
-        </div>
-        <p class="upload-schedule-status" id="uploadScheduleStatus" aria-live="polite"></p>
       </div>
       <div class="settings-section-label">Ordnerüberwachung <span class="panel-status${fm.enabled && fm.folderPath ? ' active' : ''}" id="folderMonitorStatusBadge">${fm.enabled && fm.folderPath ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-row">
@@ -5459,9 +4696,24 @@ function renderSettings() {
       </div>
       <div class="settings-row">
         <label>Sichtbarkeit</label>
-        <output class="diagnostics-bind-address" id="diagBindAddress">127.0.0.1</output>
+        <select class="hs-input settings-autosave" id="diagBindModeInput" style="width:auto">
+          <option value="local">Nur lokal (127.0.0.1) — Tunnel/VPN</option>
+          <option value="network">Im Netzwerk (0.0.0.0) — Allowlist nötig</option>
+        </select>
       </div>
-      <div class="settings-row"><span class="hint" id="diagBindHint">Bindet nur an <code>127.0.0.1</code>. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH).</span></div>
+      <div class="settings-row">
+        <label>Adresse für den Code</label>
+        <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1">
+      </div>
+      <div class="settings-row" id="diagSuggestRow" style="display:none">
+        <label></label>
+        <div id="diagSuggestChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+      <div class="settings-row" id="diagAllowlistRow" style="display:none;align-items:flex-start">
+        <label>Allowlist (IP/CIDR, eine pro Zeile)</label>
+        <textarea class="hs-input settings-autosave" id="diagAllowlistInput" rows="3" style="flex:1;font-family:monospace" placeholder="100.64.0.0/10&#10;203.0.113.5"></textarea>
+      </div>
+      <div class="settings-row"><span class="hint" id="diagBindHint"></span></div>
       <div class="settings-row">
         <label>Verbindungs-Code</label>
         <input type="text" class="key-input" id="diagCodeInput" value="" readonly style="flex:1" placeholder="(aktivieren zum Erzeugen)">
@@ -5576,7 +4828,7 @@ function renderSettings() {
     if (!activeButton || activeButton.hidden || !content.querySelector('.settings-subpage.active')) {
       activateSettingsPage((activeButton && !activeButton.hidden ? activeButton : visibleButtons[0]).dataset.settingsPage);
     } else {
-      _syncSidebarIndicator(activeButton);
+      _syncSidebarIndicator(activeButton, true);
     }
   });
 
@@ -5597,7 +4849,7 @@ function renderSettings() {
           ? `Test erfolgreich gesendet (HTTP ${res.status}).`
           : `Test fehlgeschlagen: ${(res && (res.error || 'HTTP ' + res.status)) || 'unbekannt'}`;
       } catch (err) {
-        if (hint) hint.textContent = formatLocalizedError('Test fehlgeschlagen', err);
+        if (hint) hint.textContent = `Test fehlgeschlagen: ${err.message || err}`;
       } finally {
         testWebhookBtn.disabled = false;
         testWebhookBtn.textContent = prev;
@@ -5624,10 +4876,10 @@ function renderSettings() {
         } else if (res && res.canceled) {
           if (hint) hint.textContent = 'Abgebrochen.';
         } else {
-          if (hint) hint.textContent = formatLocalizedError('Fehler', res?.error);
+          if (hint) hint.textContent = `Fehler: ${(res && res.error) || 'unbekannt'}`;
         }
       } catch (err) {
-        if (hint) hint.textContent = formatLocalizedError('Fehler', err);
+        if (hint) hint.textContent = `Fehler: ${err.message || err}`;
       } finally {
         sbBtn.disabled = false;
         sbBtn.textContent = prevText;
@@ -5687,6 +4939,13 @@ function renderSettings() {
   (function wireDiagnostics() {
     const enabledEl = document.getElementById('diagEnabledInput');
     const portEl = document.getElementById('diagPortInput');
+    const modeEl = document.getElementById('diagBindModeInput');
+    const publicHostEl = document.getElementById('diagPublicHostInput');
+    const allowlistEl = document.getElementById('diagAllowlistInput');
+    const allowlistRow = document.getElementById('diagAllowlistRow');
+    const suggestRow = document.getElementById('diagSuggestRow');
+    const suggestChips = document.getElementById('diagSuggestChips');
+    const bindHintEl = document.getElementById('diagBindHint');
     const codeEl = document.getElementById('diagCodeInput');
     const issuedEl = document.getElementById('diagCodeIssued');
     const badgeEl = document.getElementById('diagStatusBadge');
@@ -5697,12 +4956,40 @@ function renderSettings() {
       if (!ts) return '';
       try { return 'Code erstellt: ' + new Date(ts).toLocaleString(getUiLocale()); } catch { return ''; }
     };
+    const parseAllowlist = () => allowlistEl.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const renderModeUi = (suggestedHosts) => {
+      const network = modeEl.value === 'network';
+      allowlistRow.style.display = network ? '' : 'none';
+      bindHintEl.innerHTML = network
+        ? 'Bindet an <code>0.0.0.0</code>. Nur IPs/CIDRs aus der Allowlist dürfen verbinden (Loopback immer) — zusätzlich zum Token. Über Tailscale: trage deinen Tailnet-Bereich ein (z.B. <code>100.64.0.0/10</code>) und die Tailscale-IP/MagicDNS oben als Code-Adresse. Transport ist plaintext über den Tunnel — Tailscale/WireGuard verschlüsselt.'
+        : 'Bindet nur an <code>127.0.0.1</code>. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH) — die sicherste Variante.';
+      const hosts = Array.isArray(suggestedHosts) ? suggestedHosts : [];
+      if (hosts.length) {
+        suggestRow.style.display = '';
+        suggestChips.innerHTML = '';
+        for (const h of hosts) {
+          const b = document.createElement('button');
+          b.className = 'btn btn-xs btn-secondary';
+          b.textContent = h;
+          b.addEventListener('click', () => { diagnosticsEditedFields.add(publicHostEl.id); publicHostEl.value = h; markSettingsDirty(); });
+          suggestChips.appendChild(b);
+        }
+      } else {
+        suggestRow.style.display = 'none';
+      }
+    };
+    let lastSuggested = [];
     const applySettings = (s) => {
       if (!s) return;
       if (!diagnosticsEditedFields.has(enabledEl.id)) enabledEl.checked = !!s.enabled;
       if (!diagnosticsEditedFields.has(portEl.id)) portEl.value = s.port || 9110;
+      if (!diagnosticsEditedFields.has(modeEl.id)) modeEl.value = s.bindMode === 'network' ? 'network' : 'local';
+      if (!diagnosticsEditedFields.has(publicHostEl.id)) publicHostEl.value = s.publicHost || '';
+      if (!diagnosticsEditedFields.has(allowlistEl.id)) allowlistEl.value = Array.isArray(s.allowlist) ? s.allowlist.join('\n') : '';
+      lastSuggested = Array.isArray(s.suggestedHosts) ? s.suggestedHosts : [];
       codeEl.value = s.code || '';
       issuedEl.textContent = fmtIssued(s.codeIssuedAt);
+      renderModeUi(lastSuggested);
       if (badgeEl) {
         badgeEl.textContent = enabledEl.checked ? 'Aktiv' : 'Inaktiv';
         badgeEl.className = 'panel-status' + (enabledEl.checked ? ' active' : '');
@@ -5714,7 +5001,8 @@ function renderSettings() {
         if (!el || !st) return;
         if (st.running) {
           const last = st.lastAccess ? new Date(st.lastAccess).toLocaleString(getUiLocale()) : '—';
-          el.textContent = `Aktiv auf 127.0.0.1:${st.port} (nur lokal) — ${st.clientCount} ${st.clientCount === 1 ? 'Client' : 'Clients'} — Letzter Zugriff: ${last}`;
+          const scope = st.bindMode === 'network' ? `Netzwerk (Allowlist: ${st.allowlistCount})` : 'nur lokal';
+          el.textContent = `Aktiv auf ${st.bindAddress}:${st.port} (${scope}) — ${st.clientCount} ${st.clientCount === 1 ? 'Client' : 'Clients'} — Letzter Zugriff: ${last}`;
           el.style.color = '#10b981';
         } else {
           el.textContent = 'Nicht aktiv';
@@ -5722,8 +5010,16 @@ function renderSettings() {
         }
       }).catch(() => {});
     };
+    const validate = () => {
+      const allowlist = parseAllowlist();
+      if (enabledEl.checked && modeEl.value === 'network' && allowlist.length === 0) {
+        if (bindHintEl) { bindHintEl.innerHTML = '<span style="color:#f59e0b">Netzwerkmodus braucht mindestens eine IP/CIDR in der Allowlist — sonst bleibt es fail-closed auf Loopback.</span>'; }
+        return false;
+      }
+      return true;
+    };
 
-    [enabledEl, portEl].forEach(element => {
+    [enabledEl, portEl, modeEl, publicHostEl, allowlistEl].forEach(element => {
       const markEdited = () => diagnosticsEditedFields.add(element.id);
       element.addEventListener('input', markEdited);
       element.addEventListener('change', markEdited);
@@ -5731,8 +5027,11 @@ function renderSettings() {
     window.api.diagnosticsGetSettings().then(applySettings).catch(() => {});
     refreshStatus();
 
-    enabledEl.addEventListener('change', markSettingsDirty);
-    portEl.addEventListener('change', markSettingsDirty);
+    enabledEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    portEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    modeEl.addEventListener('change', () => { renderModeUi(lastSuggested); if (validate()) markSettingsDirty(); });
+    publicHostEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
+    allowlistEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
     document.getElementById('diagCopyCodeBtn').addEventListener('click', async () => {
       if (!codeEl.value) return;
       await window.api.copyToClipboard(codeEl.value);
@@ -5775,16 +5074,6 @@ function renderSettings() {
   document.getElementById('chooseLogFilePathBtn')?.addEventListener('click', chooseLogFilePath);
   document.getElementById('openLogFolderBtn')?.addEventListener('click', () => window.api.openLogFolder());
   document.getElementById('manualUpdateCheckBtn')?.addEventListener('click', requestUpdateCheck);
-  container.querySelectorAll('[data-filename-filter-condition]').forEach(wireFilenameFilterConditionRow);
-  document.getElementById('addFilenameFilterConditionBtn')?.addEventListener('click', () => appendFilenameFilterCondition());
-  document.getElementById('filenameFilterEnabledInput')?.addEventListener('change', syncFilenameFilterControls);
-  syncFilenameFilterControls();
-  container.querySelectorAll('[data-upload-schedule-control]').forEach(control => {
-    const eventName = control.type === 'time' ? 'input' : 'change';
-    control.addEventListener(eventName, syncUploadScheduleControls);
-  });
-  syncUploadScheduleControls();
-  uploadScheduleStatusTimer = setInterval(syncUploadScheduleControls, 30000);
   _syncHeaderUpdateState();
   container.querySelectorAll('.settings-autosave').forEach((input) => {
     const eventName = input.type === 'checkbox' || input.tagName === 'SELECT' ? 'change' : 'input';
@@ -5792,7 +5081,6 @@ function renderSettings() {
       if (input.id === 'languageInput') {
         setUiLanguage(input.value);
         syncLanguagePicker(input.value);
-        syncUploadScheduleControls();
       }
       if (input.id === 'deleteSourceAfterSuccessfulUploadInput' && input.checked) {
         const confirmed = await showAppConfirm({
@@ -5904,16 +5192,6 @@ async function performSaveSettings(options = {}) {
   const cur = config.globalSettings || {};
   const curFm = cur.folderMonitor || {};
   const curRemote = cur.remote || {};
-  const uploadSchedule = readUploadScheduleSettings(cur.uploadSchedule);
-  const uploadScheduleState = window.UploadSchedule.evaluateUploadSchedule(uploadSchedule, new Date());
-  if (uploadSchedule.enabled && !uploadScheduleState.valid) {
-    const message = uploadScheduleState.reason === 'weekdays'
-      ? 'Wähle mindestens einen Wochentag für das Upload-Zeitfenster aus.'
-      : uploadScheduleState.reason === 'equal-times'
-        ? 'Start und Ende des Upload-Zeitfensters müssen unterschiedlich sein.'
-        : 'Prüfe Start und Ende des Upload-Zeitfensters.';
-    throw new Error(localizeUiText(message));
-  }
   const elTxt = (id, fb) => { const el = document.getElementById(id); return el ? el.value : fb; };
   const elChk = (id, fb) => { const el = document.getElementById(id); return el ? !!el.checked : fb; };
   const elInt = (id, curVal, dflt, lo, hi) => {
@@ -5942,7 +5220,6 @@ async function performSaveSettings(options = {}) {
     scaleParallelUploads: elChk('scaleParallelUploadsInput', !!cur.scaleParallelUploads),
     removeFromQueueOnDone: elChk('removeFromQueueOnDoneInput', !!cur.removeFromQueueOnDone),
     deleteSourceAfterSuccessfulUpload: elChk('deleteSourceAfterSuccessfulUploadInput', !!cur.deleteSourceAfterSuccessfulUpload),
-    filenameFilter: readFilenameFilterSettings(),
     showDropTarget: elChk('showDropTargetInput', !!cur.showDropTarget),
     globalMaxSpeedKbs: (() => {
       const el = document.getElementById('globalMaxSpeedMbsInput');
@@ -5954,7 +5231,6 @@ async function performSaveSettings(options = {}) {
     webhookMention: elTxt('webhookMentionInput', cur.webhookMention || '').trim(),
     autoRetryRounds: elInt('autoRetryRoundsInput', cur.autoRetryRounds ?? 0, 0, 0, 5),
     autoRetryDelayMin: elInt('autoRetryDelayMinInput', cur.autoRetryDelayMin ?? 5, 5, 1, 120),
-    uploadSchedule,
     folderMonitor: {
       ...curFm,
       enabled: elChk('fmEnabledInput', !!curFm.enabled),
@@ -6016,9 +5292,9 @@ async function performSaveSettings(options = {}) {
     saves.push(saveDiagnosticsSettingsTracked({
       enabled: diagnosticsEnabled.checked,
       port: Math.min(65535, Math.max(1024, parseInt(document.getElementById('diagPortInput')?.value, 10) || 9110)),
-      bindMode: 'local',
-      publicHost: '127.0.0.1',
-      allowlist: []
+      bindMode: document.getElementById('diagBindModeInput')?.value === 'network' ? 'network' : 'local',
+      publicHost: document.getElementById('diagPublicHostInput')?.value.trim() || '',
+      allowlist: (document.getElementById('diagAllowlistInput')?.value || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean)
     }));
   }
   await Promise.all(saves);
@@ -6117,11 +5393,7 @@ function _buildAccountCardHtml(name, account, idx) {
   // disambiguator for accounts that otherwise look identical (e.g. two byse
   // API-key accounts where you can't tell what's what from the masked key).
   const subtitleText = (userLabel ? `Label: ${userLabel} • ` : '') + credLabel;
-  const checkedLabel = uiLocalizer.getLanguage() === 'de' ? 'geprüft' : 'checked';
-  const checkedText = st.checkedAt ? ` • ${checkedLabel} ${new Date(st.checkedAt).toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit' })}` : '';
-  const statusMessage = st.message && !isDisabled
-    ? (['error', 'warn', 'otp_required'].includes(st.status) ? getLocalizedErrorDetail(st.message) : localizeUiText(st.message))
-    : '';
+  const checkedText = st.checkedAt ? ` • geprüft ${new Date(st.checkedAt).toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit' })}` : '';
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
 
@@ -6141,7 +5413,7 @@ function _buildAccountCardHtml(name, account, idx) {
       <div class="account-card-drag-handle" role="button" tabindex="0" aria-label="Priorität ändern. Alt und Pfeil nach oben oder unten verwenden" title="Ziehen oder Alt und Pfeiltasten zum Sortieren">&#9776;</div>
       <div class="account-card-info">
         <div class="account-card-title">${escapeHtml(getAccountDisplayName(name, account))} <span class="account-priority-badge">${priorityLabel}</span> ${sessionPausedBadge}</div>
-        <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${statusMessage ? ` • ${escapeHtml(statusMessage)}` : ''}${checkedText}</div>
+        <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}${checkedText}</div>
         ${otpAction}
       </div>
       <span class="account-status status-${statusClass}">
@@ -6176,7 +5448,6 @@ function updateAccountCard(accountId) {
   _refreshHosterGroupHeader(found.name);
   updateAccountSidebarSummary();
   _applyAccountSidebarFilter();
-  renderHosterHealthOverview();
 }
 
 function _refreshHosterGroupHeader(name) {
@@ -6211,56 +5482,6 @@ function _refreshHosterGroupHeader(name) {
 
 let _accountListenersBound = false;
 
-function renderHosterHealthOverview() {
-  const body = document.getElementById('hosterHealthBody');
-  if (!body || !window.Stats?.summarizeHosterHealth) return;
-  if (window._historyForStats === undefined) {
-    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Wird geladen…'))}</td></tr>`;
-    return;
-  }
-  if (window._historyForStats === null) {
-    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Verlauf nicht verfügbar.'))}</td></tr>`;
-    return;
-  }
-  const summary = window.Stats.summarizeHosterHealth(window._historyForStats, {
-    now: new Date(),
-    hosters: config.hosters,
-    accountStatuses,
-    sessionFailedKeys: _sessionFailedKeys
-  });
-  const names = [...HOSTERS, ...Object.keys(summary).filter(name => !HOSTERS.includes(name))]
-    .filter(name => summary[name] && (summary[name].sampleSize > 0 || summary[name].configuredAccounts > 0));
-  if (names.length === 0) {
-    body.innerHTML = `<tr><td colspan="8" data-hoster-health-empty>${escapeHtml(localizeUiText('Noch keine Hoster-Daten.'))}</td></tr>`;
-    return;
-  }
-  body.innerHTML = names.map(name => {
-    const row = summary[name];
-    const rate = row.successRate === null ? localizeUiText('Nicht geprüft') : `${Math.round(row.successRate * 100)} %`;
-    const throughput = row.effectiveBytesPerSecond === null
-      ? localizeUiText('Nicht geprüft')
-      : formatSpeed(row.effectiveBytesPerSecond / 1024);
-    const lastSuccess = row.lastSuccessAt ? formatDateTime(row.lastSuccessAt).text : localizeUiText('Nie');
-    let accounts = '—';
-    if (row.configuredAccounts > 0) {
-      if (row.accountProblems > 0) accounts = String(row.accountProblems);
-      else if (row.checkingAccounts > 0) accounts = localizeUiText('Prüfung läuft');
-      else if (row.uncheckedAccounts > 0) accounts = localizeUiText('Nicht geprüft');
-      else accounts = '0';
-    }
-    return `<tr data-hoster-health-row="${escapeAttr(name)}">
-      <th scope="row">${escapeHtml(getHosterLabel(name))}</th>
-      <td data-health="sample">${row.sampleSize}</td>
-      <td data-health="outcomes">${row.successful} / ${row.failed} / ${row.skipped}</td>
-      <td data-health="rate">${escapeHtml(rate)}</td>
-      <td data-health="throughput">${escapeHtml(throughput)}</td>
-      <td data-health="last-success">${escapeHtml(lastSuccess)}</td>
-      <td data-health="recent-failures">${row.failuresLast7Days}</td>
-      <td data-health="accounts">${escapeHtml(accounts)}</td>
-    </tr>`;
-  }).join('');
-}
-
 function renderAccounts() {
   const container = document.getElementById('accountsList');
   if (!container) return;
@@ -6268,7 +5489,6 @@ function renderAccounts() {
 
   const allAccounts = getAllAccountsFlat();
   updateAccountSidebarSummary(allAccounts);
-  renderHosterHealthOverview();
   const runCheckBtn = document.getElementById('accountsRunHealthCheckBtn');
   if (runCheckBtn) runCheckBtn.disabled = healthCheckRunning;
 
@@ -6446,17 +5666,17 @@ function _buildHosterSettingsHtml(name) {
           <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeMb" value="${hs.maxSizeMb ?? 0}" min="0">
           <span class="hint">0 = unbegrenzt</span>
         </div>
-        <div class="settings-row account-hoster-option-row">
+        <div class="settings-row">
           <label for="${fieldPrefix}-log">Links in Log schreiben</label>
           <input id="${fieldPrefix}-log" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="logToFile" ${hs.logToFile !== false ? 'checked' : ''}>
           <span class="hint">Erfolgreiche Links in fileuploader.log.</span>
         </div>
-        <div class="settings-row account-hoster-option-row">
+        <div class="settings-row">
           <label for="${fieldPrefix}-rotate">Accounts rotieren</label>
           <input id="${fieldPrefix}-rotate" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="rotateAccounts" ${hs.rotateAccounts === true ? 'checked' : ''}>
-          <span class="hint">Verteilt Dateien abwechselnd auf alle aktiven Accounts dieses Hosters. Bei nur einem Account hat die Option keinen Effekt.</span>
+          <span class="hint">Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.</span>
         </div>
-        <div class="settings-row account-hoster-option-row">
+        <div class="settings-row">
           <label for="${fieldPrefix}-size-memo">Größen-Limit merken</label>
           <input id="${fieldPrefix}-size-memo" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
           <span class="hint">Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.</span>
@@ -6733,9 +5953,9 @@ async function checkSingleAccount(accountId) {
     const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId }] });
     const rows = result && Array.isArray(result.results) ? result.results : [];
     const row = rows.find(r => r.accountId === accountId);
-    if (row) nextStatus = { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || result.checkedAt || new Date().toISOString() };
+    if (row) nextStatus = { status: row.status || 'error', message: row.message || '' };
   } catch (err) {
-    nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
+    nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen' };
   } finally {
     healthCheckRunning = false;
   }
@@ -6776,10 +5996,10 @@ async function submitAccountOtp(accountId) {
       ? result.results.find(item => item.accountId === accountId)
       : null;
     nextStatus = row
-      ? { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || result.checkedAt || new Date().toISOString() }
-      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt: result?.checkedAt || new Date().toISOString() };
+      ? { status: row.status || 'error', message: row.message || '' }
+      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten' };
   } catch (err) {
-    nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
+    nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen' };
   } finally {
     healthCheckRunning = false;
   }
@@ -6812,7 +6032,7 @@ function getCredsFieldsHtml(authType, account, hoster) {
       <div class="settings-row">
         <label for="accField_password">Passwort</label>
         <input type="password" class="key-input" id="accField_password" name="password" autocomplete="current-password" value="${escapeAttr(account.password || '')}" placeholder="Passwort">
-        <button class="toggle-vis" type="button" title="Passwort anzeigen" aria-label="Passwort anzeigen" aria-pressed="false">👁️</button>
+        <button class="toggle-vis" type="button" title="Passwort anzeigen" aria-label="Passwort anzeigen" aria-pressed="false">&#128065;</button>
       </div>`;
   }
   // API key
@@ -6820,7 +6040,7 @@ function getCredsFieldsHtml(authType, account, hoster) {
     <div class="settings-row">
       <label for="accField_apiKey">API-Key</label>
       <input type="password" class="key-input" id="accField_apiKey" name="apiKey" autocomplete="off" spellcheck="false" value="${escapeAttr(account.apiKey || '')}" placeholder="API-Key">
-      <button class="toggle-vis" type="button" title="API-Key anzeigen" aria-label="API-Key anzeigen" aria-pressed="false">👁️</button>
+      <button class="toggle-vis" type="button" title="API-Key anzeigen" aria-label="API-Key anzeigen" aria-pressed="false">&#128065;</button>
     </div>`;
 }
 
@@ -6838,7 +6058,10 @@ function wireCredentialVisibilityButtons(container) {
   });
 }
 
+let _accountModalReturnFocus = null;
+
 function openAccountModal(editAccountId) {
+  _accountModalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   editingAccountId = editAccountId || null;
   _resetAccountModalState();
   const modal = document.getElementById('accountModal');
@@ -6882,56 +6105,26 @@ function openAccountModal(editAccountId) {
 
   _wireCredFieldInvalidation();
 
-  modalController.open(modal, {
-    initialFocus: () => editingAccountId ? document.getElementById('accField_label') : hosterSelect,
-    fallbackFocus: '#addAccountBtn',
-    onEscape: closeAccountModal,
-    onBackdrop: closeAccountModal
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => {
+    const firstControl = editingAccountId
+      ? document.getElementById('accField_label')
+      : hosterSelect;
+    if (firstControl) firstControl.focus();
   });
-  _openAccountModalMotion(modal);
-}
-
-let _accountModalMotionToken = 0;
-
-function _openAccountModalMotion(modal) {
-  const card = modal.querySelector('.modal-card');
-  const token = ++_accountModalMotionToken;
-  modal.classList.remove('account-modal-opening', 'account-modal-closing');
-  if (!card) return;
-  void card.offsetHeight;
-  modal.classList.add('account-modal-opening');
-  const finish = event => {
-    if (event && event.target !== card) return;
-    card.removeEventListener('animationend', finish);
-    if (Object.is(token, _accountModalMotionToken)) modal.classList.remove('account-modal-opening');
-  };
-  card.addEventListener('animationend', finish);
-  window.setTimeout(() => finish(), 440);
 }
 
 function closeAccountModal() {
-  const modal = document.getElementById('accountModal');
-  if (!modalController.isOpen(modal) || modal.classList.contains('account-modal-closing')) return;
-  const card = modal.querySelector('.modal-card');
-  const token = ++_accountModalMotionToken;
-  modal.classList.remove('account-modal-opening', 'account-modal-closing');
-  if (card) void card.offsetHeight;
-  modalController.close(modal, { fallbackFocus: '#addAccountBtn' });
-  modal.style.display = 'flex';
-  modal.inert = true;
-  modal.classList.add('account-modal-closing');
+  document.getElementById('accountModal').style.display = 'none';
   _hideOtpField();
   editingAccountId = null;
   _resetAccountModalState();
-  const finish = event => {
-    if (event && event.target !== card) return;
-    if (card) card.removeEventListener('animationend', finish);
-    if (!Object.is(token, _accountModalMotionToken)) return;
-    modal.classList.remove('account-modal-closing');
-    modal.style.display = 'none';
-  };
-  if (card) card.addEventListener('animationend', finish);
-  window.setTimeout(() => finish(), 380);
+  const returnFocus = _accountModalReturnFocus;
+  _accountModalReturnFocus = null;
+  const focusTarget = returnFocus && returnFocus.isConnected
+    ? returnFocus
+    : document.getElementById('addAccountBtn');
+  if (focusTarget) focusTarget.focus();
 }
 
 function openDeleteAccountModal(accountId) {
@@ -6941,16 +6134,11 @@ function openDeleteAccountModal(accountId) {
   const msg = document.getElementById('deleteAccountMessage');
   msg.textContent = `Account "${getAccountDisplayName(found.name, found.account)}" wirklich löschen?`;
   modal.dataset.accountId = accountId;
-  modalController.open(modal, {
-    initialFocus: '#cancelDeleteBtn',
-    fallbackFocus: '#addAccountBtn',
-    onEscape: closeDeleteModal,
-    onBackdrop: closeDeleteModal
-  });
+  modal.style.display = 'flex';
 }
 
 function closeDeleteModal() {
-  modalController.close('deleteAccountModal', { fallbackFocus: '#addAccountBtn' });
+  document.getElementById('deleteAccountModal').style.display = 'none';
 }
 
 async function deleteAccount(accountId) {
@@ -6966,12 +6154,12 @@ async function deleteAccount(accountId) {
   // saveConfig is async — close the modal immediately so the UI feels
   // responsive instead of waiting for the atomic write + safeStorage encrypt.
   // The in-memory config already reflects the delete; the IPC just persists it.
+  closeDeleteModal();
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   if (getAllAccountsFlat().length === 0) renderHealthCheckResults([]);
   renderAccounts();
   renderHosterSummary();
-  closeDeleteModal();
   // Fire-and-forget the persist. The earlier `await getConfig()` round-trip
   // was redundant (we already have the truth in memory) and was the main
   // source of perceived lag on add/delete.
@@ -7181,7 +6369,7 @@ function _applyCommittedAccount(persisted, validation) {
   const { accountId, candidateHosters, isEdit } = persisted;
   config.hosters = candidateHosters;
   _invalidateAccountStatusGeneration(accountId);
-  accountStatuses[accountId] = { status: validation.status, message: validation.message || '', checkedAt: validation.checkedAt || new Date().toISOString() };
+  accountStatuses[accountId] = { status: validation.status, message: validation.message || '' };
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   if (isEdit) {
@@ -7284,20 +6472,20 @@ function syncHistoryClearAction() {
 }
 
 function closeHistoryClearModal() {
-  modalController.close('historyClearModal', { fallbackFocus: '#clearHistoryBtn' });
+  const modal = document.getElementById('historyClearModal');
+  if (!modal) return;
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+  document.getElementById('clearHistoryBtn')?.focus();
 }
 
 function openHistoryClearModal() {
   const button = document.getElementById('clearHistoryBtn');
   const modal = document.getElementById('historyClearModal');
   if (!modal || !button || button.disabled) return;
-  modalController.open(modal, {
-    initialFocus: '#cancelHistoryClearBtn',
-    returnFocus: button,
-    fallbackFocus: '#clearHistoryBtn',
-    onEscape: closeHistoryClearModal,
-    onBackdrop: closeHistoryClearModal
-  });
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('cancelHistoryClearBtn')?.focus();
 }
 
 async function confirmHistoryClear() {
@@ -7311,7 +6499,7 @@ async function confirmHistoryClear() {
     await loadHistory();
     closeHistoryClearModal();
   } catch (error) {
-    showCopyToast(getLocalizedErrorDetail(error));
+    showCopyToast(error.message || String(error));
   } finally {
     confirmButton.disabled = false;
     cancelButton.disabled = false;
@@ -7328,14 +6516,11 @@ async function loadHistory() {
     history = await window.api.getHistory();
   } catch (error) {
     if (generation !== _historyLoadGeneration) return;
-    window._historyForStats = null;
-    _invalidateHosterLifetimeCache();
-    renderHosterHealthOverview();
     historyRowsData = [];
     historySidebarCounts = { total: 0, success: 0, error: 0, skipped: 0 };
     updateHistorySidebarSummary();
     syncHistoryClearAction();
-    if (container) container.innerHTML = `<div class="empty-state history-error-state" role="alert"><strong>${escapeHtml(localizeUiText('Verlauf konnte nicht geladen werden.'))}</strong><span>${escapeHtml(getLocalizedErrorDetail(error))}</span><button class="btn btn-secondary" type="button" data-retry-history>${escapeHtml(localizeUiText('Erneut versuchen'))}</button></div>`;
+    if (container) container.innerHTML = `<div class="empty-state history-error-state" role="alert"><strong>${escapeHtml(localizeUiText('Verlauf konnte nicht geladen werden.'))}</strong><span>${escapeHtml(error?.message || String(error))}</span><button class="btn btn-secondary" type="button" data-retry-history>${escapeHtml(localizeUiText('Erneut versuchen'))}</button></div>`;
     container?.querySelector('[data-retry-history]')?.addEventListener('click', loadHistory);
     return;
   }
@@ -7345,7 +6530,6 @@ async function loadHistory() {
   _historyDirty = false;
   _invalidateHosterLifetimeCache();
   _refreshAccountHosterLifetimeStats();
-  renderHosterHealthOverview();
   const retSel = document.getElementById('historyRetentionSelect');
   if (retSel) {
     retSel.value = (config.globalSettings && config.globalSettings.historyRetention) || 'all';
@@ -7403,7 +6587,7 @@ async function exportHistory() {
 
   if (!result || result.canceled) return;
   if (!result.ok) {
-    await showAppAlert(getLocalizedErrorDetail(result.error), 'Export fehlgeschlagen');
+    await showAppAlert(result.error || 'Export fehlgeschlagen.', 'Export fehlgeschlagen');
     return;
   }
 
@@ -7744,6 +6928,7 @@ function sortHistoryRows(rows) {
 }
 
 let closePreparationPromise = null;
+let closePreparationInertState = [];
 let closePreparationOverlayState = null;
 let closePreparationGeneration = 0;
 let activeClosePreparationAttempt = null;
@@ -7764,31 +6949,27 @@ function setClosePreparationUi(active) {
   if (active) {
     if (closePreparationOverlayState) return;
     closePreparationOverlayState = {
-      wasOpen: modalController.isOpen(overlay),
+      display: overlay.style.display,
       message: message.innerHTML,
       cancelDisplay: cancelButton.style.display
     };
+    closePreparationInertState = Array.from(document.body.children)
+      .filter(element => element !== overlay && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    closePreparationInertState.forEach(({ element }) => { element.inert = true; });
     message.textContent = 'Einstellungen werden gespeichert…';
     cancelButton.style.display = 'none';
-    modalController.open(overlay, {
-      initialFocus: () => overlay.querySelector('[role="dialog"]'),
-      onEscape: () => {}
-    });
+    overlay.style.display = 'flex';
     return;
   }
-  const previousState = closePreparationOverlayState;
-  message.innerHTML = previousState ? previousState.message : '';
-  cancelButton.style.display = previousState ? previousState.cancelDisplay : '';
+  closePreparationInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  closePreparationInertState = [];
+  overlay.style.display = closePreparationOverlayState ? closePreparationOverlayState.display : 'none';
+  message.innerHTML = closePreparationOverlayState ? closePreparationOverlayState.message : '';
+  cancelButton.style.display = closePreparationOverlayState ? closePreparationOverlayState.cancelDisplay : '';
   closePreparationOverlayState = null;
-  if (previousState?.wasOpen) {
-    modalController.open(overlay, {
-      initialFocus: '#cancelShutdownBtn',
-      onEscape: cancelShutdownCountdown
-    });
-    requestAnimationFrame(() => cancelButton.focus());
-  } else {
-    modalController.close(overlay);
-  }
 }
 
 function isCurrentClosePreparation(generation, attempt) {
@@ -7802,7 +6983,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
   try {
     restored = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: false, attempt }));
   } catch (error) {
-    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(getLocalizedErrorDetail(error), 8000);
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
     return;
   }
   if (!isCurrentClosePreparation(generation, attempt)) return;
@@ -7819,7 +7000,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
       if (failedConfigWriteOperations.length !== 0) throw new Error('Nicht alle Einstellungen konnten gespeichert werden');
     }));
   } catch (error) {
-    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(getLocalizedErrorDetail(error), 8000);
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
     return;
   }
   if (!isCurrentClosePreparation(generation, attempt)) return;
@@ -7827,7 +7008,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
   activeClosePreparationAttempt = null;
   closePreparationState = 'open';
   setClosePreparationUi(false);
-  showCopyToast(getLocalizedErrorDetail(originalError), 8000);
+  showCopyToast(originalError.message || String(originalError), 8000);
 }
 
 function prepareForWindowClose(attempt) {
@@ -7838,6 +7019,7 @@ function prepareForWindowClose(attempt) {
   closePreparationState = 'preparing';
   setClosePreparationUi(true);
   closePreparationPromise = (async () => {
+    if (_doneRemovalCoalescer) _doneRemovalCoalescer.drainSync();
     await waitForClosePreparationStep(withCloseWriteAccess(flushPendingSettingsSaves));
     if (!isCurrentClosePreparation(generation, attempt)) return;
     const pendingQueue = buildPersistedQueueState();
@@ -7973,17 +7155,52 @@ function setupListeners() {
     renderImportPlanSummary();
   });
   document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  document.getElementById('appAlertConfirmBtn').addEventListener('click', () => closeAppAlert(true));
+  document.getElementById('appAlertAlternateBtn').addEventListener('click', () => closeAppAlert('alternate'));
+  document.getElementById('appAlertCancelBtn').addEventListener('click', () => closeAppAlert(false));
+  document.getElementById('appAlertCloseBtn').addEventListener('click', () => closeAppAlert(false));
+  document.getElementById('appAlertModal').addEventListener('click', event => {
+    if (event.target.id === 'appAlertModal') closeAppAlert(false);
+  });
+  document.addEventListener('keydown', event => {
+    const modal = document.getElementById('appAlertModal');
+    if (modal?.style.display !== 'flex') return;
+    const focusable = [...modal.querySelectorAll('button:not([disabled]):not([hidden])')];
+    if (event.key === 'Tab' && focusable.length) {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if ((!event.shiftKey && document.activeElement === last) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      closeAppAlert(false);
+    }
+  }, true);
 
   document.getElementById('clearHistoryBtn').addEventListener('click', openHistoryClearModal);
   document.getElementById('confirmHistoryClearBtn').addEventListener('click', confirmHistoryClear);
   document.getElementById('cancelHistoryClearBtn').addEventListener('click', closeHistoryClearModal);
   document.getElementById('closeHistoryClearModalBtn').addEventListener('click', closeHistoryClearModal);
+  document.getElementById('historyClearModal').addEventListener('click', event => {
+    if (event.target.id === 'historyClearModal') closeHistoryClearModal();
+  });
+  document.addEventListener('keydown', event => {
+    const modal = document.getElementById('historyClearModal');
+    if (modal?.style.display !== 'flex' || event.key !== 'Escape') return;
+    event.preventDefault();
+    closeHistoryClearModal();
+  }, true);
   document.getElementById('exportHistoryBtn').addEventListener('click', exportHistory);
   document.getElementById('exportSessionReportBtn').addEventListener('click', async () => {
     const format = await showAppChoice({ title: 'Sitzungsbericht exportieren', message: 'Welches Format möchtest du speichern?', confirmText: 'CSV', alternateText: 'JSON' });
     if (format === false) return;
     const result = await window.api.exportSessionReport(format === 'alternate' ? 'json' : 'csv');
-    if (result?.ok) showCopyToast(result.totalRows === 1 ? 'Sitzungsbericht mit 1 Upload exportiert' : `Sitzungsbericht mit ${result.totalRows} Uploads exportiert`);
+    if (result?.ok) showCopyToast(`Sitzungsbericht mit ${result.totalRows} Uploads exportiert`);
     else if (!result?.canceled) await showAppAlert(result?.error || 'Sitzungsbericht konnte nicht exportiert werden.');
   });
   document.getElementById('queueSearchInput').addEventListener('input', applyQueueDetailFilters);
@@ -8069,7 +7286,7 @@ function setupListeners() {
       } catch (error) {
         historyRetentionSelect.value = prev;
         syncHistoryRetentionPicker();
-        showCopyToast(getLocalizedErrorDetail(error));
+        showCopyToast(error.message || String(error));
       }
     });
   }
@@ -8113,7 +7330,13 @@ function setupListeners() {
   setupColumnResizing();
 
   // Shutdown cancel
-  document.getElementById('cancelShutdownBtn').addEventListener('click', cancelShutdownCountdown);
+  document.getElementById('cancelShutdownBtn').addEventListener('click', async () => {
+    await window.api.cancelShutdown();
+    if (shutdownCountdownInterval) { clearInterval(shutdownCountdownInterval); shutdownCountdownInterval = null; }
+    const overlay = document.getElementById('shutdownOverlay');
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+  });
 
   // Click on empty area in queue → deselect all
   document.getElementById('upload-view').addEventListener('click', (e) => {
@@ -8135,11 +7358,19 @@ function setupListeners() {
     showContextMenu(e.clientX, e.clientY);
   });
 
+  document.getElementById('hosterModal').addEventListener('click', (e) => {
+    if (e.target.id === 'hosterModal') cancelHosterModal();
+  });
+
   // Account management
   document.getElementById('addAccountBtn').addEventListener('click', () => openAccountModal(null));
   document.getElementById('closeAccountModalBtn').addEventListener('click', closeAccountModal);
   document.getElementById('cancelAccountModalBtn').addEventListener('click', closeAccountModal);
   document.getElementById('saveAccountBtn').addEventListener('click', saveAccount);
+  document.getElementById('accountModal').addEventListener('click', (e) => {
+    if (e.target.id === 'accountModal') closeAccountModal();
+  });
+
   // Account hoster select change → update credential fields
   document.getElementById('accountHosterSelect').addEventListener('change', (e) => {
     _invalidateAccountSubmit();
@@ -8159,14 +7390,26 @@ function setupListeners() {
     const accountId = modal.dataset.accountId;
     if (accountId) deleteAccount(accountId);
   });
+  document.getElementById('deleteAccountModal').addEventListener('click', (e) => {
+    if (e.target.id === 'deleteAccountModal') closeDeleteModal();
+  });
+
   // Job log modal
   document.getElementById('closeJobLogBtn')?.addEventListener('click', hideJobLogModal);
   document.getElementById('closeJobLogBtn2')?.addEventListener('click', hideJobLogModal);
   document.getElementById('copyJobLogBtn')?.addEventListener('click', copyJobLogToClipboard);
+  document.getElementById('jobLogModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'jobLogModal') hideJobLogModal();
+  });
+
   document.getElementById('headerUpdateBtn')?.addEventListener('click', requestUpdateCheck);
   document.getElementById('installUpdateBtn')?.addEventListener('click', installKnownUpdate);
   document.getElementById('dismissUpdateBtn')?.addEventListener('click', closeUpdateDialog);
   document.getElementById('updateCloseBtn')?.addEventListener('click', closeUpdateDialog);
+  document.getElementById('updateBanner')?.addEventListener('click', (event) => {
+    if (event.target.id === 'updateBanner') closeUpdateDialog();
+  });
+  document.addEventListener('keydown', _handleUpdateDialogKeydown, true);
   _syncHeaderUpdateState();
 }
 
@@ -8193,19 +7436,6 @@ function _formatUpdateReleaseNotes(value) {
   return output.join('\n');
 }
 
-function _selectUpdateReleaseNotes(info) {
-  const language = uiLocalizer.getLanguage();
-  const candidates = [info?.releaseNotesLocalized, info?.releaseNotesByLanguage, info?.releaseNotes];
-  const localized = candidates.find(value => value && typeof value === 'object' && !Array.isArray(value));
-  if (localized) {
-    if (typeof localized[language] === 'string') return { value: localized[language], language };
-    if (typeof localized.en === 'string') return { value: localized.en, language: 'en' };
-    const first = Object.entries(localized).find(([, value]) => typeof value === 'string');
-    if (first) return { value: first[1], language: first[0] };
-  }
-  return { value: typeof info?.releaseNotes === 'string' ? info.releaseNotes : '', language: 'en' };
-}
-
 function showUpdateBanner(info) {
   if (!info) return;
   _knownUpdateInfo = { ...info, available: true };
@@ -8227,10 +7457,8 @@ function showUpdateBanner(info) {
     message.hidden = false;
   }
   if (notes && notesBody) {
-    const selectedNotes = _selectUpdateReleaseNotes(info);
-    const releaseNotes = _formatUpdateReleaseNotes(selectedNotes.value);
+    const releaseNotes = _formatUpdateReleaseNotes(info.releaseNotes);
     notesBody.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
-    notesBody.lang = selectedNotes.language;
     notes.hidden = !releaseNotes;
   }
   if (installButton) {
@@ -8252,35 +7480,39 @@ function handleUpdateProgress(data) {
     _setUpdateDialogBusy(true);
     _setUpdateProgress(0, 'Download 0%');
     if (message) message.hidden = true;
+    if (button) button.textContent = 'Download 0%';
   } else if (progress.stage === 'downloading') {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(percent, `Download ${percent}%`);
     if (message) message.hidden = true;
+    if (button) button.textContent = `Download ${percent}%`;
   } else if (progress.stage === 'verifying') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Prüfen…');
     if (message) message.hidden = true;
+    if (button) button.textContent = 'Prüfen…';
   } else if (progress.stage === 'prepared') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Neustart…');
     if (message) message.hidden = true;
+    if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'launching' || progress.stage === 'done') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true);
     _setUpdateProgress(100, 'Neustart…');
     if (message) message.hidden = true;
+    if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'error') {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
     _setUpdateProgress(0, 'Update fehlgeschlagen');
-    _setUpdateProgressVisible(false);
     if (message) {
       message.hidden = false;
-      message.textContent = formatLocalizedError('Update fehlgeschlagen', progress.error);
+      message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
     }
     if (button) {
       button.disabled = false;
@@ -8291,21 +7523,98 @@ function handleUpdateProgress(data) {
 }
 
 function _isUpdateDialogVisible() {
-  return modalController.isOpen('updateBanner');
+  const overlay = document.getElementById('updateBanner');
+  return Boolean(overlay && overlay.style.display !== 'none' && overlay.getAttribute('aria-hidden') !== 'true');
+}
+
+function _setUpdateBackgroundInert(active) {
+  const overlay = document.getElementById('updateBanner');
+  if (!overlay) return;
+  if (active) {
+    if (_updateDialogInertState.length > 0) return;
+    _updateDialogInertState = Array.from(document.body.children)
+      .filter(element => element !== overlay && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    _updateDialogInertState.forEach(({ element }) => { element.inert = true; });
+    return;
+  }
+  _updateDialogInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  _updateDialogInertState = [];
+}
+
+function _getUpdateDialogFocusable() {
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return [];
+  return Array.from(dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'))
+    .filter(element => !element.hidden && element.getClientRects().length > 0 && window.getComputedStyle(element).visibility !== 'hidden');
+}
+
+function _focusUpdateDialog() {
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return;
+  const target = _getUpdateDialogFocusable()[0] || dialog;
+  target.focus();
+}
+
+function _handleUpdateDialogKeydown(event) {
+  if (!_isUpdateDialogVisible()) return;
+  const dialog = document.querySelector('#updateBanner .update-dialog');
+  if (!dialog) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!_updateInstallBusy) closeUpdateDialog();
+    return;
+  }
+  if (event.key !== 'Tab') {
+    if (!dialog.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      _focusUpdateDialog();
+    }
+    return;
+  }
+  const focusable = _getUpdateDialogFocusable();
+  if (focusable.length === 0) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const activeElement = document.activeElement;
+  if (!dialog.contains(activeElement) || (!event.shiftKey && activeElement === last) || (event.shiftKey && activeElement === first)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    (event.shiftKey ? last : first).focus();
+  }
 }
 
 function _setUpdateDialogVisible(visible) {
   const overlay = document.getElementById('updateBanner');
   if (!overlay) return;
   if (visible) {
-    modalController.open(overlay, {
-      initialFocus: '#updateCloseBtn',
-      fallbackFocus: '#headerUpdateBtn',
-      onEscape: closeUpdateDialog,
-      onBackdrop: closeUpdateDialog
+    const wasVisible = _isUpdateDialogVisible();
+    if (!wasVisible) {
+      _updateDialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      _setUpdateBackgroundInert(true);
+    }
+    overlay.style.display = 'flex';
+    overlay.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => {
+      const dialog = overlay.querySelector('.update-dialog');
+      if (_isUpdateDialogVisible() && dialog && !dialog.contains(document.activeElement)) _focusUpdateDialog();
     });
   } else {
-    modalController.close(overlay, { fallbackFocus: '#headerUpdateBtn' });
+    overlay.style.display = 'none';
+    overlay.setAttribute('aria-hidden', 'true');
+    _setUpdateBackgroundInert(false);
+    const returnFocus = _updateDialogReturnFocus;
+    _updateDialogReturnFocus = null;
+    if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
   }
 }
 
@@ -8326,7 +7635,6 @@ function _setUpdateDialogBusy(busy) {
 }
 
 function _setUpdateProgress(percent, text) {
-  _setUpdateProgressVisible(true);
   const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   const progressText = document.getElementById('updateProgressText');
   const progressBar = document.getElementById('updateProgressBar');
@@ -8339,13 +7647,6 @@ function _setUpdateProgress(percent, text) {
   }
 }
 
-function _setUpdateProgressVisible(visible) {
-  const progress = document.querySelector('#updateBanner .update-progress');
-  const text = document.getElementById('updateProgressText');
-  if (progress) progress.hidden = !visible;
-  if (text) text.hidden = !visible;
-}
-
 async function installKnownUpdate() {
   if (_updateInstallBusy) return;
   if (!_knownUpdateInfo || !_knownUpdateInfo.available) {
@@ -8356,7 +7657,9 @@ async function installKnownUpdate() {
   _setUpdateDialogBusy(true);
   _setUpdateProgress(0, 'Download 0%');
   const message = document.getElementById('updateMessage');
+  const button = document.getElementById('installUpdateBtn');
   if (message) message.hidden = true;
+  if (button) button.textContent = 'Download 0%';
   try {
     await persistQueueStateNow();
     const result = await window.api.installUpdate();
@@ -8368,38 +7671,24 @@ async function installKnownUpdate() {
 
 // --- Shutdown ---
 let shutdownCountdownInterval = null;
-
-async function cancelShutdownCountdown() {
-  await window.api.cancelShutdown();
-  if (shutdownCountdownInterval) clearInterval(shutdownCountdownInterval);
-  shutdownCountdownInterval = null;
-  modalController.close('shutdownOverlay');
-}
-
 function handleShutdownCountdown(data) {
   const overlay = document.getElementById('shutdownOverlay');
   const msgEl = document.getElementById('shutdownMessage');
-  if (!overlay || !msgEl) return;
+  const secEl = document.getElementById('shutdownSeconds');
+  overlay.style.display = 'flex';
 
   const labels = { sleep: 'Ruhezustand', shutdown: 'Herunterfahren', restart: 'Neustart' };
   let remaining = data.seconds || 60;
-  const render = () => {
-    msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
-  };
-  render();
-  modalController.open(overlay, {
-    initialFocus: '#cancelShutdownBtn',
-    onEscape: cancelShutdownCountdown
-  });
+  secEl.textContent = remaining;
+  msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
+  overlay.setAttribute('aria-hidden', 'false');
 
   if (shutdownCountdownInterval) clearInterval(shutdownCountdownInterval);
   shutdownCountdownInterval = setInterval(() => {
     remaining--;
-    render();
-    if (remaining <= 0) {
-      clearInterval(shutdownCountdownInterval);
-      shutdownCountdownInterval = null;
-    }
+    secEl.textContent = remaining;
+    msgEl.textContent = localizeUiText(`${labels[data.mode] || data.mode} in ${remaining}s...`);
+    if (remaining <= 0) { clearInterval(shutdownCountdownInterval); }
   }, 1000);
 }
 
@@ -8808,23 +8097,16 @@ function updateStatsPanel() {
 window.api.onUpdateAvailable(showUpdateBanner);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
-setupBatchCompletionReportUi();
-setupAppAlertListeners();
 init().then(() => {
   window.api.signalCloseHandshakeReady();
 }).catch((err) => {
-  const message = err && err.message !== null && err.message !== undefined ? String(err.message) : String(err || 'Unknown error');
-  const stack = err && err.stack !== null && err.stack !== undefined ? String(err.stack) : '';
-  try {
-    window.api.signalRendererInitializationFailed({ message, stack });
-  } catch {}
   try {
     if (window.api && window.api.debugLog) window.api.debugLog(`init failed: ${err && err.stack ? err.stack : err}`);
     const root = document.getElementById('app') || document.body;
     if (root) {
       const banner = document.createElement('div');
       banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#5a1e1e;color:#fff;padding:8px;z-index:99999;font-family:sans-serif;font-size:13px';
-      banner.textContent = `${formatLocalizedError('Initialisierung fehlgeschlagen', err)} ${localizeUiText('— bitte Diagnose-Paket exportieren oder Programm neu starten.')}`;
+      banner.textContent = 'Initialisierung fehlgeschlagen: ' + (err && err.message ? err.message : err) + ' — bitte Diagnose-Paket exportieren oder Programm neu starten.';
       root.appendChild(banner);
     }
   } catch {}

@@ -1,27 +1,11 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
-const RuntimeBrowserWindow = globalThis.__mhuBrowserWindowConstructor || BrowserWindow;
-const path = require('path');
-app.setPath('userData', path.join(app.getPath('appData'), 'multi-hoster-uploader'));
-app.setName('Multi Hoster Uploader');
-app.setAppUserModelId('com.multihoster.uploader');
-const {
-  configureStartupRenderer,
-  createStartupCloseHandler,
-  createStartupExternalRevealBindings,
-  createStartupFailureDocument,
-  createStartupNavigationLoader,
-  createStartupRecoveryCoordinator,
-  createStartupRevealGate,
-  createStartupRendererHandlers,
-  createStartupWindow,
-  resolveStartupLanguage
-} = require('./lib/startup-renderer');
+const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('./lib/startup-renderer');
 configureStartupRenderer(app);
 nativeTheme.themeSource = 'dark';
+const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
@@ -43,8 +27,8 @@ const { walkFolderAsync } = require('./lib/file-discovery');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
-const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan } = require('./lib/upload-log');
-const { getUploadAuditLogPath, createUploadAuditWriter, createUploadAuditEvents, runAfterDurableAudit, getUploadAuditFailureMessage } = require('./lib/upload-audit');
+const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
+const { getUploadAuditLogPath, createUploadAuditWriter } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
@@ -52,11 +36,6 @@ const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
-const { buildBatchCompletionReport, buildBatchErrorCsv } = require('./lib/batch-completion-report');
-const { buildFailedUploadSummary, buildTerminalJobSnapshots } = require('./lib/upload-recovery');
-const { selectPublicUploadUrl } = require('./lib/upload-confirmation');
-const { createBatchMutationGate } = require('./lib/batch-mutation-gate');
-const { createUploadStartReservation } = require('./lib/upload-start-reservation');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
@@ -140,241 +119,29 @@ let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 let uploadManager = null;
-const uploadBatchMutationGates = new WeakMap();
-const uploadRecoveryStates = new WeakMap();
-const uploadBatchAdmissionSkips = new WeakMap();
-const batchCompletionReports = new Map();
 let lastSessionSummary = null;
-let lastBatchCompletionReport = null;
-let startupRecoveryCoordinator = null;
-let startupRevealGate = null;
-let startupRendererHandlers = null;
 let sourceDeleteJournal = null;
-const RENDERER_READY_TIMEOUT_MS = 15000;
-const startupExternalRevealBindings = createStartupExternalRevealBindings({
-  getWindow: () => mainWindow,
-  getRevealGate: () => startupRevealGate,
-  sendDroppedFiles: paths => safeSend('drop-target:files', paths)
-});
+const pendingUploadFinalizations = new Map();
 
-function createUploadFinalizationCoordinator({
-  send,
-  saveQueue,
-  schedule = setTimeout,
-  cancelSchedule = clearTimeout,
-  createFinalizationId = () => `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-  createDeliveryId = () => `delivery-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-  timeoutMs = 15000
-}) {
-  const pending = new Map();
-  let rendererGeneration = 0;
-  let rendererIsReady = false;
-
-  function settle(entry, value) {
-    if (!entry || entry.settled) return;
-    entry.settled = true;
-    if (entry.timer) cancelSchedule(entry.timer);
-    pending.delete(entry.finalizationId);
-    entry.resolve(value);
-  }
-
-  function armTimeout(entry) {
-    if (entry.timer) cancelSchedule(entry.timer);
-    entry.timer = schedule(() => settle(entry, false), timeoutMs);
-  }
-
-  function deliver(entry) {
-    if (!rendererIsReady || entry.settled || entry.completing || entry.deliveredGeneration === rendererGeneration) return false;
-    const deliveryId = createDeliveryId();
-    const delivered = send({
-      summary: entry.summary,
-      finalizationId: entry.finalizationId,
-      deliveryId,
-      historyPersisted: entry.historyPersisted
-    });
-    if (delivered === false) return false;
-    entry.deliveryId = deliveryId;
-    entry.deliveredGeneration = rendererGeneration;
-    return true;
-  }
-
-  function request(summary, historyPersisted) {
-    const finalizationId = createFinalizationId();
-    return new Promise((resolve) => {
-      const entry = {
-        finalizationId,
-        summary,
-        historyPersisted: historyPersisted === true,
-        deliveryId: null,
-        deliveredGeneration: 0,
-        completing: false,
-        settled: false,
-        timer: null,
-        resolve
-      };
-      pending.set(finalizationId, entry);
-      armTimeout(entry);
-      deliver(entry);
-    });
-  }
-
-  function rendererBlocked() {
-    rendererIsReady = false;
-    for (const entry of pending.values()) armTimeout(entry);
-  }
-
-  function rendererReady() {
-    if (rendererIsReady) return rendererGeneration;
-    rendererIsReady = true;
-    rendererGeneration += 1;
-    for (const entry of pending.values()) deliver(entry);
-    return rendererGeneration;
-  }
-
-  function hasCompleteTerminalFallback(entry, pendingQueue) {
-    if (entry.historyPersisted) return true;
-    const terminalStatuses = new Set(['done', 'error', 'skipped', 'aborted']);
-    const normalizeValue = (value) => {
-      if (Array.isArray(value)) return value.map(normalizeValue);
-      if (!value || typeof value !== 'object') return value ?? null;
-      return Object.fromEntries(Object.keys(value).sort().map(key => [key, normalizeValue(value[key])]));
-    };
-    const valuesMatch = (left, right) => JSON.stringify(normalizeValue(left)) === JSON.stringify(normalizeValue(right));
-    const normalizeResult = result => ({
-      download_url: result?.download_url || null,
-      embed_url: result?.embed_url || null,
-      file_code: result?.file_code || null
-    });
-    const expected = [];
-    for (const file of Array.isArray(entry.summary?.files) ? entry.summary.files : []) {
-      for (const result of Array.isArray(file?.results) ? file.results : []) {
-        if (result?.jobId && terminalStatuses.has(result.status)) expected.push(result);
+function requestUploadFinalization(summary) {
+  const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingUploadFinalizations.delete(finalizationId);
+      resolve(false);
+    }, 15000);
+    pendingUploadFinalizations.set(finalizationId, {
+      resolve(value) {
+        clearTimeout(timer);
+        pendingUploadFinalizations.delete(finalizationId);
+        resolve(value);
       }
-    }
-    const jobs = Array.isArray(pendingQueue?.queueJobs) ? pendingQueue.queueJobs : [];
-    const byId = new Map(jobs.map(job => [job?.id, job]));
-    return expected.every((result) => {
-      const job = byId.get(result.jobId);
-      if (!job || job.status !== result.status) return false;
-      if ((result.error || null) !== (job.error || null)) return false;
-      if (!valuesMatch(result.failureDetails || null, job.failureDetails || null)) return false;
-      if ((result.remoteCommitUncertain === true) !== (job.remoteCommitUncertain === true)) return false;
-      if (result.status !== 'done') return true;
-      return valuesMatch(normalizeResult(result), normalizeResult(job.result));
     });
-  }
-
-  async function complete(payload) {
-    const entry = payload?.finalizationId && pending.get(payload.finalizationId);
-    if (!entry || entry.settled || entry.completing || !payload.deliveryId || payload.deliveryId !== entry.deliveryId) return false;
-    entry.completing = true;
-    if (payload.ready === false) {
-      settle(entry, false);
-      return false;
-    }
-    if (!hasCompleteTerminalFallback(entry, payload.pendingQueue)) {
-      settle(entry, false);
-      return false;
-    }
-    try {
-      await saveQueue(payload.pendingQueue ?? null);
-      settle(entry, true);
-      return true;
-    } catch {
-      settle(entry, false);
-      return false;
-    }
-  }
-
-  return { request, rendererBlocked, rendererReady, complete };
+    safeSend('upload-batch-done', { summary, finalizationId });
+  });
 }
-
-function createUploadFinalizationBarrier({
-  appendHistory,
-  saveRecovery,
-  requestFinalization,
-  buildTerminalSnapshots,
-  now = () => new Date().toISOString(),
-  onError = () => {}
-}) {
-  async function finalize(summary, recovery) {
-    let historyPersisted = true;
-    try {
-      await appendHistory(summary);
-    } catch (error) {
-      historyPersisted = false;
-      onError('history', error);
-    }
-
-    const terminalRecovery = {
-      ...recovery,
-      settledAt: now(),
-      historyPending: !historyPersisted,
-      terminalJobs: buildTerminalSnapshots(summary)
-    };
-    let terminalRecoveryPersisted = true;
-    try {
-      await saveRecovery(terminalRecovery);
-    } catch (error) {
-      terminalRecoveryPersisted = false;
-      onError('recovery', error);
-    }
-
-    let queuePersisted = false;
-    try {
-      queuePersisted = (await requestFinalization(summary, historyPersisted)) === true;
-    } catch (error) {
-      onError('queue', error);
-    }
-
-    let recoveryCleared = false;
-    if (historyPersisted && queuePersisted && terminalRecoveryPersisted) {
-      try {
-        await saveRecovery(null);
-        recoveryCleared = true;
-      } catch (error) {
-        onError('recovery-clear', error);
-      }
-    }
-
-    return {
-      historyPersisted,
-      queuePersisted,
-      terminalRecoveryPersisted,
-      recoveryCleared,
-      terminalRecovery
-    };
-  }
-
-  return { finalize };
-}
-
-function requestUploadFinalization(summary, historyPersisted) {
-  return uploadFinalizationCoordinator.request(summary, historyPersisted);
-}
-
-const uploadFinalizationCoordinator = createUploadFinalizationCoordinator({
-  send: payload => safeSend('upload-batch-done', payload),
-  saveQueue: async pendingQueue => {
-    try {
-      await configStore.savePendingQueue(pendingQueue);
-    } catch (error) {
-      debugLog(`upload finalization queue save failed: ${error.message}`);
-      throw error;
-    }
-  },
-  timeoutMs: RENDERER_READY_TIMEOUT_MS * 3
-});
-const uploadFinalizationBarrier = createUploadFinalizationBarrier({
-  appendHistory: summary => configStore.appendHistory(summary),
-  saveRecovery: recovery => configStore.saveUploadRecovery(recovery),
-  requestFinalization: requestUploadFinalization,
-  buildTerminalSnapshots: buildTerminalJobSnapshots,
-  onError: (phase, error) => debugLog(`upload finalization ${phase} failed: ${error.message}`)
-});
 const activeUploadProducerTrackers = new Set();
-const uploadStartReservation = createUploadStartReservation();
-const settingsImportGate = createSettingsImportGate(() => !!uploadManager || uploadStartReservation.isActive());
+const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
 let diagnosticAgent = null;
 let _diagHandler = null;
 
@@ -497,7 +264,13 @@ const _hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!_hasSingleInstanceLock) {
   app.quit();
 } else {
-  startupExternalRevealBindings.bindSecondInstance(app);
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.focus();
+    }
+  });
 }
 // Rotation memory that survives batch-done → new UploadManager within the
 // same app session. Without this, clicking "Retry failed" after a batch
@@ -1006,14 +779,13 @@ function _invalidateUploadLogTargetCache() {
   _cachedUploadLogKey = '';
 }
 
-function _resolveUploadLogTarget(excluded) {
-  const excludedPaths = excluded instanceof Set ? excluded : new Set(excluded ? [excluded] : []);
+function _resolveUploadLogTarget(excludedPath) {
   const primary = getLogFilePath();
   // The primary path already encodes the mode + date/session, so it changes
   // when the user toggles mode, daily rolls at midnight, or this is a new
   // process — cache invalidates naturally on path change.
   const key = primary;
-  if (_cachedUploadLogKey === key && _cachedUploadLogTarget && !excludedPaths.has(_cachedUploadLogTarget.path)) return _cachedUploadLogTarget;
+  if (_cachedUploadLogKey === key && _cachedUploadLogTarget && _cachedUploadLogTarget.path !== excludedPath) return _cachedUploadLogTarget;
 
   const commit = (t) => {
     _cachedUploadLogTarget = t;
@@ -1022,7 +794,7 @@ function _resolveUploadLogTarget(excluded) {
   };
 
   // Try primary → desktop → userData, mirror the original fallback ladder.
-  if (!excludedPaths.has(primary)) {
+  if (primary !== excludedPath) {
     try {
       fs.mkdirSync(path.dirname(primary), { recursive: true });
       return commit({ path: primary, isFallback: false });
@@ -1034,7 +806,7 @@ function _resolveUploadLogTarget(excluded) {
   if (desktop) {
     try {
       const p = buildFallbackLogName(desktop);
-      if (!excludedPaths.has(p)) {
+      if (p !== excludedPath) {
         fs.mkdirSync(path.dirname(p), { recursive: true });
         return commit({ path: p, isFallback: true });
       }
@@ -1042,7 +814,7 @@ function _resolveUploadLogTarget(excluded) {
   }
   try {
     const p = buildFallbackLogName(app.getPath('userData'));
-    if (excludedPaths.has(p)) return null;
+    if (p === excludedPath) return null;
     fs.mkdirSync(path.dirname(p), { recursive: true });
     return commit({ path: p, isFallback: true });
   } catch (err) {
@@ -1065,7 +837,6 @@ const _uploadAuditWriter = createUploadAuditWriter({
   persistFallbackLogPath: _persistFallbackLogPath,
   reportError: (label, error) => debugLog(`${label} audit append failed: ${error.message}`)
 });
-const _uploadAuditEvents = createUploadAuditEvents(_uploadAuditWriter);
 
 function _flushUploadLog() {
   if (_uploadLogWriting || _uploadLogBuffer.length === 0) return;
@@ -1128,7 +899,10 @@ async function _persistFallbackLogPath(workingPath) {
       const base = path.basename(workingPath);
       toSave = path.join(dir, stripModeStampFromFileName(base));
     }
-    await configStore.saveFallbackLogPath(toSave);
+    if (gs.logFilePath === toSave) return true;
+    gs.logFilePath = toSave;
+    cfg.globalSettings = gs;
+    await configStore.save({ globalSettings: gs });
     _invalidateUploadLogTargetCache();
     _invalidateLogSettings();
     safeSend('log-path-auto-updated', { logFilePath: toSave });
@@ -1137,25 +911,6 @@ async function _persistFallbackLogPath(workingPath) {
     debugLog(`persist fallback logpath failed: ${err.message}`);
     return false;
   }
-}
-
-function publishBatchCompletionReport(summary, options = {}) {
-  if (isAllAborted(summary)) return null;
-  let secrets = [];
-  try { secrets = collectSecretValues(configStore.load()); } catch {}
-  const report = buildBatchCompletionReport({
-    reportId: `report-${summary?.id || Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    summary,
-    startedAt: options.startedAt,
-    completedAt: options.completedAt,
-    cleanupOutcomes: options.cleanupOutcomes,
-    secrets
-  });
-  batchCompletionReports.set(report.reportId, report);
-  while (batchCompletionReports.size > 5) batchCompletionReports.delete(batchCompletionReports.keys().next().value);
-  lastBatchCompletionReport = report;
-  safeSend('upload-batch-report', report);
-  return report;
 }
 
 // Whether this hoster's successful links should land in fileuploader.log.
@@ -1182,8 +937,19 @@ function appendUploadLog(hoster, link, fileName) {
   }
 }
 
-const appendSourceCleanupAudit = _uploadAuditEvents.appendSourceCleanup;
-const appendUploadPlanAudit = _uploadAuditEvents.appendUploadPlan;
+async function appendUploadAuditLine(line, label) {
+  return _uploadAuditWriter.append(line, label);
+}
+
+async function appendSourceCleanupAudit(event) {
+  debugLog(`source-cleanup: ${event.outcome} ${event.file} trigger=${event.trigger || '-'}`);
+  return appendUploadAuditLine(`# SOURCE-CLEANUP ${JSON.stringify(event)}\r\n`, 'source-cleanup');
+}
+
+async function appendUploadPlanAudit(plan, mode) {
+  debugLog(`upload-plan: mode=${mode} files=${plan.fileCount} destinations=${plan.destinationCount} uploads=${plan.plannedUploadCount}`);
+  return appendUploadAuditLine(formatUploadPlanLogLine(new Date(), plan, mode), 'upload-plan');
+}
 
 function flattenHistoryForExport(history) {
   const rows = [];
@@ -1222,7 +988,8 @@ function flattenHistoryForExport(history) {
       for (const result of results) {
         // Only accept real URLs. file_code alone is just an opaque ID and
         // ends up looking like "nur sone Nummerierung" in the CSV.
-        const link = selectPublicUploadUrl(result);
+        const rawLink = result && (result.download_url || result.embed_url) || '';
+        const link = /^https?:\/\//i.test(String(rawLink)) ? String(rawLink) : '';
         rows.push({
           batchId,
           batchTimestamp,
@@ -1317,12 +1084,6 @@ function buildTaskFromAccount(hoster, account, extra) {
   return task;
 }
 
-function buildBatchFileKey(file) {
-  const resolved = path.resolve(String(file || ''));
-  const canonical = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  return crypto.createHash('sha256').update(canonical).digest('hex');
-}
-
 let _rotationCursors = null;
 function rotationCursors() {
   if (_rotationCursors === null) {
@@ -1353,7 +1114,7 @@ function buildUploadTasks(config, files, hosters, pick) {
     for (const hoster of hosters) {
       const account = pick(hoster);
       if (!account) { debugLog(`  skip ${hoster}: no enabled account with creds`); continue; }
-      tasks.push(buildTaskFromAccount(hoster, account, { file, fileKey: buildBatchFileKey(file) }));
+      tasks.push(buildTaskFromAccount(hoster, account, { file }));
     }
   }
   return tasks;
@@ -1368,7 +1129,6 @@ function buildUploadTasksFromJobs(config, jobs, pick) {
     if (!account) { debugLog(`  skip ${job.hoster}: no enabled account`); continue; }
     tasks.push(buildTaskFromAccount(job.hoster, account, {
       file: job.file,
-      fileKey: buildBatchFileKey(job.file),
       jobId: job.id || job.jobId || null,
       sourceCleanupToken: job.sourceCleanupToken || null
     }));
@@ -1662,7 +1422,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
 }
 
 function createWindow() {
-  const startupWindow = createStartupWindow(RuntimeBrowserWindow, {
+  const startupWindow = createStartupWindow(BrowserWindow, {
     title: 'Multi Hoster Uploader',
     width: 1100,
     height: 750,
@@ -1686,22 +1446,45 @@ function createWindow() {
   lastRestoredCloseAttempt = null;
   configStore.setWritesQuiesced(false);
   clearCloseFlushTimer();
-  const currentStartupRevealGate = createStartupRevealGate(mainWindow, {
-    onBlock: () => {
-      startupExternalRevealBindings.rendererBlocked(startupWindow.window);
-      closeHandshakeReady = false;
-      restoreClosePreparation(closePreparationAttempt);
-    }
-  });
-  startupRevealGate = currentStartupRevealGate;
 
-  mainWindow.on('close', createStartupCloseHandler({
-    window: mainWindow,
-    shouldPrepareClose: () => !closeFlushApproved && closeHandshakeReady,
-    requestClosePreparation
-  }));
+  mainWindow.on('close', (event) => {
+    if (closeFlushApproved || !closeHandshakeReady || mainWindow.webContents.isDestroyed()) return;
+    event.preventDefault();
+    requestClosePreparation();
+  });
 
   mainWindow.webContents.setBackgroundThrottling(false);
+
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
+    if (isInPlace || !isMainFrame) return;
+    closeHandshakeReady = false;
+    restoreClosePreparation(closePreparationAttempt);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
+    debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        const choice = dialog.showMessageBoxSync(mainWindow, {
+          type: 'error',
+          title: shellText('Renderer abgestürzt', 'Renderer crashed'),
+          message: shellText(`Der Renderer-Prozess ist abgestürzt (${details.reason}).`, `The renderer process crashed (${details.reason}).`),
+          detail: shellText('Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.', 'Export and send a diagnostics package. Click "Reload" to restore the interface; uploads running in the main process remain active.'),
+          buttons: [shellText('Neu laden', 'Reload'), shellText('Beenden', 'Quit')],
+          defaultId: 0,
+          cancelId: 1
+        });
+        if (choice === 0) {
+          mainWindow.webContents.reload();
+        } else {
+          app.exit(1);
+        }
+      } catch {
+        try { mainWindow.webContents.reload(); } catch {}
+      }
+    }
+  });
 
   mainWindow.webContents.on('unresponsive', () => {
     _writeCrashLog('RENDERER UNRESPONSIVE', new Error('webContents unresponsive'));
@@ -1724,62 +1507,10 @@ function createWindow() {
 
   let startupLanguage = 'en';
   try { startupLanguage = resolveStartupLanguage(configStore.load()); } catch {}
-  const rendererTarget = path.join(__dirname, 'renderer', 'index.html');
-  const rendererOptions = { query: { language: startupLanguage } };
-  const loadStartupDocument = createStartupNavigationLoader(mainWindow, rendererTarget, rendererOptions);
-  const loadRendererSurface = async () => {
-    try {
-      return await currentStartupRevealGate.navigate(loadStartupDocument);
-    } catch (error) {
-      _writeCrashLog('LOAD FILE FAILED', error);
-      debugLog(`LOAD FILE FAILED: ${error && error.stack ? error.stack : error}`);
-      throw error;
-    }
-  };
-  startupRecoveryCoordinator = createStartupRecoveryCoordinator({
-    load: loadRendererSurface,
-    reload: loadRendererSurface,
-    reveal: currentStartupRevealGate.reveal,
-    showFailure: () => currentStartupRevealGate.navigate(
-      () => mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(createStartupFailureDocument(startupLanguage))}`)
-    ),
-    close: () => app.exit(1),
-    readyTimeoutMs: RENDERER_READY_TIMEOUT_MS
-  });
-  startupRendererHandlers = createStartupRendererHandlers({
-    window: mainWindow,
-    ipcMain,
-    coordinator: startupRecoveryCoordinator,
-    onDocumentLoadStarted: () => {
-      currentStartupRevealGate.block();
-      uploadFinalizationCoordinator.rendererBlocked();
-    },
-    onRendererCrashed: (details) => {
-      uploadFinalizationCoordinator.rendererBlocked();
-      _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
-      debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
-    },
-    onReady: () => {
-      uploadFinalizationCoordinator.rendererReady();
-      startupExternalRevealBindings.rendererReady(startupWindow.window);
-      closeHandshakeReady = true;
-    },
-    onInitializationFailed: (details) => {
-      const message = details && typeof details.message === 'string' ? details.message : 'Renderer initialization failed';
-      _writeCrashLog('RENDERER INITIALIZATION FAILED', new Error(message), details);
-      debugLog(`RENDERER INITIALIZATION FAILED: ${message}`);
-    }
-  });
-  const currentStartupRendererHandlers = startupRendererHandlers;
-  const currentStartupRecoveryCoordinator = startupRecoveryCoordinator;
-  mainWindow.once('closed', () => {
-    startupExternalRevealBindings.windowClosed(startupWindow.window);
-    currentStartupRendererHandlers.dispose();
-    if (startupRevealGate === currentStartupRevealGate) startupRevealGate = null;
-    if (startupRendererHandlers === currentStartupRendererHandlers) startupRendererHandlers = null;
-    if (startupRecoveryCoordinator === currentStartupRecoveryCoordinator) startupRecoveryCoordinator = null;
-  });
-  void startupRecoveryCoordinator.loadInitial();
+  startupWindow.load(path.join(__dirname, 'renderer', 'index.html'), (err) => {
+    _writeCrashLog('LOAD FILE FAILED', err);
+    debugLog(`LOAD FILE FAILED: ${err && err.stack ? err.stack : err}`);
+  }, { query: { language: startupLanguage } });
 }
 
 function createTray() {
@@ -1799,7 +1530,9 @@ function createTray() {
     tray = new Tray(icon || nativeImage.createEmpty());
     refreshTrayLanguage();
 
-    startupExternalRevealBindings.bindTrayClick(tray);
+    tray.on('click', () => {
+      if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+    });
   } catch (err) {
     tray = null;
     debugLog(`createTray failed (non-fatal): ${err && err.message ? err.message : err}`);
@@ -2169,7 +1902,7 @@ function refreshTrayLanguage() {
   if (!tray || tray.isDestroyed()) return;
   tray.setToolTip('Multi Hoster Uploader');
   tray.setContextMenu(Menu.buildFromTemplate([
-    startupExternalRevealBindings.createTrayMenuItem(shellText('Öffnen', 'Open')),
+    { label: shellText('Öffnen', 'Open'), click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
     { type: 'separator' },
     { label: shellText('Beenden', 'Quit'), click: () => { app.quit(); } }
   ]));
@@ -2279,33 +2012,10 @@ ipcMain.handle('get-file-sizes', async (_event, paths) => {
   return out;
 });
 
-ipcMain.handle('get-last-batch-completion-report', () => lastBatchCompletionReport);
-
-ipcMain.handle('export-batch-completion-report', async (_event, reportId, format) => {
-  const report = batchCompletionReports.get(String(reportId || ''));
-  if (!report) return { ok: false, error: shellText('Der Batch-Bericht ist nicht mehr verfügbar', 'The batch report is no longer available') };
-  const normalizedFormat = String(format || '').toLowerCase();
-  if (normalizedFormat !== 'json' && normalizedFormat !== 'csv') return { ok: false, error: shellText('Ungültiges Exportformat', 'Invalid export format') };
-  const datePrefix = report.completedAt.slice(0, 10);
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: shellText('Batch-Bericht exportieren', 'Export batch report'),
-    defaultPath: `upload-batch-report-${datePrefix}.${normalizedFormat}`,
-    filters: normalizedFormat === 'json'
-      ? [{ name: shellText('JSON-Datei', 'JSON file'), extensions: ['json'] }]
-      : [{ name: shellText('CSV-Datei', 'CSV file'), extensions: ['csv'] }]
-  });
-  if (canceled || !filePath) return { ok: false, canceled: true };
-  const content = normalizedFormat === 'json' ? JSON.stringify(report, null, 2) : buildBatchErrorCsv(report);
-  fs.writeFileSync(filePath, content, 'utf-8');
-  return { ok: true, path: filePath, format: normalizedFormat, reportId: report.reportId };
-});
-
 ipcMain.handle('inspect-import-files', async (_event, payload) => {
   const input = payload && typeof payload === 'object' ? payload : {};
-  const currentConfig = configStore.load();
   return inspectImportEntries(input.entries, {
     existingPaths: input.existingPaths,
-    filenameFilter: currentConfig.globalSettings?.filenameFilter,
     concurrency: 8,
     inspectPath: filePath => inspectReadableImportPath(filePath, fs.promises.open)
   });
@@ -2314,15 +2024,8 @@ ipcMain.handle('inspect-import-files', async (_event, payload) => {
 ipcMain.handle('start-upload', async (_event, payload) => {
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
-  if (uploadManager || uploadStartReservation.isActive()) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
-  const startLease = uploadStartReservation.acquire();
-  if (!startLease) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
-  return executeReservedUploadStart(payload, startLease).finally(() => startLease.release());
-});
-
-async function executeReservedUploadStart(payload, startLease) {
+  if (uploadManager) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
   const config = configStore.load();
-  const batchStartedAt = new Date().toISOString();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
@@ -2332,12 +2035,14 @@ async function executeReservedUploadStart(payload, startLease) {
 
   // At 500+ jobs JSON.stringify blew up the debug log with MB-sized lines
   // per start-upload and added noticeable delay — log counts only.
-  logMarker('BATCH START');
+  logMarker('BATCH START', batchPlan);
+  debugLog(`start-upload: files=${batchPlan.fileCount}, hosters=${batchPlan.destinationCount}, jobs=${batchPlan.plannedUploadCount}`);
 
   const pick = makeAccountPicker(config);
   const tasks = jobs.length > 0
     ? buildUploadTasksFromJobs(config, jobs, pick)
     : buildUploadTasks(config, files, hosters, pick);
+  persistRotation(pick);
 
   // Identify jobs that were skipped (no account/credentials)
   const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
@@ -2345,7 +2050,6 @@ async function executeReservedUploadStart(payload, startLease) {
     jobId: j.id,
     file: j.file,
     fileName: j.fileName || path.basename(j.file || ''),
-    fileKey: buildBatchFileKey(j.file),
     size: Number(j.bytesTotal) || 0,
     hoster: j.hoster,
     reason: 'Kein gültiger Account für diesen Hoster'
@@ -2354,34 +2058,10 @@ async function executeReservedUploadStart(payload, startLease) {
     debugLog(`  skipped ${skippedJobs.length} jobs: ${skippedJobs.map(s => s.hoster).join(', ')}`);
   }
 
-  const auditedStart = await runAfterDurableAudit(
-    () => appendUploadPlanAudit(batchPlan, 'start'),
-    () => true
-  );
-  if (!auditedStart.ok) {
-    return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
-  }
-  if (startLease.isCancelled()) return { error: 'Upload wurde abgebrochen' };
-  if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
-  persistRotation(pick);
-
-  const sourceCleanup = createSourceFileCleanup({
-    fs,
-    path,
-    platform: process.platform,
-    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
-    audit: appendSourceCleanupAudit,
-    journal: sourceDeleteJournal
-  });
-  let sourceCleanupFingerprints;
-  try {
-    sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
-  } catch (error) {
-    return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
-  }
-  for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
+  debugLog(`  tasks built: ${tasks.length}`);
 
   if (tasks.length === 0) {
+    await appendUploadPlanAudit(batchPlan, 'start');
     const skippedSummary = stats.mergeSkippedIntoSummary({
       id: `skipped-${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -2391,45 +2071,25 @@ async function executeReservedUploadStart(payload, startLease) {
       skipped: 0,
       files: []
     }, skippedJobs);
-    lastSessionSummary = skippedSummary;
-    const finalization = await uploadFinalizationBarrier.finalize(skippedSummary, {
-      id: `skipped-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      startedAt: new Date().toISOString(),
-      jobIds: skippedJobs.map(job => job.jobId).filter(Boolean)
-    });
-    if (!finalization.queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
-    if (!finalization.terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
-    const cleanupOutcomes = await sourceCleanup.finishBatch({
-      historyPersisted: finalization.historyPersisted,
-      queuePersisted: finalization.queuePersisted && finalization.terminalRecoveryPersisted
-    });
-    publishBatchCompletionReport(skippedSummary, {
-      startedAt: batchStartedAt,
-      completedAt: new Date().toISOString(),
-      cleanupOutcomes
-    });
-    return {
-      started: true,
-      taskCount: 0,
-      skippedJobs,
-      finalized: true,
-      historyPersisted: finalization.historyPersisted
-    };
+    try { await configStore.appendHistory(skippedSummary); } catch (error) {
+      debugLog(`appendHistory for skipped jobs failed: ${error.message}`);
+    }
+    setImmediate(() => safeSend('upload-batch-done', skippedSummary));
+    return { started: true, taskCount: 0, skippedJobs };
   }
 
   uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
-  const batchMutationGate = createBatchMutationGate();
-  uploadBatchMutationGates.set(uploadManager, batchMutationGate);
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
-  const batchAdmissionSkippedJobs = [...skippedJobs];
-  uploadBatchAdmissionSkips.set(_thisManager, batchAdmissionSkippedJobs);
+
+  await appendUploadPlanAudit(batchPlan, 'start');
 
   const recovery = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    startedAt: batchStartedAt,
+    startedAt: new Date().toISOString(),
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
+  try { await configStore.saveUploadRecovery(recovery); } catch (error) { debugLog(`upload recovery state could not be saved: ${error.message}`); }
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2456,17 +2116,25 @@ async function executeReservedUploadStart(payload, startLease) {
   // new upload; addJobs during a running batch keeps them).
   _jobLogCollector.clear();
 
+  const sourceCleanup = createSourceFileCleanup({
+    fs,
+    path,
+    platform: process.platform,
+    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
+    audit: appendSourceCleanupAudit,
+    journal: sourceDeleteJournal
+  });
+  let sourceCleanupFingerprints;
   try {
-    await configStore.saveUploadRecovery(recovery);
+    sourceCleanupFingerprints = await sourceCleanup.registerGroups(sourceCleanupGroups);
   } catch (error) {
-    debugLog(`upload recovery state could not be saved: ${error.message}`);
     if (uploadManager === _thisManager) {
       uploadManager = null;
       globalThis._mhuUploadManagerRef = null;
     }
-    return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
+    return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
   }
-  uploadRecoveryStates.set(_thisManager, recovery);
+  for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
   _thisManager.sourceFileCleanup = sourceCleanup;
   const _producerTracker = trackUploadProducer(_thisManager);
 
@@ -2500,7 +2168,7 @@ async function executeReservedUploadStart(payload, startLease) {
       });
     }
     if (data.status === 'done' && data.result) {
-      const link = selectPublicUploadUrl(data.result);
+      const link = data.result.download_url || data.result.embed_url || data.result.file_code || '';
       if (link) {
         if (shouldLogHosterToFile(data.hoster)) {
           appendUploadLog(data.hoster || '', link, data.fileName || '');
@@ -2532,7 +2200,7 @@ async function executeReservedUploadStart(payload, startLease) {
         updateTrayTooltip(`Upload: ${data.activeJobs} aktiv - ${speedMb} MB/s`);
         _maybeLogEventLoopDelay(data.activeJobs);
       } else {
-        updateTrayTooltip('Multi Hoster Uploader');
+        updateTrayTooltip('Multi-Hoster-Upload');
       }
     } catch (e) { debugLog(`stats listener error: ${e && e.message}`); }
   });
@@ -2597,8 +2265,7 @@ async function executeReservedUploadStart(payload, startLease) {
   // create a fresh manager which the trailing `uploadManager = null` then
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
-    const hadActiveBatchMutation = await batchMutationGate.sealAndDrain();
-    summary = stats.mergeSkippedIntoSummary(summary, batchAdmissionSkippedJobs);
+    summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
     lastSessionSummary = summary;
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
@@ -2606,6 +2273,11 @@ async function executeReservedUploadStart(payload, startLease) {
     const _batchDurationSec = _thisManager && _thisManager.startTime
       ? Math.round((Date.now() - _thisManager.startTime) / 1000)
       : 0;
+    let historyPersisted = true;
+    try { await configStore.appendHistory(summary); } catch (err) {
+      historyPersisted = false;
+      debugLog(`appendHistory failed: ${err.message}`);
+    }
     if (_progressFlushTimer) {
       clearTimeout(_progressFlushTimer);
       _progressFlushTimer = null;
@@ -2614,20 +2286,10 @@ async function executeReservedUploadStart(payload, startLease) {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
-    const finalization = await uploadFinalizationBarrier.finalize(summary, recovery);
-    const { historyPersisted, queuePersisted, terminalRecoveryPersisted } = finalization;
+    const queuePersisted = await requestUploadFinalization(summary);
+    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
     if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
-    if (!terminalRecoveryPersisted) debugLog('upload finalization blocked: terminal recovery state was not persisted');
-    if (hadActiveBatchMutation) debugLog('source cleanup blocked: batch mutation overlapped finalization');
-    const cleanupOutcomes = await sourceCleanup.finishBatch({
-      historyPersisted,
-      queuePersisted: queuePersisted && terminalRecoveryPersisted && !hadActiveBatchMutation
-    });
-    publishBatchCompletionReport(summary, {
-      startedAt: recovery.startedAt,
-      completedAt: new Date().toISOString(),
-      cleanupOutcomes
-    });
+    await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
     _producerTracker.finish();
 
     const fullyAborted = isAllAborted(summary);
@@ -2648,7 +2310,6 @@ async function executeReservedUploadStart(payload, startLease) {
   // Defer startBatch to next tick so the IPC response is sent first.
   // This ensures webContents.send() calls from upload events
   // are not interleaved with the handle() response.
-  if (startLease.isCancelled()) _thisManager.cancel();
   setImmediate(() => {
     if (uploadManager !== _thisManager) {
       debugLog('setImmediate: uploadManager was replaced before startBatch');
@@ -2665,24 +2326,19 @@ async function executeReservedUploadStart(payload, startLease) {
     _thisManager.startBatch(tasks, {
       primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
-    }).catch(async (err) => {
+    }).catch((err) => {
       debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
-      const hadActiveBatchMutation = await batchMutationGate.sealAndDrain();
-      const errorSummary = stats.mergeSkippedIntoSummary(
-        buildFailedUploadSummary(tasks, 'Upload konnte nicht gestartet werden'),
-        batchAdmissionSkippedJobs
-      );
-      lastSessionSummary = errorSummary;
-      const finalization = await uploadFinalizationBarrier.finalize(errorSummary, recovery);
-      const cleanupOutcomes = await sourceCleanup.finishBatch({
-        historyPersisted: finalization.historyPersisted,
-        queuePersisted: finalization.queuePersisted && finalization.terminalRecoveryPersisted && !hadActiveBatchMutation
-      });
-      publishBatchCompletionReport(errorSummary, {
-        startedAt: recovery.startedAt,
-        completedAt: new Date().toISOString(),
-        cleanupOutcomes
-      });
+      const errorSummary = {
+        id: 'error',
+        timestamp: new Date().toISOString(),
+        total: tasks.length,
+        succeeded: 0,
+        failed: tasks.length,
+        files: [],
+        error: err ? err.message : 'Unbekannter Fehler'
+      };
+      safeSend('upload-batch-done', errorSummary);
+      configStore.saveUploadRecovery(null).catch(error => debugLog(`upload recovery state could not be cleared after start failure: ${error.message}`));
       _producerTracker.finish();
       if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
       if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
@@ -2692,7 +2348,7 @@ async function executeReservedUploadStart(payload, startLease) {
   logMemorySnapshot('batch-start');
   debugLog(`start-upload returning started=true (startBatch deferred to nextTick)`);
   return { started: true, taskCount: tasks.length, skippedJobs, sourceCleanupFingerprints };
-}
+});
 
 // Logged at batch boundaries so we can spot memory growth between batches
 // across long sessions (main process side only — the renderer's live view
@@ -2706,7 +2362,6 @@ function logMemorySnapshot(label) {
 }
 
 ipcMain.handle('cancel-upload', () => {
-  uploadStartReservation.cancel();
   if (uploadManager) {
     uploadManager.cancel();
   }
@@ -2726,79 +2381,43 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     return { error: 'Kein Upload aktiv' };
   }
   const batchManager = uploadManager;
-  const batchMutationGate = uploadBatchMutationGates.get(batchManager);
-  const batchMutationLease = batchMutationGate && batchMutationGate.acquire();
-  if (!batchMutationLease) return { error: 'Kein Upload aktiv' };
-  try {
-    const config = configStore.load();
-    const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
-    const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
-    const pick = makeAccountPicker(config);
-    const tasks = buildUploadTasksFromJobs(config, jobs, pick);
-    const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
-    const skippedJobs = jobs
-      .filter(j => j && j.id && !taskJobIds.has(j.id))
-      .map(j => ({
-        jobId: j.id,
-        file: j.file,
-        fileName: j.fileName || path.basename(j.file || ''),
-        fileKey: buildBatchFileKey(j.file),
-        size: Number(j.bytesTotal) || 0,
-        hoster: j.hoster,
-        reason: 'Kein gültiger Account für diesen Hoster'
-      }));
-    if (jobs.length > 0) {
-      const auditedAdd = await runAfterDurableAudit(
-        () => appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add'),
-        () => true
-      );
-      if (!auditedAdd.ok) return { error: getUploadAuditFailureMessage(getConfiguredLanguage()) };
-    }
-    const batchRecovery = uploadRecoveryStates.get(batchManager);
-    const newRecoveryJobIds = tasks.map(task => task.jobId).filter(Boolean);
-    if (batchRecovery && newRecoveryJobIds.length > 0) {
-      const nextRecovery = {
-        ...batchRecovery,
-        jobIds: Array.from(new Set([...(batchRecovery.jobIds || []), ...newRecoveryJobIds]))
-      };
-      try {
-        await configStore.saveUploadRecovery(nextRecovery);
-      } catch (error) {
-        debugLog(`upload recovery state could not be extended: ${error.message}`);
-        return { error: 'Upload-Wiederherstellung konnte nicht gespeichert werden' };
-      }
-      Object.assign(batchRecovery, nextRecovery);
-    }
-    persistRotation(pick);
-    const sourceCleanupFingerprints = batchManager.sourceFileCleanup
-      ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
-      : {};
-    if (uploadManager !== batchManager || !batchManager.running) {
-      return { error: 'Kein Upload aktiv' };
-    }
-    if (batchManager.sourceFileCleanup) {
-      for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
-    }
-    if (skippedJobs.length > 0) uploadBatchAdmissionSkips.get(batchManager)?.push(...skippedJobs);
-
-    if (tasks.length === 0) {
-      debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
-      return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
-    }
-
-    const addResult = batchManager.addJobs(tasks);
-    const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
-    const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
-      ? addResult.alreadyInBatchJobIds
-      : [];
-
-    debugLog(
-      `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
-    );
-    return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
-  } finally {
-    batchMutationLease.finish();
+  const config = configStore.load();
+  const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
+  const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
+  const pick = makeAccountPicker(config);
+  const tasks = buildUploadTasksFromJobs(config, jobs, pick);
+  persistRotation(pick);
+  const taskJobIds = new Set(tasks.map(t => t.jobId).filter(Boolean));
+  const skippedJobs = jobs
+    .filter(j => j && j.id && !taskJobIds.has(j.id))
+    .map(j => ({ jobId: j.id, hoster: j.hoster, reason: 'Kein gültiger Account für diesen Hoster' }));
+  const sourceCleanupFingerprints = batchManager.sourceFileCleanup
+    ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
+    : {};
+  if (uploadManager !== batchManager || !batchManager.running) {
+    return { error: 'Kein Upload aktiv' };
   }
+  if (batchManager.sourceFileCleanup) {
+    for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
+  }
+
+  if (tasks.length === 0) {
+    debugLog(`add-jobs-to-batch: 0 tasks built (${skippedJobs.length} skipped: no account)`);
+    if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
+    return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
+  }
+
+  const addResult = batchManager.addJobs(tasks);
+  const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
+  const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
+    ? addResult.alreadyInBatchJobIds
+    : [];
+
+  debugLog(
+    `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
+  );
+  if (jobs.length > 0) await appendUploadPlanAudit(summarizeBatchPlan({ jobs }), 'add');
+  return { added, skippedJobs, alreadyInBatchJobIds, sourceCleanupFingerprints };
 });
 
 ipcMain.handle('finish-after-active', () => {
@@ -3292,6 +2911,10 @@ ipcMain.handle('app:quit', () => {
   app.quit();
 });
 
+ipcMain.on('app:close-handshake-ready', (event) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) closeHandshakeReady = true;
+});
+
 ipcMain.on('app:close-preparation-started', (event, attempt) => {
   if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && isClosePreparationActive(attempt)) {
     armCloseFlushTimer(attempt, 3000);
@@ -3362,7 +2985,18 @@ ipcMain.handle('save-pending-queue', async (_event, pendingQueue) => {
 });
 
 ipcMain.handle('complete-upload-finalization', async (_event, payload) => {
-  return uploadFinalizationCoordinator.complete(payload);
+  const finalizationId = payload && payload.finalizationId;
+  const pending = finalizationId && pendingUploadFinalizations.get(finalizationId);
+  if (!pending) return false;
+  try {
+    await configStore.savePendingQueue(payload.pendingQueue ?? null);
+    pending.resolve(true);
+    return true;
+  } catch (error) {
+    debugLog(`upload finalization queue save failed: ${error.message}`);
+    pending.resolve(false);
+    return false;
+  }
 });
 
 ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
@@ -3517,8 +3151,8 @@ function _diagAgentInfo() {
 
 function _buildDiagnosticHandler() {
   const collectors = createCollectors({
-    loadConfig: () => configStore.loadDiagnosticsConfig(),
-    loadHistory: () => configStore.loadDiagnosticsHistory(),
+    loadConfig: () => configStore.load(),
+    loadHistory: () => configStore.loadHistory(),
     getAllLogPaths,
     support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
     stats,
@@ -3530,21 +3164,39 @@ function _buildDiagnosticHandler() {
   return (msg, _client, reply) => {
     let result;
     try { result = agent.handle(msg.op, msg.args); }
-    catch { result = { ok: false, error: 'diagnostic response could not be safely returned' }; }
+    catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
     reply(result);
   };
 }
 
-function _diagAllowlist() {
-  return [];
+function _getSuggestedRemoteHosts() {
+  const os = require('os');
+  const hosts = [];
+  try {
+    for (const entry of Object.values(os.networkInterfaces())) {
+      for (const net of (entry || [])) {
+        if (net && net.family === 'IPv4' && !net.internal && net.address) hosts.push(net.address);
+      }
+    }
+  } catch {}
+  return [...new Set(hosts)];
 }
 
-function _diagBindHost() {
+function _diagAllowlist(diag) {
+  return Array.isArray(diag && diag.allowlist) ? diag.allowlist.map((x) => String(x).trim()).filter(Boolean) : [];
+}
+
+function _diagBindHost(diag) {
+  const mode = (diag && diag.bindMode) || 'local';
+  if (mode === 'network' && _diagAllowlist(diag).length > 0) return '0.0.0.0';
   return '127.0.0.1';
 }
 
-function _diagPublicHost() {
-  return '127.0.0.1';
+function _diagPublicHost(diag) {
+  const explicit = String((diag && diag.publicHost) || '').trim();
+  if (explicit) return explicit;
+  if (_diagBindHost(diag) === '127.0.0.1') return '127.0.0.1';
+  return _getSuggestedRemoteHosts()[0] || '127.0.0.1';
 }
 
 function buildDiagnosticCode(diag, fp) {
@@ -3596,11 +3248,11 @@ ipcMain.handle('diagnostics:get-settings', () => {
   return {
     enabled: !!diag.enabled,
     port: diag.port || 9110,
-    bindMode: 'local',
+    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
     bindAddress: _diagBindHost(diag),
-    publicHost: '127.0.0.1',
+    publicHost: diag.publicHost || '',
     allowlist: _diagAllowlist(diag),
-    suggestedHosts: [],
+    suggestedHosts: _getSuggestedRemoteHosts(),
     label: diag.label || require('os').hostname(),
     codeIssuedAt: diag.codeIssuedAt || 0,
     code: diag.token ? buildDiagnosticCode(diag) : ''
@@ -3615,9 +3267,11 @@ ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
     ...cur,
     enabled: !!(incoming && incoming.enabled),
     port: (incoming && Number(incoming.port)) || cur.port || 9110,
-    bindMode: 'local',
-    publicHost: '127.0.0.1',
-    allowlist: [],
+    bindMode: (incoming && incoming.bindMode === 'network') ? 'network' : 'local',
+    publicHost: (incoming && incoming.publicHost !== null && incoming.publicHost !== undefined) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
+    allowlist: (incoming && Array.isArray(incoming.allowlist))
+      ? incoming.allowlist.map((x) => String(x).trim()).filter(Boolean)
+      : _diagAllowlist(cur),
     label: (incoming && incoming.label !== null && incoming.label !== undefined) ? String(incoming.label) : cur.label
   };
   next.bindAddress = _diagBindHost(next);
@@ -3644,10 +3298,10 @@ ipcMain.handle('diagnostics:status', () => {
   return {
     running: !!diagnosticAgent,
     port: diagnosticAgent ? diagnosticAgent.getPort() : (diag.port || 9110),
-    bindMode: 'local',
+    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
     bindAddress: _diagBindHost(diag),
     publicHost: _diagPublicHost(diag),
-    allowlistCount: 0,
+    allowlistCount: _diagAllowlist(diag).length,
     clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
     lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
   };
@@ -3656,7 +3310,7 @@ ipcMain.handle('diagnostics:status', () => {
 function createCaptureWindow() {
   if (captureWindow && !captureWindow.isDestroyed()) return;
   captureWindowReady = false;
-  captureWindow = new RuntimeBrowserWindow({
+  captureWindow = new BrowserWindow({
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -3715,7 +3369,6 @@ async function startRemoteServer() {
   try {
     await remoteServer.start({
       port: remote.port || 9100,
-      host: '127.0.0.1',
       token,
       allowInput: remote.allowInput !== false,
       mainWindow,
@@ -3759,13 +3412,11 @@ ipcMain.on('remote:capture-log', (_event, msg) => {
 // IPC: Input events from capture window
 ipcMain.on('remote:input-event', (_event, data) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
 
   const config = configStore.load();
   const remote = config.globalSettings && config.globalSettings.remote;
   if (!remote || !remote.allowInput) return;
   if (data.role !== 'admin') return;
-  if ((data.type === 'keydown' || data.type === 'keyup') && (typeof data.key !== 'string' || data.key.length === 0)) return;
 
   // Capture includes window frame (title bar) but NOT invisible DWM borders
   // sendInputEvent coordinates are relative to web content area
@@ -3932,7 +3583,7 @@ function createDropTargetWindow() {
   const { screen } = require('electron');
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
-  dropTargetWindow = new RuntimeBrowserWindow({
+  dropTargetWindow = new BrowserWindow({
     width: 120,
     height: 120,
     x: width - 140,
@@ -3972,7 +3623,15 @@ ipcMain.handle('hide-drop-target', () => {
   return true;
 });
 
-startupExternalRevealBindings.bindDropTargetFiles(ipcMain);
+ipcMain.on('drop-target:files', (_event, paths) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!mainWindow.isVisible() || mainWindow.isMinimized()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    safeSend('drop-target:files', paths);
+  }
+});
 
 // --- Shutdown after finish ---
 let shutdownMode = 'nothing';

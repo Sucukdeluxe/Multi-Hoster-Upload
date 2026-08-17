@@ -79,20 +79,12 @@
       e.preventDefault();
       e.stopPropagation();
       target.classList.remove('drag-over');
-      const files = [];
+      const paths = [];
       for (const file of e.dataTransfer.files) {
-        let filePath = '';
-        try { filePath = window.dropTargetApi.getPathForFile(file); } catch {}
-        if (!filePath) continue;
-        files.push({
-          path: filePath,
-          name: file.name || '',
-          size: Number.isFinite(file.size) ? file.size : 0,
-          isDirectory: file.type === '' && file.size === 0
-        });
+        if (file.path) paths.push(file.path);
       }
-      if (files.length > 0) {
-        window.dropTargetApi.sendFiles(files);
+      if (paths.length > 0) {
+        window.dropTargetApi.sendFiles(paths);
       }
     });
   </script>
