@@ -309,7 +309,7 @@ let settingsBaseline = '';
 let settingsDirty = false;
 let settingsSaving = false;
 let lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: 0, elapsed: 0, activeJobs: 0 };
-const uploadSpeedState = { display: 0, history: [] };
+const uploadSpeedState = window.SpeedHistory.createInitialSpeedHistoryState();
 let uploadSpeedTimer = null;
 const AUTO_CHECK_PREF_KEY = 'autoHealthCheckBeforeUpload';
 const QUEUE_COL_WIDTHS_KEY = 'queueColumnWidthsPx';
@@ -417,7 +417,6 @@ async function init() {
   renderAccounts();
   setupListeners();
   importEntryCoordinator.ready();
-  initUploadSpeedSparkline();
   restoreQueueColumnWidths();
   loadHistory();
   _refreshSessionFailedSnapshot();
@@ -808,7 +807,6 @@ function _syncHeaderUpdateState() {
       ? `Update v${version || 'unbekannt'} verfügbar. Klicken zum Installieren.`
       : 'Nach Aktualisierungen suchen';
   if (button) {
-    button.hidden = !available;
     button.classList.toggle('update-available', available);
     button.classList.toggle('is-checking', _updateCheckBusy);
     button.disabled = _updateCheckBusy;
@@ -4193,6 +4191,14 @@ function initUploadSpeedSparkline() {
   uploadSpeedTimer = window.setInterval(updateUploadSpeedSparkline, 250);
   window.addEventListener('resize', drawUploadSpeedSparkline);
   window.addEventListener('beforeunload', () => window.clearInterval(uploadSpeedTimer), { once: true });
+}
+
+function initializeStaticHeader() {
+  const version = new URLSearchParams(window.location.search).get('version') || '';
+  const versionLabel = document.getElementById('versionLabel');
+  if (versionLabel && /^\d+\.\d+\.\d+$/.test(version)) versionLabel.textContent = `v${version}`;
+  initUploadSpeedSparkline();
+  _syncHeaderUpdateState();
 }
 
 function updateStatusBar() {
@@ -8116,6 +8122,7 @@ function updateStatsPanel() {
 window.api.onUpdateAvailable(showUpdateBanner);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
+initializeStaticHeader();
 setupDragDrop();
 init().then(() => {
   window.api.signalCloseHandshakeReady();

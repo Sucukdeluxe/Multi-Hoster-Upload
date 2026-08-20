@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
-const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage } = require('../lib/startup-renderer');
+const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage, createStartupQuery } = require('../lib/startup-renderer');
 
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
@@ -48,6 +48,14 @@ test('resolveStartupLanguage accepts only the supported persisted language', () 
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'en' } }), 'en');
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'fr' } }), 'en');
   assert.equal(resolveStartupLanguage(null), 'en');
+});
+
+test('startup query carries language and installed version into the first renderer frame', () => {
+  assert.deepEqual(createStartupQuery({ globalSettings: { language: 'de' } }, '2.1.25'), {
+    language: 'de',
+    version: '2.1.25'
+  });
+  assert.deepEqual(createStartupQuery(null, 'invalid'), { language: 'en', version: '' });
 });
 
 test('createStartupWindow forces the main window to start hidden', () => {
@@ -123,4 +131,23 @@ test('upload sidebar renders and updates the remaining upload size', () => {
 
   assert.match(html, /Verbleibende Größe[\s\S]*id="uploadTelemetryRemainingSize"[^>]*>0 B</u);
   assert.match(appSource, /_setUploadTelemetryText\(['"]uploadTelemetryRemainingSize['"],\s*formatBytes\(stats\.bytesRemaining\)\)/u);
+});
+
+test('header occupies its final geometry before asynchronous initialization', () => {
+  const projectRoot = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(projectRoot, 'renderer', 'index.html'), 'utf8');
+  const appSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const css = fs.readFileSync(path.join(projectRoot, 'renderer', 'styles.css'), 'utf8');
+  const updateButton = html.match(/<button class="header-update-button"[^>]*id="headerUpdateBtn"[^>]*>/u)?.[0] || '';
+  const firstFrameInitialization = appSource.lastIndexOf('\ninitializeStaticHeader();');
+  const asynchronousInitialization = appSource.lastIndexOf('\ninit().then(');
+
+  assert.doesNotMatch(updateButton, /\shidden(?:\s|>)/u);
+  assert.match(css, /\.header-update-button\s*\{[^}]*width:\s*146px;[^}]*flex:\s*0 0 146px;/su);
+  assert.match(css, /\.version-badge\s*\{[^}]*min-width:\s*48px;/su);
+  assert.notEqual(firstFrameInitialization, -1);
+  assert.ok(firstFrameInitialization < asynchronousInitialization);
+  assert.match(mainSource, /createStartupQuery\([^,]+,\s*app\.getVersion\(\)\)/u);
+  assert.doesNotMatch(mainSource, /runAutomaticUpdateCheck\(true\);\s*\},\s*3000\)/u);
 });

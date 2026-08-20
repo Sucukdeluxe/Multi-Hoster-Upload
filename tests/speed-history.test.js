@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { updateSpeedHistory } = require('../lib/speed-history');
+const { updateSpeedHistory, createInitialSpeedHistoryState } = require('../lib/speed-history');
+
+test('initial speed history contains a drawable zero baseline', () => {
+  assert.deepEqual(createInitialSpeedHistoryState(), { display: 0, history: [0, 0] });
+});
 
 test('speed history smooths rising and falling samples independently', () => {
   const state = { display: 0, history: [] };

@@ -190,7 +190,7 @@ setTimeout(async () => {
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
 
     const germanStartupReady = await waitUntil(() => wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")'));
-    check('Returning German profiles never expose an English frame while startup config is pending', startupLanguagePendingSnapshot !== null && (!startupLanguagePendingSnapshot.visible || startupLanguagePendingSnapshot.language === 'de') && startupLanguagePendingSnapshot.query === '?language=de' && germanStartupReady === 'de|de|Upload,Accounts,Einstellungen,Verlauf');
+    check('Returning German profiles never expose an English frame while startup config is pending', startupLanguagePendingSnapshot !== null && (!startupLanguagePendingSnapshot.visible || startupLanguagePendingSnapshot.language === 'de') && startupLanguagePendingSnapshot.query === ${JSON.stringify(`?language=de&version=${productVersion}`)} && germanStartupReady === 'de|de|Upload,Accounts,Einstellungen,Verlauf');
     await wc.executeJavaScript('(async () => { config.globalSettings = { ...(config.globalSettings || {}), language: "en" }; await window.api.saveGlobalSettings(config.globalSettings); setUiLanguage("en"); renderSettings(); })()');
     const languageReady = await waitUntil(() => wc.executeJavaScript('Boolean(document.getElementById("languageInput"))'));
     check('Fresh profiles render in English by default', languageReady === true && await wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")') === 'en|en|Upload,Accounts,Settings,History');
@@ -270,7 +270,7 @@ setTimeout(async () => {
       await saveSettings({ feedbackText: 'Gespeichert' });
       return { query: new URL(location.href).searchParams.get('language'), active: document.documentElement.lang };
     })()\`);
-    check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === 'en|?language=en|Upload,Accounts,Settings,History' && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
+    check('Saved language remains the startup language after a renderer reload', englishLanguageQuery === 'en' && reloadedLanguageState === ${JSON.stringify(`en|?language=en&version=${productVersion}|Upload,Accounts,Settings,History`)} && germanLanguageQuery.query === 'de' && germanLanguageQuery.active === 'de');
 
     await wc.executeJavaScript('queueJobs = []; selectedFiles = []; selectedJobIds.clear(); rebuildJobIndex(); setUploadSidebarFilter("all"); updateUploadView(); renderQueueTable(); updateStatusBar();');
     console.log('\\n=== Upload View ===');
@@ -291,7 +291,7 @@ setTimeout(async () => {
     check('App header exposes the update action', headerUpdateButtonExists);
 
     const initialHeaderUpdateVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
-    check('Header update action stays hidden until an update is available', initialHeaderUpdateVisibility === 'true|none');
+    check('Header update action keeps its layout slot before an update is available', initialHeaderUpdateVisibility === 'false|flex');
 
     const initialUpdateLabel = await wc.executeJavaScript('document.querySelector("#headerUpdateBtn .header-update-label")?.textContent?.trim()');
     check('App header uses the compact update label', initialUpdateLabel === 'Update');
@@ -1199,11 +1199,11 @@ setTimeout(async () => {
     })()\`);
     await new Promise(resolve => setTimeout(resolve, 100));
     const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy"), header?.hidden].join("|"); })()');
-    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true|true');
+    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true|false');
     updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false, error: 'Simulierter Netzwerkfehler' }));
     await new Promise(resolve => setTimeout(resolve, 150));
     const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, header?.disabled, header?.hidden, manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
-    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|true|Nach Updates suchen|Updateprüfung fehlgeschlagen');
+    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|false|Nach Updates suchen|Updateprüfung fehlgeschlagen');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
 
     await wc.executeJavaScript('requestUpdateCheck(); true');
@@ -1211,7 +1211,7 @@ setTimeout(async () => {
     updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false }));
     await new Promise(resolve => setTimeout(resolve, 150));
     const noUpdateHeaderVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
-    check('Successful no-update result keeps the header action hidden', noUpdateHeaderVisibility === 'true|none');
+    check('Successful no-update result keeps the header action in its stable slot', noUpdateHeaderVisibility === 'false|flex');
 
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');
