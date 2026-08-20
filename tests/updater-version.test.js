@@ -87,6 +87,71 @@ test('update preparation writes a verified installer without launching it', asyn
   }
 });
 
+test('buffered installer downloads yield between progress updates so the renderer can paint', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-updater-progress-test-'));
+  const installer = Buffer.alloc(128 * 1024, 0);
+  installer[0] = 0x4d;
+  installer[1] = 0x5a;
+  const chunks = [
+    installer.subarray(0, 32 * 1024),
+    installer.subarray(32 * 1024, 64 * 1024),
+    installer.subarray(64 * 1024, 96 * 1024),
+    installer.subarray(96 * 1024)
+  ];
+  const progress = [];
+  let readerIndex = 0;
+  let preparationFinished = false;
+  let rendererObservedProgressBeforeFinish = false;
+  let rendererObservationScheduled = false;
+
+  try {
+    await prepareUpdate(value => {
+      progress.push(value);
+      if (value.stage !== 'downloading' || rendererObservationScheduled) return;
+      rendererObservationScheduled = true;
+      setImmediate(() => {
+        rendererObservedProgressBeforeFinish = !preparationFinished;
+      });
+    }, {
+      checkResult: {
+        available: true,
+        assetUrl: 'https://update.invalid/setup.exe',
+        assetName: 'setup.exe',
+        remoteVersion: '2.2.0',
+        latestYmlUrl: 'https://update.invalid/latest.yml'
+      },
+      tempDir,
+      fetchImpl: async url => url.endsWith('latest.yml')
+        ? {
+            ok: true,
+            status: 200,
+            text: async () => `version: 2.2.0\npath: setup.exe\nsha512: ${crypto.createHash('sha512').update(installer).digest('base64')}\nsize: ${installer.length}\n`
+          }
+        : {
+            ok: true,
+            status: 200,
+            body: {
+              getReader: () => ({
+                read: async () => readerIndex < chunks.length
+                  ? { done: false, value: chunks[readerIndex++] }
+                  : { done: true }
+              })
+            }
+          }
+    });
+    preparationFinished = true;
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(rendererObservedProgressBeforeFinish, true);
+    assert.deepEqual(
+      progress.filter(value => value.stage === 'downloading').map(value => value.percent),
+      [25, 50, 75, 100]
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('update preparation refreshes a cached release before downloading the installer', async () => {
   const updaterPath = require.resolve('../lib/updater');
   const originalLoad = Module._load;
