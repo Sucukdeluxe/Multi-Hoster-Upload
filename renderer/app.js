@@ -7714,16 +7714,23 @@ function _setUpdateProgress(percent, text, state = 'ready') {
 function _setUpdateProgressDetails(progress) {
   const details = document.getElementById('updateProgressDetails');
   if (!details) return;
+  const size = document.getElementById('updateProgressSize');
+  const speed = document.getElementById('updateProgressSpeed');
+  const eta = document.getElementById('updateProgressEta');
   const downloaded = Math.max(0, Number(progress?.bytesDownloaded) || 0);
   const total = Math.max(0, Number(progress?.bytesTotal) || 0);
   if (total <= 0) {
-    details.textContent = '';
+    if (size) size.textContent = '';
+    if (speed) speed.textContent = '';
+    if (eta) eta.textContent = '';
     details.hidden = true;
     return;
   }
   const bytesPerSecond = Math.max(0, Number(progress?.bytesPerSecond) || 0);
   const etaSeconds = Number.isFinite(Number(progress?.etaSeconds)) ? Math.max(0, Number(progress.etaSeconds)) : 0;
-  details.textContent = `${formatSize(downloaded)} / ${formatSize(total)} · ${formatSize(bytesPerSecond)}/s · ETA ${formatTime(etaSeconds)}`;
+  if (size) size.textContent = `${formatSize(downloaded)} / ${formatSize(total)}`;
+  if (speed) speed.textContent = `${formatSize(bytesPerSecond)}/s`;
+  if (eta) eta.textContent = `ETA ${formatTime(etaSeconds)}`;
   details.hidden = false;
 }
 

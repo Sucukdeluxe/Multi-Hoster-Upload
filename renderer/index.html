@@ -162,7 +162,13 @@
       <div class="update-progress" aria-live="polite">
         <div class="update-progress-track"><span id="updateProgressBar" role="progressbar" aria-label="Update-Fortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0%"></span></div>
         <div class="update-progress-footer">
-          <span id="updateProgressDetails" hidden></span>
+          <span id="updateProgressDetails" hidden>
+            <span id="updateProgressSize"></span>
+            <span class="update-progress-separator" aria-hidden="true">·</span>
+            <span id="updateProgressSpeed"></span>
+            <span class="update-progress-separator" aria-hidden="true">·</span>
+            <span id="updateProgressEta"></span>
+          </span>
           <span id="updateProgressText"></span>
         </div>
       </div>
