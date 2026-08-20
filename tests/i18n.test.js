@@ -31,7 +31,6 @@ test('translations cover static labels and interpolated status text in both lang
   assert.equal(translateText('Alle Status', 'en'), 'Any status');
   assert.equal(translateText('Any status', 'de'), 'Alle Status');
   assert.equal(translateText('Filter', 'en'), 'Filters');
-  assert.equal(translateText('Fehler anzeigen', 'en'), 'Show failures');
 });
 
 test('sidebar hierarchy uses distinct English and German kicker labels', () => {

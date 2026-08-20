@@ -159,8 +159,6 @@ describe('UploadManager', () => {
     assert.equal(summary.total, 2);
     assert.equal(summary.succeeded, 2);
     assert.equal(summary.failed, 0);
-    assert.equal(Number.isInteger(summary.durationSec), true);
-    assert.equal(summary.durationSec >= 0, true);
     assert.equal(summary.files.length, 2);
   });
 

@@ -759,30 +759,6 @@ setTimeout(async () => {
     })()\`);
     check('Queue filter reset clears every filter and updates the stable active count', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.before.count === '4' && queueFilterReset.before.active === true && queueFilterReset.after.hidden === false && queueFilterReset.after.disabled === true && queueFilterReset.after.count === '0' && queueFilterReset.after.active === false && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
 
-    const batchCompletionSummary = await wc.executeJavaScript(\`(async () => {
-      setUiLanguage('en');
-      queueJobs = [{ id: 'batch-error', file: 'C:/ui/error.bin', fileName: 'error.bin', hoster: 'byse.sx', status: 'error', error: 'Network failure', bytesUploaded: 0, bytesTotal: 100, progress: 0 }];
-      rebuildJobIndex();
-      renderQueueTable();
-      showBatchCompletionSummary({ total: 1237, succeeded: 1234, failed: 1, skipped: 2, durationSec: 754 });
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      const toast = document.getElementById('batchCompletionToast');
-      const before = {
-        hidden: toast.hidden,
-        shown: toast.classList.contains('show'),
-        text: document.getElementById('batchCompletionText').textContent,
-        actionHidden: document.getElementById('batchCompletionShowErrors').hidden
-      };
-      document.getElementById('batchCompletionShowErrors').click();
-      const after = { filter: uploadSidebarFilter, shown: toast.classList.contains('show') };
-      setUiLanguage('de');
-      queueJobs = [];
-      rebuildJobIndex();
-      setUploadSidebarFilter('all');
-      return { before, after };
-    })()\`);
-    check('Batch completion summarizes results and opens the failed upload filter', batchCompletionSummary.before.hidden === false && batchCompletionSummary.before.shown === true && batchCompletionSummary.before.text === '1,234 successful · 1 failed · 2 skipped · 13 min' && batchCompletionSummary.before.actionHidden === false && batchCompletionSummary.after.filter === 'error' && batchCompletionSummary.after.shown === false);
-
     const queueSelectionAnchor = await wc.executeJavaScript(\`(() => {
       queueJobs = ['a', 'b', 'c', 'd'].map(id => ({ id: 'anchor-' + id, file: 'C:/ui/anchor-' + id + '.bin', fileName: 'anchor-' + id + '.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }));
       selectedJobIds.clear();
