@@ -2441,7 +2441,7 @@ setTimeout(async () => {
     await captureVisual('05-update.png');
 
     const updateDialogCopy = await wc.executeJavaScript('(() => { const title = document.getElementById("updateDialogTitle")?.textContent?.trim(); const message = document.getElementById("updateMessage")?.textContent?.trim(); return [title, message].join("|"); })()');
-    check('Update dialog names the available version', updateDialogCopy === 'Eine neue Version ist verfügbar|Update v9.9.9 verfügbar');
+    check('Update dialog names the available version', updateDialogCopy === 'Eine neue Version ist verfügbar!|Update v9.9.9 verfügbar');
 
     const updateDialogActions = await wc.executeJavaScript('[document.getElementById("dismissUpdateBtn")?.textContent?.trim(), document.getElementById("installUpdateBtn")?.textContent?.trim()].join("|")');
     check('Update dialog offers cancel and install actions', updateDialogActions === 'Abbrechen|Jetzt installieren');
@@ -2486,10 +2486,10 @@ setTimeout(async () => {
     check('Busy update keeps its progress dialog open with a dangerous download cancellation action', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === false && busyUpdateState.dismissText === 'Download abbrechen' && busyUpdateState.dismissDanger === true && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
     check('Update download progress is green, wide, and places its status below the line', busyUpdateState.progressState === 'downloading' && busyUpdateState.progressColor === 'rgb(117, 211, 155)' && busyUpdateState.progressTrackWidth >= 390 && busyUpdateState.progressTextTop >= busyUpdateState.progressTrackBottom);
-    check('Busy update shows progress only below the bar', busyUpdateState.messageHidden === true && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
+    check('Busy update preserves the available version subtitle while progress stays below the bar', busyUpdateState.messageHidden === false && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
 
-    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "aborted", error: "Update abgebrochen" }); (() => { const bar = document.getElementById("updateProgressBar"); const state = [bar.style.width, bar.dataset.state, getComputedStyle(bar).backgroundColor, document.getElementById("updateMessage").hidden].join("|"); document.getElementById("dismissUpdateBtn").click(); return state + "|" + document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden; })()');
-    check('Canceled updates show one status, preserve progress in red, and restore close actions', updateErrorRecovery === '50%|aborted|rgb(255, 133, 140)|true|none|false|false|false');
+    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "aborted", error: "Update abgebrochen" }); (() => { const bar = document.getElementById("updateProgressBar"); const state = [bar.style.width, bar.dataset.state, getComputedStyle(bar).backgroundColor, document.getElementById("updateMessage").hidden, document.getElementById("updateMessage").textContent].join("|"); document.getElementById("dismissUpdateBtn").click(); return state + "|" + document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden; })()');
+    check('Canceled updates preserve the version subtitle, show one red status, and restore close actions', updateErrorRecovery === '50%|aborted|rgb(255, 133, 140)|false|Update v9.9.9 verfügbar|none|false|false|false');
 
     const initialInstallUpdateHandler = initialIpcHandlers.get('app:install-update');
     const initialUpdateQueueHandler = initialIpcHandlers.get('save-pending-queue');

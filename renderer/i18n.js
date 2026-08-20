@@ -104,7 +104,7 @@
     ['Hilfe', 'Help'],
     ['Log-Ordner öffnen', 'Open log folder'],
     ['Diagnose-Paket exportieren', 'Export diagnostics package'],
-    ['Eine neue Version ist verfügbar', 'A new version is available'],
+    ['Eine neue Version ist verfügbar!', 'A new version is available!'],
     ['Bereit zum Download', 'Ready to download'],
     ['Abbrechen', 'Cancel'],
     ['Jetzt installieren', 'Install now'],
