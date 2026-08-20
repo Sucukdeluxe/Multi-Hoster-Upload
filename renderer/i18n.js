@@ -113,7 +113,7 @@
     ['Alle Dateien', 'All files'],
     ['Aktiv', 'Active'],
     ['Alle Hoster', 'All hosts'],
-    ['Alle Status', 'All statuses'],
+    ['Alle Status', 'Any status'],
     ['Dateiname suchen', 'Search file name'],
     ['Nach Hoster filtern', 'Filter by host'],
     ['Nach Status filtern', 'Filter by status'],

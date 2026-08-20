@@ -28,6 +28,8 @@ test('translations cover static labels and interpolated status text in both lang
   assert.equal(translateText('Update v2.1.0 verfügbar', 'en'), 'Update v2.1.0 available');
   assert.equal(translateText('Settings', 'de'), 'Einstellungen');
   assert.equal(translateText('Update v2.1.0 available', 'de'), 'Update v2.1.0 verfügbar');
+  assert.equal(translateText('Alle Status', 'en'), 'Any status');
+  assert.equal(translateText('Any status', 'de'), 'Alle Status');
 });
 
 test('sidebar hierarchy uses distinct English and German kicker labels', () => {
