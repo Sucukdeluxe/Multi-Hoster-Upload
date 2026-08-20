@@ -107,6 +107,7 @@
     ['Eine neue Version ist verfügbar!', 'A new version is available!'],
     ['Bereit zum Download', 'Ready to download'],
     ['Abbrechen', 'Cancel'],
+    ['Filter zurücksetzen', 'Reset filters'],
     ['Jetzt installieren', 'Install now'],
     ['Jetzt updaten', 'Install now'],
     ['Alle Dateien', 'All files'],

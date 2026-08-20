@@ -723,6 +723,39 @@ setTimeout(async () => {
     check('Status changes drop selections that leave the upload filter', uploadSelectionScope.statusChangeSelected.length === 0 && uploadSelectionScope.statusChangeVisible.join('|') === 'scope-active-z');
     check('Selected upload actions ignore hidden stale selections', uploadSelectionScope.hiddenAction.selected.length === 0 && uploadSelectionScope.hiddenAction.retryDisabled && uploadSelectionScope.hiddenAction.moveDisabled);
 
+    const queueFilterReset = await wc.executeJavaScript(\`(() => {
+      queueJobs = [
+        { id: 'filter-a', file: 'C:/ui/filter-a.bin', fileName: 'alpha.bin', hoster: 'byse.sx', status: 'uploading', bytesUploaded: 10, bytesTotal: 100, progress: .1 },
+        { id: 'filter-b', file: 'C:/ui/filter-b.bin', fileName: 'beta.bin', hoster: 'doodstream.com', status: 'error', bytesUploaded: 0, bytesTotal: 100, progress: 0 }
+      ];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      renderQueueTable();
+      setUploadSidebarFilter('active');
+      document.getElementById('queueSearchInput').value = 'alpha';
+      document.getElementById('queueHosterFilter').value = 'byse.sx';
+      document.getElementById('queueStatusFilter').value = 'active';
+      applyQueueDetailFilters();
+      const button = document.getElementById('queueFilterResetBtn');
+      const before = { hidden: button.hidden, disabled: button.disabled };
+      button.click();
+      const after = {
+        hidden: button.hidden,
+        disabled: button.disabled,
+        sidebar: uploadSidebarFilter,
+        search: document.getElementById('queueSearchInput').value,
+        hoster: document.getElementById('queueHosterFilter').value,
+        status: document.getElementById('queueStatusFilter').value,
+        allPressed: document.querySelector('[data-upload-sidebar-target="all"]').getAttribute('aria-pressed'),
+        visible: _sortedJobsCache.map(job => job.id).join('|')
+      };
+      queueJobs = [];
+      rebuildJobIndex();
+      renderQueueTable();
+      return { before, after };
+    })()\`);
+    check('Queue filter reset clears sidebar, search, host, and status together', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.after.hidden === true && queueFilterReset.after.disabled === true && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
+
     const queueSelectionAnchor = await wc.executeJavaScript(\`(() => {
       queueJobs = ['a', 'b', 'c', 'd'].map(id => ({ id: 'anchor-' + id, file: 'C:/ui/anchor-' + id + '.bin', fileName: 'anchor-' + id + '.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }));
       selectedJobIds.clear();

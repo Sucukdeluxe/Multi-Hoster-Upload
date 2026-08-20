@@ -3917,6 +3917,7 @@ function setUploadSidebarFilter(value) {
   _lastVisibleRange = { start: -1, end: -1 };
   const container = document.getElementById('queueContainer');
   if (container) container.scrollTop = 0;
+  syncQueueFilterResetAction();
   renderQueueTable();
 }
 
@@ -3927,6 +3928,40 @@ function applyQueueDetailFilters() {
   _queueFilterCache = { filter: '', source: null, result: [] };
   _normalizeQueueSelectionToVisible();
   _lastVisibleRange = { start: -1, end: -1 };
+  syncQueueFilterResetAction();
+  renderQueueTable();
+}
+
+function _hasActiveQueueFilters() {
+  return uploadSidebarFilter !== 'all' || Boolean(queueSearchQuery || queueHosterFilter || queueStatusFilter);
+}
+
+function syncQueueFilterResetAction() {
+  const button = document.getElementById('queueFilterResetBtn');
+  if (!button) return;
+  const active = _hasActiveQueueFilters();
+  button.hidden = !active;
+  button.disabled = !active;
+}
+
+function resetQueueFilters() {
+  uploadSidebarFilter = 'all';
+  queueSearchQuery = '';
+  queueHosterFilter = '';
+  queueStatusFilter = '';
+  const search = document.getElementById('queueSearchInput');
+  const hoster = document.getElementById('queueHosterFilter');
+  const status = document.getElementById('queueStatusFilter');
+  if (search) search.value = '';
+  if (hoster) hoster.value = '';
+  if (status) status.value = '';
+  _syncSidebarFilterButtons('[data-upload-sidebar-target]', 'uploadSidebarTarget', 'all');
+  _queueFilterCache = { filter: '', source: null, result: [] };
+  _normalizeQueueSelectionToVisible();
+  _lastVisibleRange = { start: -1, end: -1 };
+  const container = document.getElementById('queueContainer');
+  if (container) container.scrollTop = 0;
+  syncQueueFilterResetAction();
   renderQueueTable();
 }
 
@@ -3938,6 +3973,7 @@ function syncQueueHosterFilterOptions() {
   select.innerHTML = `<option value="">Alle Hoster</option>${names.map(name => `<option value="${escapeAttr(name)}">${escapeHtml(getHosterLabel(name))}</option>`).join('')}`;
   select.value = names.includes(current) ? current : '';
   queueHosterFilter = select.value;
+  syncQueueFilterResetAction();
 }
 
 function updateUploadSidebarSummary(stats = _computeQueueStats()) {
@@ -7237,6 +7273,8 @@ function setupListeners() {
   document.getElementById('queueSearchInput').addEventListener('input', applyQueueDetailFilters);
   document.getElementById('queueHosterFilter').addEventListener('change', applyQueueDetailFilters);
   document.getElementById('queueStatusFilter').addEventListener('change', applyQueueDetailFilters);
+  document.getElementById('queueFilterResetBtn').addEventListener('click', resetQueueFilters);
+  syncQueueFilterResetAction();
 
   const historyRetentionPicker = document.getElementById('historyRetentionPicker');
   const historyRetentionTrigger = document.getElementById('historyRetentionTrigger');

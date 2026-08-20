@@ -401,6 +401,13 @@ body {
   background: var(--border);
   margin: 0 4px;
 }
+.queue-filter-reset {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.queue-filter-reset[hidden] {
+  display: none;
+}
 .queue-container {
   flex: 1 1 0;
   min-height: 0;

@@ -116,6 +116,7 @@ test('rare account, backup, update, and confirmation states translate in both di
     ['Ein Update wird bereits vorbereitet', 'An update is already being prepared'],
     ['Die Anwendung ist noch nicht bereit, das Update sicher zu installieren', 'The application is not yet ready to install the update safely'],
     ['Update abgebrochen', 'Update canceled'],
+    ['Filter zurücksetzen', 'Reset filters'],
     ['Download abbrechen', 'Cancel download'],
     ['Abbrechen…', 'Cancelling…'],
     ['Download abgebrochen', 'Download canceled'],
