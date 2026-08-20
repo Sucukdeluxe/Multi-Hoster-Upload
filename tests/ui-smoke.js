@@ -754,7 +754,7 @@ setTimeout(async () => {
       renderQueueTable();
       return { before, after };
     })()\`);
-    check('Queue filter reset clears sidebar, search, host, and status together', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.after.hidden === true && queueFilterReset.after.disabled === true && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
+    check('Queue filter reset clears every filter without shifting its stable action', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.after.hidden === false && queueFilterReset.after.disabled === true && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
 
     const queueSelectionAnchor = await wc.executeJavaScript(\`(() => {
       queueJobs = ['a', 'b', 'c', 'd'].map(id => ({ id: 'anchor-' + id, file: 'C:/ui/anchor-' + id + '.bin', fileName: 'anchor-' + id + '.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }));

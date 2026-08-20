@@ -3940,7 +3940,6 @@ function syncQueueFilterResetAction() {
   const button = document.getElementById('queueFilterResetBtn');
   if (!button) return;
   const active = _hasActiveQueueFilters();
-  button.hidden = !active;
   button.disabled = !active;
 }
 

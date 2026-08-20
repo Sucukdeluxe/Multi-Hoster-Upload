@@ -405,8 +405,9 @@ body {
   margin-left: 2px;
   white-space: nowrap;
 }
-.queue-filter-reset[hidden] {
-  display: none;
+.queue-filter-reset:disabled {
+  opacity: .45;
+  cursor: default;
 }
 .queue-filter-bar {
   min-width: 0;
