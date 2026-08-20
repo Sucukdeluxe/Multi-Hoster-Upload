@@ -2897,18 +2897,19 @@ ipcMain.handle('app:install-update', async () => {
   try {
     return await updatePreparationPromise;
   } catch (error) {
-    rejectPendingUpdate(error);
-    safeSend('app:update-progress', { stage: 'error', error: error.message });
-    return { started: false, error: error.message };
+    const canceled = error && error.message === 'Update abgebrochen';
+    if (!canceled) {
+      rejectPendingUpdate(error);
+      safeSend('app:update-progress', { stage: 'error', error: error.message });
+    }
+    return { started: false, canceled, error: error.message };
   } finally {
     updatePreparationPromise = null;
   }
 });
 
 ipcMain.handle('app:abort-update', () => {
-  abortUpdate();
-  rejectPendingUpdate(new Error('Update abgebrochen'));
-  return true;
+  return abortUpdate();
 });
 
 ipcMain.handle('app:get-version', () => {

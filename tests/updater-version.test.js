@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const Module = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { isNewer, resolveReleaseVersion, fetchGithubReleaseNotes, prepareUpdate, launchPreparedUpdate, pickSetupAsset, parseLatestYml, createUpdateAnnouncementState } = require('../lib/updater');
+const { isNewer, resolveReleaseVersion, fetchGithubReleaseNotes, prepareUpdate, launchPreparedUpdate, pickSetupAsset, parseLatestYml, createUpdateAnnouncementState, abortUpdate } = require('../lib/updater');
 const releasePlanUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release-plan.mjs')).href;
 
 test('bridge title resolves product version instead of transport tag', () => {
@@ -147,6 +147,61 @@ test('buffered installer downloads yield between progress updates so the rendere
       progress.filter(value => value.stage === 'downloading').map(value => value.percent),
       [25, 50, 75, 100]
     );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('cancelling an active installer download reports an aborted state', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-updater-abort-test-'));
+  const installer = Buffer.alloc(128 * 1024, 0);
+  installer[0] = 0x4d;
+  installer[1] = 0x5a;
+  const progress = [];
+  let reads = 0;
+
+  try {
+    await assert.rejects(
+      prepareUpdate(value => {
+        progress.push(value);
+        if (value.stage === 'downloading') abortUpdate();
+      }, {
+        checkResult: {
+          available: true,
+          assetUrl: 'https://update.invalid/setup.exe',
+          assetName: 'setup.exe',
+          assetSize: installer.length,
+          remoteVersion: '2.2.0',
+          latestYmlUrl: 'https://update.invalid/latest.yml'
+        },
+        tempDir,
+        fetchImpl: async url => url.endsWith('latest.yml')
+          ? {
+              ok: true,
+              status: 200,
+              text: async () => `version: 2.2.0\npath: setup.exe\nsha512: ${crypto.createHash('sha512').update(installer).digest('base64')}\nsize: ${installer.length}\n`
+            }
+          : {
+              ok: true,
+              status: 200,
+              body: {
+                getReader: () => ({
+                  read: async () => {
+                    reads++;
+                    return reads === 1
+                      ? { done: false, value: installer.subarray(0, installer.length / 2) }
+                      : { done: false, value: installer.subarray(installer.length / 2) };
+                  }
+                })
+              }
+            }
+      }),
+      /Update abgebrochen/
+    );
+
+    assert.equal(progress.at(-1).stage, 'aborted');
+    assert.equal(progress.at(-1).error, 'Update abgebrochen');
+    assert.equal(fs.existsSync(path.join(tempDir, 'setup.exe')), false);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

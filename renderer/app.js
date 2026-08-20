@@ -364,6 +364,8 @@ let historySidebarFilter = 'all';
 let _knownUpdateInfo = null;
 let _updateCheckBusy = false;
 let _updateInstallBusy = false;
+let _updateDownloadCancelable = false;
+let _updateCancelBusy = false;
 let _updateDialogReturnFocus = null;
 let _updateDialogInertState = [];
 let _startupAutoResumeController = null;
@@ -7429,7 +7431,7 @@ function setupListeners() {
 
   document.getElementById('headerUpdateBtn')?.addEventListener('click', requestUpdateCheck);
   document.getElementById('installUpdateBtn')?.addEventListener('click', installKnownUpdate);
-  document.getElementById('dismissUpdateBtn')?.addEventListener('click', closeUpdateDialog);
+  document.getElementById('dismissUpdateBtn')?.addEventListener('click', handleUpdateDismiss);
   document.getElementById('updateCloseBtn')?.addEventListener('click', closeUpdateDialog);
   document.getElementById('updateBanner')?.addEventListener('click', (event) => {
     if (event.target.id === 'updateBanner') closeUpdateDialog();
@@ -7502,35 +7504,48 @@ function handleUpdateProgress(data) {
   const button = document.getElementById('installUpdateBtn');
   if (progress.stage === 'starting') {
     _updateInstallBusy = true;
-    _setUpdateDialogBusy(true);
+    _setUpdateDialogBusy(true, true);
     _setUpdateProgress(0, 'Download 0%');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Download 0%';
   } else if (progress.stage === 'downloading') {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
     _updateInstallBusy = true;
-    _setUpdateDialogBusy(true);
+    _setUpdateDialogBusy(true, true);
     _setUpdateProgress(percent, `Download ${percent}%`);
     if (message) message.hidden = true;
     if (button) button.textContent = `Download ${percent}%`;
   } else if (progress.stage === 'verifying') {
     _updateInstallBusy = true;
-    _setUpdateDialogBusy(true);
+    _setUpdateDialogBusy(true, false);
     _setUpdateProgress(100, 'Prüfen…');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Prüfen…';
   } else if (progress.stage === 'prepared') {
     _updateInstallBusy = true;
-    _setUpdateDialogBusy(true);
+    _setUpdateDialogBusy(true, false);
     _setUpdateProgress(100, 'Neustart…');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'launching' || progress.stage === 'done') {
     _updateInstallBusy = true;
-    _setUpdateDialogBusy(true);
+    _setUpdateDialogBusy(true, false);
     _setUpdateProgress(100, 'Neustart…');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
+  } else if (progress.stage === 'aborted') {
+    _updateInstallBusy = false;
+    _setUpdateDialogBusy(false);
+    _setUpdateProgress(0, 'Download abgebrochen');
+    if (message) {
+      message.hidden = false;
+      message.textContent = 'Download abgebrochen';
+    }
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Wiederholen';
+    }
+    _setUpdateDialogVisible(true);
   } else if (progress.stage === 'error') {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
@@ -7649,13 +7664,37 @@ function closeUpdateDialog() {
   return true;
 }
 
-function _setUpdateDialogBusy(busy) {
+async function handleUpdateDismiss() {
+  if (!_updateInstallBusy) return closeUpdateDialog();
+  if (!_updateDownloadCancelable || _updateCancelBusy) return false;
+  _updateCancelBusy = true;
+  _setUpdateDialogBusy(true, true);
+  _setUpdateProgress(Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0, 'Abbrechen…');
+  try {
+    const canceled = await window.api.abortUpdate();
+    if (!canceled) handleUpdateProgress({ stage: 'error', error: 'Update konnte nicht abgebrochen werden' });
+  } catch (error) {
+    handleUpdateProgress({ stage: 'error', error: error && error.message ? error.message : String(error) });
+  }
+  return false;
+}
+
+function _setUpdateDialogBusy(busy, cancelable = false) {
+  _updateDownloadCancelable = Boolean(busy && cancelable);
+  if (!busy) _updateCancelBusy = false;
   const dialog = document.querySelector('#updateBanner .update-dialog');
   if (dialog) dialog.setAttribute('aria-busy', busy ? 'true' : 'false');
-  ['installUpdateBtn', 'dismissUpdateBtn', 'updateCloseBtn'].forEach(id => {
-    const button = document.getElementById(id);
-    if (button) button.disabled = busy;
-  });
+  const installButton = document.getElementById('installUpdateBtn');
+  const dismissButton = document.getElementById('dismissUpdateBtn');
+  const closeButton = document.getElementById('updateCloseBtn');
+  if (installButton) installButton.disabled = busy;
+  if (closeButton) closeButton.disabled = busy;
+  if (dismissButton) {
+    dismissButton.disabled = Boolean(busy && (!cancelable || _updateCancelBusy));
+    dismissButton.textContent = busy && cancelable
+      ? (_updateCancelBusy ? 'Abbrechen…' : 'Download abbrechen')
+      : 'Abbrechen';
+  }
   if (busy && dialog && (!dialog.contains(document.activeElement) || document.activeElement.matches?.(':disabled'))) dialog.focus();
 }
 
@@ -7679,7 +7718,7 @@ async function installKnownUpdate() {
     return;
   }
   _updateInstallBusy = true;
-  _setUpdateDialogBusy(true);
+  _setUpdateDialogBusy(true, true);
   _setUpdateProgress(0, 'Download 0%');
   const message = document.getElementById('updateMessage');
   const button = document.getElementById('installUpdateBtn');
@@ -7688,6 +7727,10 @@ async function installKnownUpdate() {
   try {
     await persistQueueStateNow();
     const result = await window.api.installUpdate();
+    if (result && result.canceled) {
+      handleUpdateProgress({ stage: 'aborted', error: result.error || 'Update abgebrochen' });
+      return;
+    }
     if (result && result.started === false) throw new Error(result.error || 'Update konnte nicht gestartet werden');
   } catch (error) {
     handleUpdateProgress({ stage: 'error', error: error && error.message ? error.message : String(error) });

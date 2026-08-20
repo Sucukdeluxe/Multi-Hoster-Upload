@@ -2469,6 +2469,7 @@ setTimeout(async () => {
         hidden: overlay.getAttribute('aria-hidden'),
         closeDisabled: document.getElementById('updateCloseBtn').disabled,
         dismissDisabled: document.getElementById('dismissUpdateBtn').disabled,
+        dismissText: document.getElementById('dismissUpdateBtn').textContent,
         headerHidden: header.hidden,
         messageHidden: document.getElementById('updateMessage').hidden,
         messageText: document.getElementById('updateMessage').textContent,
@@ -2476,7 +2477,7 @@ setTimeout(async () => {
         progressText: progress.getAttribute('aria-valuetext')
       };
     })()\`);
-    check('Busy update keeps its progress dialog open', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === true && busyUpdateState.headerHidden === false);
+    check('Busy update keeps its progress dialog open with download cancellation available', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === false && busyUpdateState.dismissText === 'Download abbrechen' && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
     check('Busy update shows progress only below the bar', busyUpdateState.messageHidden === true && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
 
