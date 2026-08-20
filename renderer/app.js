@@ -7538,10 +7538,7 @@ function handleUpdateProgress(data) {
     _setUpdateDialogBusy(false);
     const currentProgress = Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0;
     _setUpdateProgress(currentProgress, 'Download abgebrochen', 'aborted');
-    if (message) {
-      message.hidden = false;
-      message.textContent = 'Download abgebrochen';
-    }
+    if (message) message.hidden = true;
     if (button) {
       button.disabled = false;
       button.textContent = 'Wiederholen';
@@ -7551,11 +7548,9 @@ function handleUpdateProgress(data) {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
     const currentProgress = Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0;
-    _setUpdateProgress(currentProgress, 'Update fehlgeschlagen', 'error');
-    if (message) {
-      message.hidden = false;
-      message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
-    }
+    const errorText = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
+    _setUpdateProgress(currentProgress, errorText, 'error');
+    if (message) message.hidden = true;
     if (button) {
       button.disabled = false;
       button.textContent = 'Wiederholen';
