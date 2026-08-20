@@ -128,6 +128,7 @@
     ['Warteschlange', 'Queue'],
     ['Fertig', 'Completed'],
     ['Fehler', 'Failed'],
+    ['geprüft', 'checked'],
     ['Verfügbarkeit', 'Availability'],
     ['Bereite Accounts', 'Ready accounts'],
     ['Primär', 'Primary'],

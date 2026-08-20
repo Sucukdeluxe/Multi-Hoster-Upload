@@ -16,6 +16,11 @@ test('translates the remaining upload size label', () => {
   assert.equal(translateText('Remaining size', 'de'), 'Verbleibende Größe');
 });
 
+test('translates the account check timestamp label', () => {
+  assert.equal(translateText('geprüft', 'en'), 'checked');
+  assert.equal(translateText('checked', 'de'), 'geprüft');
+});
+
 test('English is the fallback language and German remains selectable', () => {
   assert.equal(normalizeLanguage(), 'en');
   assert.equal(normalizeLanguage('fr'), 'en');

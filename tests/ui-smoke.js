@@ -1152,9 +1152,9 @@ setTimeout(async () => {
     check('Account sidebar exposes exactly one pressed filter', accountFilterState.error.pressed.join('|') === 'error' && accountFilterState.error.active.join('|') === 'error' && accountFilterState.all.pressed.join('|') === 'all' && accountFilterState.all.active.join('|') === 'all');
 
     ipcMain.removeHandler('run-health-check');
-    ipcMain.handle('run-health-check', (_event, payload) => ({ results: (payload.hosters || []).map(item => ({ accountId: item.accountId, status: 'ok', message: 'Ready' })) }));
-    const completedAccountCheckState = await wc.executeJavaScript(\`checkSingleAccount('ui-filter-ready').then(() => ({ status: accountStatuses['ui-filter-ready']?.status, generations: accountStatusGenerations.size }))\`);
-    check('Completed account checks release their generation tokens', completedAccountCheckState.status === 'ok' && completedAccountCheckState.generations === 0);
+    ipcMain.handle('run-health-check', (_event, payload) => ({ checkedAt: '2026-08-20T12:34:00.000Z', results: (payload.hosters || []).map(item => ({ accountId: item.accountId, status: 'ok', message: 'Ready' })) }));
+    const completedAccountCheckState = await wc.executeJavaScript(\`checkSingleAccount('ui-filter-ready').then(() => ({ status: accountStatuses['ui-filter-ready']?.status, checkedAt: accountStatuses['ui-filter-ready']?.checkedAt, subtitle: document.querySelector('[data-account-id="ui-filter-ready"] .account-card-subtitle')?.textContent, generations: accountStatusGenerations.size }))\`);
+    check('Completed account checks expose their timestamp and release generation tokens', completedAccountCheckState.status === 'ok' && completedAccountCheckState.checkedAt === '2026-08-20T12:34:00.000Z' && completedAccountCheckState.subtitle.includes('geprüft') && completedAccountCheckState.generations === 0);
     restoreInitialIpcHandler('run-health-check');
 
     let resolveStaleAccountCheck = null;

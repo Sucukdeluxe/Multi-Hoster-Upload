@@ -4355,22 +4355,29 @@ async function executeHealthCheck(hosters, _mode, generations) {
   renderHealthCheckResults([]);
   const result = await window.api.runHealthCheck({ hosters });
   const rows = result && Array.isArray(result.results) ? result.results : [];
+  const checkedAt = result?.checkedAt || new Date().toISOString();
   const currentRows = rows.filter((row) => {
     if (!row) return false;
     const key = row.accountId || row.hoster;
     const generation = generations?.get(key);
     return generation === undefined || _isCurrentAccountStatusGeneration(key, generation);
   });
+  const completedKeys = new Set();
   currentRows.forEach((row) => {
     const key = row.accountId || row.hoster;
     if (key) {
-    accountStatuses[key] = {
-      status: row.status || 'unchecked',
-      message: row.message || '',
-      checkedAt: result.checkedAt || new Date().toISOString()
+      completedKeys.add(key);
+      accountStatuses[key] = {
+        status: row.status || 'unchecked',
+        message: row.message || '',
+        checkedAt: row.checkedAt || checkedAt
       };
     }
   });
+  for (const [key, generation] of generations || []) {
+    if (completedKeys.has(key) || !_isCurrentAccountStatusGeneration(key, generation)) continue;
+    accountStatuses[key] = { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
+  }
   renderHealthCheckResults(currentRows);
   renderAccounts();
   renderHosterModal();
@@ -4400,12 +4407,16 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
   for (const h of hosters) {
     const key = typeof h === 'string' ? h : (h.accountId || h.hoster);
     generations.set(key, _nextAccountStatusGeneration(key));
-    accountStatuses[key] = { status: 'checking', message: '', checkedAt: null };
+    accountStatuses[key] = { ...(accountStatuses[key] || {}), status: 'checking', message: '' };
   }
   renderAccounts();
   try {
     return await executeHealthCheck(hosters, mode, generations);
   } catch (err) {
+    const checkedAt = new Date().toISOString();
+    for (const [key, generation] of generations) {
+      if (_isCurrentAccountStatusGeneration(key, generation)) accountStatuses[key] = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen', checkedAt };
+    }
     renderHealthCheckResults([{ hoster: 'System', status: 'error', message: err.message }]);
     return [];
   } finally {
@@ -5470,7 +5481,10 @@ function _buildAccountCardHtml(name, account, idx) {
   // disambiguator for accounts that otherwise look identical (e.g. two byse
   // API-key accounts where you can't tell what's what from the masked key).
   const subtitleText = (userLabel ? `Label: ${userLabel} • ` : '') + credLabel;
-  const checkedText = st.checkedAt ? ` • geprüft ${new Date(st.checkedAt).toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit' })}` : '';
+  const checkedDate = st.checkedAt ? new Date(st.checkedAt) : null;
+  const checkedText = checkedDate && !Number.isNaN(checkedDate.getTime())
+    ? ` • ${localizeUiText('geprüft')} ${checkedDate.toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit' })}`
+    : '';
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
 
@@ -6023,16 +6037,19 @@ async function checkSingleAccount(accountId) {
   if (!found) return;
   const generation = _nextAccountStatusGeneration(accountId);
   healthCheckRunning = true;
-  accountStatuses[accountId] = { status: 'checking', message: '' };
+  accountStatuses[accountId] = { ...(accountStatuses[accountId] || {}), status: 'checking', message: '' };
   updateAccountCard(accountId);
   let nextStatus = null;
   try {
     const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId }] });
     const rows = result && Array.isArray(result.results) ? result.results : [];
     const row = rows.find(r => r.accountId === accountId);
-    if (row) nextStatus = { status: row.status || 'error', message: row.message || '' };
+    const checkedAt = result?.checkedAt || new Date().toISOString();
+    nextStatus = row
+      ? { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || checkedAt }
+      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
   } catch (err) {
-    nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen' };
+    nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
   } finally {
     healthCheckRunning = false;
   }
@@ -6060,7 +6077,7 @@ async function submitAccountOtp(accountId) {
   const submitButton = card?.querySelector('[data-account-otp-submit]');
   const generation = _nextAccountStatusGeneration(accountId);
   healthCheckRunning = true;
-  accountStatuses[accountId] = { status: 'checking', message: 'OTP wird geprüft…' };
+  accountStatuses[accountId] = { ...(accountStatuses[accountId] || {}), status: 'checking', message: 'OTP wird geprüft…' };
   if (otpInput) otpInput.disabled = true;
   if (submitButton) {
     submitButton.disabled = true;
@@ -6072,11 +6089,12 @@ async function submitAccountOtp(accountId) {
     const row = result && Array.isArray(result.results)
       ? result.results.find(item => item.accountId === accountId)
       : null;
+    const checkedAt = result?.checkedAt || new Date().toISOString();
     nextStatus = row
-      ? { status: row.status || 'error', message: row.message || '' }
-      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten' };
+      ? { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || checkedAt }
+      : { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
   } catch (err) {
-    nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen' };
+    nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
   } finally {
     healthCheckRunning = false;
   }
@@ -6446,7 +6464,7 @@ function _applyCommittedAccount(persisted, validation) {
   const { accountId, candidateHosters, isEdit } = persisted;
   config.hosters = candidateHosters;
   _invalidateAccountStatusGeneration(accountId);
-  accountStatuses[accountId] = { status: validation.status, message: validation.message || '' };
+  accountStatuses[accountId] = { status: validation.status, message: validation.message || '', checkedAt: validation.checkedAt || new Date().toISOString() };
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   if (isEdit) {
