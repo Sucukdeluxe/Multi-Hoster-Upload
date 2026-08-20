@@ -2460,7 +2460,7 @@ setTimeout(async () => {
 
     const busyUpdateState = await wc.executeJavaScript(\`(() => {
       showUpdateBanner({ remoteVersion: '9.9.9' });
-      handleUpdateProgress({ stage: 'downloading', percent: 50 });
+      handleUpdateProgress({ stage: 'downloading', percent: 50, bytesDownloaded: 40 * 1024 * 1024, bytesTotal: 100 * 1024 * 1024, bytesPerSecond: 8 * 1024 * 1024, etaSeconds: 8 });
       const overlay = document.getElementById('updateBanner');
       document.getElementById('updateCloseBtn').click();
       document.getElementById('dismissUpdateBtn').click();
@@ -2480,6 +2480,7 @@ setTimeout(async () => {
         messageText: document.getElementById('updateMessage').textContent,
         progressLabel: progress.getAttribute('aria-label'),
         progressText: progress.getAttribute('aria-valuetext'),
+        progressDetails: document.getElementById('updateProgressDetails').textContent,
         progressState: progress.dataset.state,
         progressColor: getComputedStyle(progress).backgroundColor,
         progressTrackWidth: progress.parentElement.getBoundingClientRect().width,
@@ -2489,6 +2490,7 @@ setTimeout(async () => {
     })()\`);
     check('Busy update keeps its progress dialog open with a dangerous download cancellation action', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === false && busyUpdateState.dismissText === 'Download abbrechen' && busyUpdateState.dismissDanger === true && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
+    check('Update progress shows downloaded size, total size, speed, and ETA', busyUpdateState.progressDetails === '40.0 MB / 100.0 MB · 8.0 MB/s · ETA 00:08');
     check('Update download progress is green, wide, and places its status below the line', busyUpdateState.progressState === 'downloading' && busyUpdateState.progressColor === 'rgb(117, 211, 155)' && busyUpdateState.progressTrackWidth >= 390 && busyUpdateState.progressTextTop >= busyUpdateState.progressTrackBottom);
     check('Busy update preserves the available version subtitle while progress stays below the bar', busyUpdateState.messageHidden === false && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
 

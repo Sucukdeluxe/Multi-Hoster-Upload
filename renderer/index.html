@@ -161,7 +161,10 @@
       </div>
       <div class="update-progress" aria-live="polite">
         <div class="update-progress-track"><span id="updateProgressBar" role="progressbar" aria-label="Update-Fortschritt" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0%"></span></div>
-        <span id="updateProgressText"></span>
+        <div class="update-progress-footer">
+          <span id="updateProgressDetails" hidden></span>
+          <span id="updateProgressText"></span>
+        </div>
       </div>
       <div class="update-dialog-actions">
         <button class="btn btn-secondary" id="dismissUpdateBtn">Abbrechen</button>

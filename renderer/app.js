@@ -7497,6 +7497,7 @@ function showUpdateBanner(info) {
     installButton.textContent = 'Jetzt installieren';
   }
   _setUpdateProgress(0, 'Bereit zum Download', 'ready');
+  _setUpdateProgressDetails(null);
   _setUpdateDialogBusy(false);
   _syncHeaderUpdateState();
   _setUpdateDialogVisible(true);
@@ -7517,6 +7518,7 @@ function handleUpdateProgress(data) {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, true);
     _setUpdateProgress(percent, `Download ${percent}%`, 'downloading');
+    _setUpdateProgressDetails(progress);
     if (button) button.textContent = `Download ${percent}%`;
   } else if (progress.stage === 'verifying') {
     _updateInstallBusy = true;
@@ -7708,6 +7710,22 @@ function _setUpdateProgress(percent, text, state = 'ready') {
   }
 }
 
+function _setUpdateProgressDetails(progress) {
+  const details = document.getElementById('updateProgressDetails');
+  if (!details) return;
+  const downloaded = Math.max(0, Number(progress?.bytesDownloaded) || 0);
+  const total = Math.max(0, Number(progress?.bytesTotal) || 0);
+  if (total <= 0) {
+    details.textContent = '';
+    details.hidden = true;
+    return;
+  }
+  const bytesPerSecond = Math.max(0, Number(progress?.bytesPerSecond) || 0);
+  const etaSeconds = Number.isFinite(Number(progress?.etaSeconds)) ? Math.max(0, Number(progress.etaSeconds)) : 0;
+  details.textContent = `${formatSize(downloaded)} / ${formatSize(total)} · ${formatSize(bytesPerSecond)}/s · ETA ${formatTime(etaSeconds)}`;
+  details.hidden = false;
+}
+
 async function installKnownUpdate() {
   if (_updateInstallBusy) return;
   if (!_knownUpdateInfo || !_knownUpdateInfo.available) {
@@ -7717,6 +7735,7 @@ async function installKnownUpdate() {
   _updateInstallBusy = true;
   _setUpdateDialogBusy(true, true);
   _setUpdateProgress(0, 'Download 0%', 'downloading');
+  _setUpdateProgressDetails(null);
   const message = document.getElementById('updateMessage');
   const button = document.getElementById('installUpdateBtn');
   if (message) message.hidden = true;

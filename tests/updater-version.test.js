@@ -103,6 +103,7 @@ test('buffered installer downloads yield between progress updates so the rendere
   let preparationFinished = false;
   let rendererObservedProgressBeforeFinish = false;
   let rendererObservationScheduled = false;
+  let nowMs = 0;
 
   try {
     await prepareUpdate(value => {
@@ -121,6 +122,7 @@ test('buffered installer downloads yield between progress updates so the rendere
         latestYmlUrl: 'https://update.invalid/latest.yml'
       },
       tempDir,
+      now: () => nowMs,
       fetchImpl: async url => url.endsWith('latest.yml')
         ? {
             ok: true,
@@ -132,9 +134,12 @@ test('buffered installer downloads yield between progress updates so the rendere
             status: 200,
             body: {
               getReader: () => ({
-                read: async () => readerIndex < chunks.length
-                  ? { done: false, value: chunks[readerIndex++] }
-                  : { done: true }
+                read: async () => {
+                  nowMs += 1000;
+                  return readerIndex < chunks.length
+                    ? { done: false, value: chunks[readerIndex++] }
+                    : { done: true };
+                }
               })
             }
           }
@@ -146,6 +151,10 @@ test('buffered installer downloads yield between progress updates so the rendere
     assert.deepEqual(
       progress.filter(value => value.stage === 'downloading').map(value => value.percent),
       [25, 50, 75, 100]
+    );
+    assert.deepEqual(
+      progress.filter(value => value.stage === 'downloading').map(value => [value.bytesPerSecond, value.etaSeconds]),
+      [[32768, 3], [32768, 2], [32768, 1], [32768, 0]]
     );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
