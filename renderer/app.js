@@ -7540,6 +7540,7 @@ function handleUpdateProgress(data) {
     _setUpdateDialogBusy(false);
     const currentProgress = Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0;
     _setUpdateProgress(currentProgress, 'Download abgebrochen', 'aborted');
+    _setUpdateProgressDetails(null);
     if (button) {
       button.disabled = false;
       button.textContent = 'Wiederholen';
