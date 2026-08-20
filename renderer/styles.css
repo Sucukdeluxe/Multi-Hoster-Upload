@@ -2576,9 +2576,12 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   place-items: center;
 }
 
-#updateProgressSpeed,
-#updateProgressEta {
+#updateProgressSpeed {
   text-align: right;
+}
+
+#updateProgressEta {
+  text-align: left;
 }
 
 #updateProgressText {
