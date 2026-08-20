@@ -582,7 +582,6 @@
     ['Speichern vor dem Beenden hat zu lange gedauert', 'Saving before quitting took too long'],
     ['Stoppt nach aktiven Uploads...', 'Stopping after active uploads...'],
     ['Suche nach Aktualisierungen…', 'Checking for updates…'],
-    ['Suche nach Updates…', 'Checking for updates…'],
     ['System wird heruntergefahren in', 'System will shut down in'],
     ['Übernehmen', 'Apply'],
     ['Übersprungen', 'Skipped'],

@@ -840,12 +840,10 @@ async function requestUpdateCheck({ forceRefresh = true } = {}) {
   if (_updateCheckBusy) return null;
   _updateCheckBusy = true;
   _syncHeaderUpdateState();
-  showCopyToast('Suche nach Updates…');
   try {
     const result = await window.api.checkForUpdate({ forceRefresh });
     if (result && result.available) {
       showUpdateBanner(result);
-      showCopyToast('Update gefunden!');
     } else if (result && result.error) {
       showCopyToast('Updateprüfung fehlgeschlagen');
     } else {
@@ -7436,7 +7434,7 @@ function setupListeners() {
     if (e.target.id === 'jobLogModal') hideJobLogModal();
   });
 
-  document.getElementById('headerUpdateBtn')?.addEventListener('click', requestUpdateCheck);
+  document.getElementById('headerUpdateBtn')?.addEventListener('click', () => requestUpdateCheck({ forceRefresh: false }));
   document.getElementById('installUpdateBtn')?.addEventListener('click', installKnownUpdate);
   document.getElementById('dismissUpdateBtn')?.addEventListener('click', handleUpdateDismiss);
   document.getElementById('updateCloseBtn')?.addEventListener('click', closeUpdateDialog);

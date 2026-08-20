@@ -2445,6 +2445,8 @@ setTimeout(async () => {
 
     const updateDialogActions = await wc.executeJavaScript('[document.getElementById("dismissUpdateBtn")?.textContent?.trim(), document.getElementById("installUpdateBtn")?.textContent?.trim()].join("|")');
     check('Update dialog offers cancel and install actions', updateDialogActions === 'Abbrechen|Jetzt installieren');
+    const updateCloseColor = await wc.executeJavaScript('getComputedStyle(document.getElementById("updateCloseBtn")).color');
+    check('Update dialog exposes a red close action', updateCloseColor === 'rgb(255, 133, 140)');
     const updateDialogChangelog = await wc.executeJavaScript('(() => { const title = document.querySelector(".update-release-notes-title"); const body = document.getElementById("updateReleaseNotesBody"); const titleRect = title?.getBoundingClientRect(); const bodyRect = body?.getBoundingClientRect(); return { hidden: document.getElementById("updateReleaseNotes")?.hidden, title: title?.textContent?.trim(), body: body?.textContent, gap: bodyRect && titleRect ? bodyRect.top - titleRect.bottom : null }; })()');
     check('Update dialog renders a compact normalized changelog', updateDialogChangelog.hidden === false && updateDialogChangelog.title === 'Changelog' && updateDialogChangelog.body === 'New in this version\\n\\nMenus and navigation\\n\\n• Added live language switching.\\n• Improved settings layout.' && updateDialogChangelog.gap <= 10);
 
