@@ -402,11 +402,27 @@ body {
   margin: 0 4px;
 }
 .queue-filter-reset {
-  margin-left: auto;
+  margin-left: 2px;
   white-space: nowrap;
 }
 .queue-filter-reset[hidden] {
   display: none;
+}
+.queue-filter-bar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-left: auto;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-input);
+}
+.queue-filter-bar .key-input,
+.queue-filter-bar .hs-input {
+  height: 30px;
 }
 .queue-container {
   flex: 1 1 0;
