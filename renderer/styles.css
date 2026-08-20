@@ -2537,6 +2537,10 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   white-space: nowrap;
 }
 
+#updateProgressDetails[hidden] {
+  display: none;
+}
+
 .update-progress-separator {
   text-align: center;
 }
