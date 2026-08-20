@@ -175,5 +175,5 @@ test('header occupies its final geometry before asynchronous initialization', ()
   assert.match(css, /\.header-update-button\.update-available\s*\{[^}]*background:\s*var\(--success\);[^}]*color:\s*#000;/su);
   assert.match(css, /\.header-update-button\.update-available:hover\s*\{[^}]*background:\s*var\(--success-end\);[^}]*color:\s*#000;/su);
   assert.match(css, /\.update-dialog\s*\{[^}]*width:\s*min\(576px,\s*100%\);/su);
-  assert.match(css, /\.update-release-notes\s*\{[^}]*max-height:\s*180px;/su);
+  assert.match(css, /\.update-release-notes\s*\{[^}]*height:\s*min\(220px,\s*42vh\);/su);
 });
