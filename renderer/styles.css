@@ -2540,6 +2540,12 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   transition: width .48s cubic-bezier(.22, 1, .36, 1), background-color .16s ease;
 }
 
+.update-progress-track span[data-state="downloading"],
+.update-progress-track span[data-state="verifying"],
+.update-progress-track span[data-state="prepared"] {
+  background: var(--success);
+}
+
 .update-progress-track span[data-state="aborted"],
 .update-progress-track span[data-state="error"] {
   background: var(--danger);

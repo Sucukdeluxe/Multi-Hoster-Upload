@@ -7467,9 +7467,12 @@ function _renderUpdateReleaseNotes(container, value) {
         : 'update-release-line';
     const source = heading ? heading[2] : bullet ? `• ${bullet[1]}` : line;
     const cleaned = _cleanUpdateReleaseText(source);
+    const displayText = className === 'update-release-heading' && cleaned.toLocaleLowerCase('en-US') === "what's new"
+      ? `${cleaned}?`
+      : cleaned;
     const available = 2400 - consumed;
     if (available <= 0) break;
-    const text = cleaned.length > available ? `${cleaned.slice(0, Math.max(0, available - 1))}…` : cleaned;
+    const text = displayText.length > available ? `${displayText.slice(0, Math.max(0, available - 1))}…` : displayText;
     const element = document.createElement('div');
     element.className = className;
     element.textContent = text;
