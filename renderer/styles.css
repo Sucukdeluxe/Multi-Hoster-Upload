@@ -2468,7 +2468,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .update-release-notes {
   grid-column: 1 / -1;
-  height: min(220px, 42vh);
+  height: min(264px, 48vh);
   max-height: none;
   margin-top: 18px;
   padding: 12px;
