@@ -109,6 +109,7 @@
     ['Abbrechen', 'Cancel'],
     ['Filter zurücksetzen', 'Reset filters'],
     ['Filter', 'Filters'],
+    ['Fehler anzeigen', 'Show failures'],
     ['Jetzt installieren', 'Install now'],
     ['Jetzt updaten', 'Install now'],
     ['Alle Dateien', 'All files'],

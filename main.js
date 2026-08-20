@@ -2082,6 +2082,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       succeeded: 0,
       failed: 0,
       skipped: 0,
+      durationSec: 0,
       files: []
     }, skippedJobs);
     try { await configStore.appendHistory(skippedSummary); } catch (error) {
@@ -2347,6 +2348,8 @@ ipcMain.handle('start-upload', async (_event, payload) => {
         total: tasks.length,
         succeeded: 0,
         failed: tasks.length,
+        skipped: 0,
+        durationSec: 0,
         files: [],
         error: err ? err.message : 'Unbekannter Fehler'
       };

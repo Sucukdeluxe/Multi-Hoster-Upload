@@ -656,6 +656,11 @@
   </div>
 
   <div class="copy-toast" id="copyToast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="batch-completion-toast" id="batchCompletionToast" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <span id="batchCompletionText"></span>
+    <button class="btn btn-xs btn-danger" id="batchCompletionShowErrors" hidden>Fehler anzeigen</button>
+    <button class="batch-completion-close" id="batchCompletionClose" aria-label="Schließen">×</button>
+  </div>
   <div class="startup-resume-banner" id="startupResumeBanner" role="status" aria-live="polite" hidden>
     <span id="startupResumeMessage"></span>
     <button class="btn btn-xs btn-secondary" id="cancelStartupResumeBtn">Abbrechen</button>

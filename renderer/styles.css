@@ -1735,6 +1735,65 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 .copy-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+.batch-completion-toast {
+  position: fixed;
+  right: 14px;
+  bottom: 18px;
+  z-index: 2200;
+  max-width: min(680px, calc(100vw - 28px));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 9px 9px 13px;
+  border: 1px solid var(--success);
+  border-radius: 8px;
+  background: rgba(35, 35, 35, .97);
+  color: var(--text);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .42);
+  font-size: 12px;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity .2s ease, transform .24s cubic-bezier(.22, 1, .36, 1);
+}
+
+.batch-completion-toast[hidden] {
+  display: none;
+}
+
+.batch-completion-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.batch-completion-toast.has-failures {
+  border-color: var(--danger);
+}
+
+#batchCompletionText {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-completion-close {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.batch-completion-close:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+
 .startup-resume-banner {
   position: fixed;
   left: 50%;

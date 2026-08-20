@@ -368,6 +368,7 @@ let _updateDownloadCancelable = false;
 let _updateCancelBusy = false;
 let _updateDialogReturnFocus = null;
 let _updateDialogInertState = [];
+let _batchCompletionTimer = null;
 let _startupAutoResumeController = null;
 let _startupAutoResumeCanceled = false;
 
@@ -3405,7 +3406,60 @@ function handleBatchDone(summary) {
   lastUploadStats = { state: 'idle', globalSpeedKbs: 0, totalBytes: lastUploadStats.totalBytes, elapsed: lastUploadStats.elapsed, activeJobs: 0 };
   updateStatusBar();
   _refreshSessionFailedSnapshot();
+  showBatchCompletionSummary(summary);
   _scheduleAutoRetryIfNeeded();
+}
+
+function _formatBatchCompletionDuration(seconds, english) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  if (total < 60) return english ? `${total} sec` : `${total} Sek.`;
+  const minutes = Math.round(total / 60);
+  if (minutes < 60) return english ? `${minutes} min` : `${minutes} Min.`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return english ? `${hours} hr ${remainder} min` : `${hours} Std. ${remainder} Min.`;
+}
+
+function hideBatchCompletionSummary() {
+  const toast = document.getElementById('batchCompletionToast');
+  if (!toast) return;
+  if (_batchCompletionTimer) clearTimeout(_batchCompletionTimer);
+  _batchCompletionTimer = null;
+  toast.classList.remove('show');
+  setTimeout(() => {
+    if (!toast.classList.contains('show')) toast.hidden = true;
+  }, 240);
+}
+
+function showBatchCompletionSummary(summary) {
+  const toast = document.getElementById('batchCompletionToast');
+  const text = document.getElementById('batchCompletionText');
+  const showErrors = document.getElementById('batchCompletionShowErrors');
+  if (!toast || !text || !showErrors || !summary) return;
+  const total = Math.max(0, Number(summary.total) || 0);
+  if (total <= 0) return;
+  const succeeded = Math.max(0, Number(summary.succeeded) || 0);
+  const failed = Math.max(0, Number(summary.failed) || 0);
+  const skipped = Math.max(0, Number(summary.skipped) || 0);
+  const english = getUiLocale() === 'en-US';
+  const format = value => value.toLocaleString(getUiLocale());
+  const duration = _formatBatchCompletionDuration(summary.durationSec, english);
+  text.textContent = english
+    ? `${format(succeeded)} successful · ${format(failed)} failed · ${format(skipped)} skipped · ${duration}`
+    : `${format(succeeded)} erfolgreich · ${format(failed)} fehlgeschlagen · ${format(skipped)} übersprungen · ${duration}`;
+  const canShowErrors = failed > 0 && queueJobs.some(job => job.status === 'error');
+  showErrors.hidden = !canShowErrors;
+  toast.classList.toggle('has-failures', failed > 0);
+  toast.hidden = false;
+  requestAnimationFrame(() => toast.classList.add('show'));
+  if (_batchCompletionTimer) clearTimeout(_batchCompletionTimer);
+  _batchCompletionTimer = setTimeout(hideBatchCompletionSummary, 15000);
+}
+
+function showBatchCompletionErrors() {
+  document.getElementById('upload-tab')?.click();
+  setUploadSidebarFilter('error');
+  hideBatchCompletionSummary();
 }
 
 let _sessionFailedKeys = new Set();
@@ -7285,6 +7339,8 @@ function setupListeners() {
   document.getElementById('queueStatusFilter').addEventListener('change', applyQueueDetailFilters);
   document.getElementById('queueFilterResetBtn').addEventListener('click', resetQueueFilters);
   syncQueueFilterResetAction();
+  document.getElementById('batchCompletionShowErrors').addEventListener('click', showBatchCompletionErrors);
+  document.getElementById('batchCompletionClose').addEventListener('click', hideBatchCompletionSummary);
 
   const historyRetentionPicker = document.getElementById('historyRetentionPicker');
   const historyRetentionTrigger = document.getElementById('historyRetentionTrigger');
