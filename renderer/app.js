@@ -7445,26 +7445,40 @@ function setupListeners() {
 }
 
 // --- Update UI ---
-function _formatUpdateReleaseNotes(value) {
-  const output = [];
-  let pendingBlank = false;
+function _cleanUpdateReleaseText(value) {
+  return String(value || '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+}
+
+function _renderUpdateReleaseNotes(container, value) {
+  const fragment = document.createDocumentFragment();
+  let consumed = 0;
   for (const rawLine of String(value || '').replace(/\r\n?/g, '\n').split('\n')) {
-    let line = rawLine.trim();
-    if (!line) {
-      if (output.length > 0) pendingBlank = true;
-      continue;
-    }
-    line = line
-      .replace(/^#{1,6}\s+/, '')
-      .replace(/^[-*+]\s+/, '• ')
-      .replace(/\*\*([^*]+)\*\*/g, '$1')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-    if (pendingBlank && output.at(-1) !== '') output.push('');
-    output.push(line);
-    pendingBlank = false;
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    const bullet = line.match(/^[-*+]\s+(.+)$/);
+    const className = heading
+      ? (heading[1].length <= 2 ? 'update-release-heading' : 'update-release-category')
+      : bullet
+        ? 'update-release-item'
+        : 'update-release-line';
+    const source = heading ? heading[2] : bullet ? `• ${bullet[1]}` : line;
+    const cleaned = _cleanUpdateReleaseText(source);
+    const available = 2400 - consumed;
+    if (available <= 0) break;
+    const text = cleaned.length > available ? `${cleaned.slice(0, Math.max(0, available - 1))}…` : cleaned;
+    const element = document.createElement('div');
+    element.className = className;
+    element.textContent = text;
+    fragment.appendChild(element);
+    consumed += text.length;
+    if (text.endsWith('…')) break;
   }
-  return output.join('\n');
+  container.replaceChildren(fragment);
+  return container.childElementCount > 0;
 }
 
 function showUpdateBanner(info) {
@@ -7488,9 +7502,7 @@ function showUpdateBanner(info) {
     message.hidden = false;
   }
   if (notes && notesBody) {
-    const releaseNotes = _formatUpdateReleaseNotes(info.releaseNotes);
-    notesBody.textContent = releaseNotes.length > 2400 ? `${releaseNotes.slice(0, 2399)}…` : releaseNotes;
-    notes.hidden = !releaseNotes;
+    notes.hidden = !_renderUpdateReleaseNotes(notesBody, info.releaseNotes);
   }
   if (installButton) {
     installButton.disabled = false;
