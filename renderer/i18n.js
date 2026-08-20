@@ -108,6 +108,7 @@
     ['Bereit zum Download', 'Ready to download'],
     ['Abbrechen', 'Cancel'],
     ['Filter zurücksetzen', 'Reset filters'],
+    ['Filter', 'Filters'],
     ['Jetzt installieren', 'Install now'],
     ['Jetzt updaten', 'Install now'],
     ['Alle Dateien', 'All files'],

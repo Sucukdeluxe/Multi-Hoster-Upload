@@ -737,11 +737,14 @@ setTimeout(async () => {
       document.getElementById('queueStatusFilter').value = 'active';
       applyQueueDetailFilters();
       const button = document.getElementById('queueFilterResetBtn');
-      const before = { hidden: button.hidden, disabled: button.disabled };
+      const count = document.getElementById('queueActiveFilterCount');
+      const before = { hidden: button.hidden, disabled: button.disabled, count: count.textContent, active: count.classList.contains('is-active') };
       button.click();
       const after = {
         hidden: button.hidden,
         disabled: button.disabled,
+        count: count.textContent,
+        active: count.classList.contains('is-active'),
         sidebar: uploadSidebarFilter,
         search: document.getElementById('queueSearchInput').value,
         hoster: document.getElementById('queueHosterFilter').value,
@@ -754,7 +757,7 @@ setTimeout(async () => {
       renderQueueTable();
       return { before, after };
     })()\`);
-    check('Queue filter reset clears every filter without shifting its stable action', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.after.hidden === false && queueFilterReset.after.disabled === true && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
+    check('Queue filter reset clears every filter and updates the stable active count', queueFilterReset.before.hidden === false && queueFilterReset.before.disabled === false && queueFilterReset.before.count === '4' && queueFilterReset.before.active === true && queueFilterReset.after.hidden === false && queueFilterReset.after.disabled === true && queueFilterReset.after.count === '0' && queueFilterReset.after.active === false && queueFilterReset.after.sidebar === 'all' && queueFilterReset.after.search === '' && queueFilterReset.after.hoster === '' && queueFilterReset.after.status === '' && queueFilterReset.after.allPressed === 'true' && queueFilterReset.after.visible === 'filter-a|filter-b');
 
     const queueSelectionAnchor = await wc.executeJavaScript(\`(() => {
       queueJobs = ['a', 'b', 'c', 'd'].map(id => ({ id: 'anchor-' + id, file: 'C:/ui/anchor-' + id + '.bin', fileName: 'anchor-' + id + '.bin', hoster: 'byse.sx', status: 'queued', bytesUploaded: 0, bytesTotal: 100, progress: 0 }));

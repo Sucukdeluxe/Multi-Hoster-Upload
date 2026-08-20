@@ -290,6 +290,11 @@
             <svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 7l-4-5h8z" fill="#4caf50"/><path d="M8 11l-4-5h8z" fill="#4caf50"/><rect x="4" y="13" width="8" height="2" rx="0.5" fill="#4caf50"/></svg>
           </button>
           <div class="queue-filter-bar" aria-label="Warteschlange filtern">
+            <div class="queue-filter-summary">
+              <span>Filter</span>
+              <strong id="queueActiveFilterCount" aria-label="0">0</strong>
+            </div>
+            <span class="queue-filter-divider" aria-hidden="true"></span>
             <input class="key-input" id="queueSearchInput" type="search" placeholder="Dateiname suchen" aria-label="Dateiname suchen" style="max-width:260px">
             <select class="hs-input" id="queueHosterFilter" aria-label="Nach Hoster filtern" style="width:auto;min-width:150px"><option value="">Alle Hoster</option></select>
             <select class="hs-input" id="queueStatusFilter" aria-label="Nach Status filtern" style="width:auto;min-width:150px">

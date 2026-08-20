@@ -425,6 +425,42 @@ body {
 .queue-filter-bar .hs-input {
   height: 30px;
 }
+.queue-filter-summary {
+  min-width: 72px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  padding: 0 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+#queueActiveFilterCount {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  transition: background-color .16s ease, color .16s ease;
+}
+#queueActiveFilterCount.is-active {
+  background: var(--success);
+  color: #000;
+}
+.queue-filter-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
 .queue-container {
   flex: 1 1 0;
   min-height: 0;

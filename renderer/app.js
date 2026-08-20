@@ -3933,13 +3933,24 @@ function applyQueueDetailFilters() {
 }
 
 function _hasActiveQueueFilters() {
-  return uploadSidebarFilter !== 'all' || Boolean(queueSearchQuery || queueHosterFilter || queueStatusFilter);
+  return _activeQueueFilterCount() > 0;
+}
+
+function _activeQueueFilterCount() {
+  return Number(uploadSidebarFilter !== 'all') + Number(Boolean(queueSearchQuery)) + Number(Boolean(queueHosterFilter)) + Number(Boolean(queueStatusFilter));
 }
 
 function syncQueueFilterResetAction() {
   const button = document.getElementById('queueFilterResetBtn');
+  const count = document.getElementById('queueActiveFilterCount');
+  const activeCount = _activeQueueFilterCount();
+  const active = activeCount > 0;
+  if (count) {
+    count.textContent = String(activeCount);
+    count.setAttribute('aria-label', String(activeCount));
+    count.classList.toggle('is-active', active);
+  }
   if (!button) return;
-  const active = _hasActiveQueueFilters();
   button.disabled = !active;
 }
 
