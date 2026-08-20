@@ -8,6 +8,7 @@ const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage, c
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
     super();
+    this.webContents = new EventEmitter();
     this.options = options;
     this.showCalls = 0;
     this.startupEvents = [];
@@ -27,7 +28,7 @@ class TestBrowserWindow extends EventEmitter {
   loadFile(target, options) {
     this.startupEvents.push(`load:${target}`);
     this.loadOptions = options;
-    return Promise.reject(this.loadError);
+    return this.loadError ? Promise.reject(this.loadError) : Promise.resolve();
   }
 }
 
@@ -78,6 +79,7 @@ test('main window uses the branded application icon', () => {
 
 test('startup load registers visibility before navigation and shows only once', async () => {
   const startup = createStartupWindow(TestBrowserWindow, {});
+  startup.window.loadError = null;
   const loading = startup.load('renderer/index.html', () => {});
 
   assert.deepEqual(startup.window.startupEvents, [
@@ -86,9 +88,21 @@ test('startup load registers visibility before navigation and shows only once', 
   ]);
 
   startup.window.emit('ready-to-show');
+  assert.equal(startup.window.showCalls, 0);
+  startup.window.webContents.emit('did-finish-load');
   startup.window.emit('ready-to-show');
+  startup.window.webContents.emit('did-finish-load');
   await loading;
 
+  assert.equal(startup.window.showCalls, 1);
+});
+
+test('startup waits for native paint readiness when renderer loading finishes first', () => {
+  const startup = createStartupWindow(TestBrowserWindow, {});
+
+  startup.window.webContents.emit('did-finish-load');
+  assert.equal(startup.window.showCalls, 0);
+  startup.window.emit('ready-to-show');
   assert.equal(startup.window.showCalls, 1);
 });
 
@@ -150,4 +164,6 @@ test('header occupies its final geometry before asynchronous initialization', ()
   assert.ok(firstFrameInitialization < asynchronousInitialization);
   assert.match(mainSource, /createStartupQuery\([^,]+,\s*app\.getVersion\(\)\)/u);
   assert.doesNotMatch(mainSource, /runAutomaticUpdateCheck\(true\);\s*\},\s*3000\)/u);
+  assert.match(html, /class="upload-speed-baseline"/u);
+  assert.match(css, /\.upload-speed-baseline\s*\{[^}]*background:\s*var\(--success\);/su);
 });

@@ -55,7 +55,10 @@
     <div class="header-spacer" aria-hidden="true"></div>
     <div class="header-cluster header-utilities">
       <div class="upload-speed-sparkline" id="uploadSpeedSparkline" title="Aktuelle Upload-Geschwindigkeit" aria-label="Aktuelle Upload-Geschwindigkeit">
-        <canvas id="uploadSpeedCanvas" width="232" height="44" aria-hidden="true"></canvas>
+        <span class="upload-speed-chart" aria-hidden="true">
+          <span class="upload-speed-baseline"></span>
+          <canvas id="uploadSpeedCanvas" width="232" height="44"></canvas>
+        </span>
         <strong id="uploadSpeedValue">0 B/s</strong>
       </div>
       <button class="header-update-button" id="headerUpdateBtn" title="Nach Aktualisierungen suchen" aria-label="Nach Aktualisierungen suchen" data-tooltip="Nach Aktualisierungen suchen">
