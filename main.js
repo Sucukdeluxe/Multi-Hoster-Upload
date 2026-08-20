@@ -17,7 +17,7 @@ const DoodstreamUploader = require('./lib/doodstream-upload');
 const { selectUploadAuth } = require('./lib/account-auth');
 const { createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
-const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate } = require('./lib/updater');
+const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
 const { createOnlineBackup, downloadOnlineBackup, uploadOnlineBackup } = require('./lib/online-backup');
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
@@ -113,6 +113,8 @@ let preparedUpdate = null;
 let updatePreparationPromise = null;
 let updateQuitPending = false;
 let preparedUpdateLaunchStarted = false;
+let updateCheckInterval = null;
+const updateAnnouncementState = createUpdateAnnouncementState();
 let _lastImportPath = null;
 let dropTargetWindow = null;
 let tray = null;
@@ -1458,6 +1460,7 @@ function createWindow() {
   mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
     if (isInPlace || !isMainFrame) return;
     closeHandshakeReady = false;
+    updateAnnouncementState.reset();
     restoreClosePreparation(closePreparationAttempt);
   });
 
@@ -1541,6 +1544,25 @@ function createTray() {
 
 function updateTrayTooltip(text) {
   if (tray && !tray.isDestroyed()) tray.setToolTip(text);
+}
+
+function announceAvailableUpdate(result) {
+  if (!updateAnnouncementState.canAnnounce(result, closeHandshakeReady)) return false;
+  if (!safeSend('app:update-available', result)) return false;
+  updateAnnouncementState.markAnnounced(result);
+  return true;
+}
+
+async function runAutomaticUpdateCheck(forceRefresh) {
+  try {
+    logInfo('update-check: starting');
+    const result = await checkForUpdate({ forceRefresh });
+    logInfo(`update-check: available=${result && result.available}, remote=${result && result.remoteVersion}`);
+    logDebug(`update-check result: ${JSON.stringify(result)}`);
+    announceAvailableUpdate(result);
+  } catch (err) {
+    logError('update-check failed', err);
+  }
 }
 
 app.whenReady().then(async () => {
@@ -1630,20 +1652,9 @@ app.whenReady().then(async () => {
     }
   } catch {}
 
-  // Auto-check for updates after 3 seconds
-  setTimeout(async () => {
-    try {
-      logInfo('update-check: starting');
-      const result = await checkForUpdate();
-      logInfo(`update-check: available=${result && result.available}, remote=${result && result.remoteVersion}`);
-      logDebug(`update-check result: ${JSON.stringify(result)}`);
-      if (result && result.available && mainWindow && !mainWindow.isDestroyed()) {
-        safeSend('app:update-available', result);
-      }
-    } catch (err) {
-      logError('update-check failed', err);
-    }
-  }, 3000);
+  setTimeout(() => { void runAutomaticUpdateCheck(true); }, 3000);
+  updateCheckInterval = setInterval(() => { void runAutomaticUpdateCheck(true); }, 5 * 60 * 1000);
+  updateCheckInterval.unref?.();
 });
 
 app.on('window-all-closed', () => {
@@ -1663,6 +1674,8 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (quitTeardownStarted) return;
   quitTeardownStarted = true;
+  if (updateCheckInterval) clearInterval(updateCheckInterval);
+  updateCheckInterval = null;
   if (preparedUpdate && updateQuitPending && closeFlushApproved && !preparedUpdateLaunchStarted) {
     preparedUpdateLaunchStarted = true;
     try {
@@ -2856,9 +2869,9 @@ ipcMain.handle('copy-to-clipboard', (_event, text) => {
   return true;
 });
 
-ipcMain.handle('app:check-updates', async () => {
+ipcMain.handle('app:check-updates', async (_event, options) => {
   try {
-    return await checkForUpdate();
+    return await checkForUpdate({ forceRefresh: options && options.forceRefresh === true });
   } catch (err) {
     return { available: false, error: err.message };
   }
@@ -2912,7 +2925,12 @@ ipcMain.handle('app:quit', () => {
 });
 
 ipcMain.on('app:close-handshake-ready', (event) => {
-  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) closeHandshakeReady = true;
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+    closeHandshakeReady = true;
+    void checkForUpdate().then(announceAvailableUpdate).catch((error) => {
+      logError('update-check failed', error);
+    });
+  }
 });
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {

@@ -217,7 +217,7 @@ setTimeout(async () => {
     const englishSidebarHeadings = await wc.executeJavaScript('[...document.querySelectorAll("#upload-view, #accounts-view, #history-view")].map(view => [view.querySelector(".view-sidebar-kicker")?.textContent?.trim(), view.querySelector(".view-sidebar-title")?.textContent?.trim()].join("|"))');
     check('English sidebar hierarchy uses distinct translated kickers', englishSidebarHeadings.join('::') === 'Workspace|Uploads::Manage accounts|Accounts::Archive|History');
     const englishTelemetryLabels = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-label")].map(el => el.textContent.trim()).join("|")');
-    check('English upload telemetry is fully localized', englishTelemetryLabels === 'Total|Connections|Remaining|Running|Completed|Failed|Speed|ETA');
+    check('English upload telemetry is fully localized', englishTelemetryLabels === 'Total|Connections|Remaining|Remaining size|Running|Completed|Failed|Speed|ETA');
     const englishLayoutFits = await wc.executeJavaScript('(() => { const states = [...document.querySelectorAll(".tab")].map(tab => { tab.click(); const view = document.querySelector(".view.active"); return view && view.scrollWidth <= view.clientWidth + 1; }); document.querySelector(".tab[data-view=upload]")?.click(); return states.every(Boolean) && document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1; })()');
     check('English labels fit every main view without horizontal overflow', englishLayoutFits === true);
     const speedSparklineAcrossTabs = await wc.executeJavaScript('(() => [...document.querySelectorAll(".tab")].map(tab => { tab.click(); const widget = document.getElementById("uploadSpeedSparkline"); const rect = widget?.getBoundingClientRect(); const style = widget && getComputedStyle(widget); return Boolean(widget && !widget.classList.contains("is-hidden") && style.visibility === "visible" && style.opacity === "1" && rect.width > 0 && rect.height > 0); }))()');
@@ -447,10 +447,10 @@ setTimeout(async () => {
     check('Recent panel labels are consistently German', localizedRecentTabs === 'Dateien|Statistik');
 
     const localizedTelemetry = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-label")].map(el => el.textContent.trim()).join("|")');
-    check('Upload telemetry exposes all eight German labels', localizedTelemetry === 'Gesamt|Verbindungen|Verbleibend|Läuft|Fertig|Fehler|Geschwindigkeit|ETA');
+    check('Upload telemetry exposes all nine German labels', localizedTelemetry === 'Gesamt|Verbindungen|Verbleibend|Verbleibende Größe|Läuft|Fertig|Fehler|Geschwindigkeit|ETA');
 
     const initialTelemetryValues = await wc.executeJavaScript('[...document.querySelectorAll("#uploadTelemetry .upload-telemetry-value")].map(el => el.getAttribute("aria-label") || el.textContent.trim()).join("|")');
-    check('Upload telemetry starts with stable empty values', initialTelemetryValues === '0|0|0|0|0|0|0 B/s|--:--');
+    check('Upload telemetry starts with stable empty values', initialTelemetryValues === '0|0|0|0 B|0|0|0|0 B/s|--:--');
 
     const previewQueueCounts = await wc.executeJavaScript(\`(() => {
       queueJobs = [{ id: 'existing-done', file: 'C:/ui/existing-done.bin', fileName: 'existing-done.bin', hoster: 'doodstream.com', status: 'done', bytesUploaded: 1024, bytesTotal: 1024, speedKbs: 0, elapsed: 1, remaining: 0, progress: 1 }];
@@ -517,7 +517,7 @@ setTimeout(async () => {
       const total = document.getElementById('uploadTelemetryTotal');
       const rolling = total?.querySelectorAll(':scope > span').length;
       return {
-        values: ['Total', 'Connections', 'Remaining', 'Running', 'Completed', 'Failed', 'Speed', 'Eta'].map(key => {
+        values: ['Total', 'Connections', 'Remaining', 'RemainingSize', 'Running', 'Completed', 'Failed', 'Speed', 'Eta'].map(key => {
           const element = document.getElementById('uploadTelemetry' + key);
           return element?.getAttribute('aria-label') || element?.textContent.trim();
         }).join('|'),
@@ -526,7 +526,7 @@ setTimeout(async () => {
         speedPair: [document.getElementById('uploadTelemetrySpeed')?.textContent, document.getElementById('uploadSpeedValue')?.textContent].join('|')
       };
     })()\`);
-    check('Upload telemetry reflects queue and session activity', telemetryUpdate.values === '4|1|2|1|7|2|2 kB/s|00:03');
+    check('Upload telemetry reflects queue and session activity', telemetryUpdate.values === '4|1|2|5.00 KB|1|7|2|2 kB/s|00:03');
     check('Changing integer telemetry rolls vertically', telemetryUpdate.rolling === 2 && telemetryUpdate.direction === 'up');
     check('Header and sidebar speed update synchronously from the same live sample', telemetryUpdate.speedPair === '2 kB/s|2 kB/s');
     const secondSynchronizedSpeed = await wc.executeJavaScript('lastUploadStats = { ...lastUploadStats, globalSpeedKbs: 1536 }; updateStatusBar(); [document.getElementById("uploadTelemetrySpeed")?.textContent, document.getElementById("uploadSpeedValue")?.textContent].join("|")');

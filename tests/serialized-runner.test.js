@@ -29,4 +29,25 @@ describe('serialized runner', () => {
     assert.equal(flushed, true);
     assert.deepEqual(calls, ['start:first', 'end:first', 'start:second', 'end:second']);
   });
+
+  it('queues work before readiness and drains every task in arrival order', async () => {
+    const { createReadySerializedRunner } = require('../lib/serialized-runner');
+    const calls = [];
+    const runner = createReadySerializedRunner(async (value) => {
+      calls.push(value);
+      return value;
+    });
+
+    const first = runner.run('first');
+    const second = runner.run('second');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(runner.isReady, false);
+    assert.deepEqual(calls, []);
+    assert.equal(runner.ready(), true);
+    assert.equal(runner.ready(), false);
+    assert.deepEqual(await Promise.all([first, second]), ['first', 'second']);
+    assert.deepEqual(calls, ['first', 'second']);
+    assert.equal(runner.isReady, true);
+  });
 });

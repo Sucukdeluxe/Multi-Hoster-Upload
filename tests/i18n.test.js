@@ -11,6 +11,11 @@ test('translates permanent source deletion controls to English', () => {
   assert.equal(translateText('Dauerhaftes Löschen aktivieren', 'en'), 'Enable permanent deletion');
 });
 
+test('translates the remaining upload size label', () => {
+  assert.equal(translateText('Verbleibende Größe', 'en'), 'Remaining size');
+  assert.equal(translateText('Remaining size', 'de'), 'Verbleibende Größe');
+});
+
 test('English is the fallback language and German remains selectable', () => {
   assert.equal(normalizeLanguage(), 'en');
   assert.equal(normalizeLanguage('fr'), 'en');

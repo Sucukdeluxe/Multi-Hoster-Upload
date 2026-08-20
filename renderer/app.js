@@ -416,7 +416,7 @@ async function init() {
   renderSettings();
   renderAccounts();
   setupListeners();
-  setupDragDrop();
+  importEntryCoordinator.ready();
   initUploadSpeedSparkline();
   restoreQueueColumnWidths();
   loadHistory();
@@ -826,8 +826,8 @@ function _syncHeaderUpdateState() {
   }
 }
 
-async function requestUpdateCheck() {
-  if (_knownUpdateInfo && _knownUpdateInfo.available) {
+async function requestUpdateCheck({ forceRefresh = true } = {}) {
+  if (!forceRefresh && _knownUpdateInfo && _knownUpdateInfo.available) {
     showUpdateBanner(_knownUpdateInfo);
     return _knownUpdateInfo;
   }
@@ -836,7 +836,7 @@ async function requestUpdateCheck() {
   _syncHeaderUpdateState();
   showCopyToast('Suche nach Updates…');
   try {
-    const result = await window.api.checkForUpdate();
+    const result = await window.api.checkForUpdate({ forceRefresh });
     if (result && result.available) {
       showUpdateBanner(result);
       showCopyToast('Update gefunden!');
@@ -1368,17 +1368,24 @@ function clearPersistedQueueStateSoon() {
 }
 
 // --- File selection ---
+let dragDropBound = false;
 function setupDragDrop() {
+  if (dragDropBound) return;
+  dragDropBound = true;
   const dropZone = document.getElementById('dropZone');
-  // Allow drop on the entire upload view
   const uploadView = document.getElementById('upload-view');
   let _dragCounter = 0;
-  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); e.stopPropagation(); });
-  dropZone.addEventListener('dragenter', (e) => { e.preventDefault(); _dragCounter++; dropZone.classList.add('drag-over'); });
-  dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); _dragCounter--; if (_dragCounter <= 0) { _dragCounter = 0; dropZone.classList.remove('drag-over'); } });
+  const acceptCopy = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  };
+  dropZone.addEventListener('dragover', acceptCopy);
+  dropZone.addEventListener('dragenter', (e) => { acceptCopy(e); _dragCounter++; dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); e.stopPropagation(); _dragCounter--; if (_dragCounter <= 0) { _dragCounter = 0; dropZone.classList.remove('drag-over'); } });
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault(); e.stopPropagation(); _dragCounter = 0; dropZone.classList.remove('drag-over');
-    addDroppedFiles(e.dataTransfer.files).catch(console.error);
+    enqueueDroppedFiles(e.dataTransfer?.files).catch(console.error);
   });
   dropZone.addEventListener('click', () => pickFiles());
   dropZone.addEventListener('keydown', (event) => {
@@ -1387,12 +1394,12 @@ function setupDragDrop() {
     pickFiles();
   });
 
-  // Also handle drops on queue container
-  uploadView.addEventListener('dragover', (e) => { e.preventDefault(); });
+  uploadView.addEventListener('dragover', acceptCopy);
+  uploadView.addEventListener('dragenter', acceptCopy);
   uploadView.addEventListener('drop', (e) => {
-    e.preventDefault();
-    if (e.target.closest('.drop-zone')) return; // handled above
-    addDroppedFiles(e.dataTransfer.files).catch(console.error);
+    e.preventDefault(); e.stopPropagation();
+    if (e.target.closest('.drop-zone')) return;
+    enqueueDroppedFiles(e.dataTransfer?.files).catch(console.error);
   });
 }
 
@@ -1401,7 +1408,24 @@ let _pendingImportInspection = null;
 let _importCoordination = Promise.resolve();
 let _importGeneration = 0;
 let _pendingImportInspections = 0;
-let _addingDropped = false;
+const importEntryCoordinator = window.SerializedRunner.createReadySerializedRunner(async (kind, payload) => {
+  if (kind === 'drop') return processDroppedFiles(payload);
+  return addPathsToQueue(payload);
+});
+
+function enqueueDroppedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (files.length === 0) return Promise.resolve(null);
+  return importEntryCoordinator.run('drop', files);
+}
+
+function enqueueImportEntries(entries) {
+  const snapshot = Array.from(entries || [], entry => (
+    entry && typeof entry === 'object' ? { ...entry } : entry
+  ));
+  if (snapshot.length === 0) return Promise.resolve(null);
+  return importEntryCoordinator.run('entries', snapshot);
+}
 
 function existingImportPaths() {
   return [...selectedFiles.map(file => file.path), ..._pendingFiles.map(file => file.path), ...queueJobs.map(job => job.file)];
@@ -1522,44 +1546,38 @@ function coordinateImportEntries(entries) {
   return pending;
 }
 
-async function addDroppedFiles(fileList) {
-  if (_addingDropped) return;
-  _addingDropped = true;
-  try {
-    const entries = [];
-    for (const file of Array.from(fileList)) {
-      let filePath = '';
-      try { filePath = window.api.getPathForFile(file); } catch { filePath = file.path || ''; }
-      if (!filePath) continue;
-      if (file.type === '' && file.size === 0) {
-        try {
-          const folderFiles = await window.api.resolveFolderFiles(filePath);
-          if (folderFiles && folderFiles.length > 0) {
-            entries.push(...folderFiles);
-            continue;
-          }
-        } catch {}
-      }
-      entries.push({ path: filePath, name: file.name || '', size: file.size });
+async function processDroppedFiles(files) {
+  const entries = [];
+  for (const file of files) {
+    let filePath = '';
+    try { filePath = window.api.getPathForFile(file); } catch { filePath = file.path || ''; }
+    if (!filePath) continue;
+    if (file.type === '' && file.size === 0) {
+      try {
+        const folderFiles = await window.api.resolveFolderFiles(filePath);
+        if (folderFiles && folderFiles.length > 0) {
+          entries.push(...folderFiles);
+          continue;
+        }
+      } catch {}
     }
-    await addPathsToQueue(entries);
-  } finally {
-    _addingDropped = false;
+    entries.push({ path: filePath, name: file.name || '', size: file.size });
   }
+  return addPathsToQueue(entries);
 }
 
 async function pickFiles() {
   const paths = await window.api.selectFiles();
   if (!paths) return;
-  await addPathsToQueue(paths);
+  await enqueueImportEntries(paths);
 }
 
 async function pickFolder() {
   const richFiles = window.api.selectFolderWithSizes ? await window.api.selectFolderWithSizes() : null;
-  if (richFiles && Array.isArray(richFiles)) return addPathsToQueue(richFiles);
+  if (richFiles && Array.isArray(richFiles)) return enqueueImportEntries(richFiles);
   const paths = await window.api.selectFolder();
   if (!paths) return;
-  return addPathsToQueue(paths);
+  return enqueueImportEntries(paths);
 }
 
 function addPathsToQueue(paths) {
@@ -4187,6 +4205,7 @@ function updateStatusBar() {
   _setRollingUploadMetric('uploadTelemetryTotal', stats.total);
   _setRollingUploadMetric('uploadTelemetryConnections', lastUploadStats.activeJobs || 0);
   _setRollingUploadMetric('uploadTelemetryRemaining', stats.remaining);
+  _setUploadTelemetryText('uploadTelemetryRemainingSize', formatBytes(stats.bytesRemaining));
   _setRollingUploadMetric('uploadTelemetryRunning', stats.inProgress);
   _setRollingUploadMetric('uploadTelemetryCompleted', _sessionDoneCount);
   _setRollingUploadMetric('uploadTelemetryFailed', Math.max(_sessionErrorCount, stats.errors));
@@ -8097,6 +8116,7 @@ function updateStatsPanel() {
 window.api.onUpdateAvailable(showUpdateBanner);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
+setupDragDrop();
 init().then(() => {
   window.api.signalCloseHandshakeReady();
 }).catch((err) => {

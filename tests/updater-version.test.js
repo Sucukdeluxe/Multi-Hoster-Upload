@@ -4,9 +4,10 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const Module = require('node:module');
 const { pathToFileURL } = require('node:url');
 
-const { isNewer, resolveReleaseVersion, fetchGithubReleaseNotes, prepareUpdate, launchPreparedUpdate, pickSetupAsset, parseLatestYml } = require('../lib/updater');
+const { isNewer, resolveReleaseVersion, fetchGithubReleaseNotes, prepareUpdate, launchPreparedUpdate, pickSetupAsset, parseLatestYml, createUpdateAnnouncementState } = require('../lib/updater');
 const releasePlanUrl = pathToFileURL(path.resolve(__dirname, '../scripts/release-plan.mjs')).href;
 
 test('bridge title resolves product version instead of transport tag', () => {
@@ -84,6 +85,114 @@ test('update preparation writes a verified installer without launching it', asyn
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('update preparation refreshes a cached release before downloading the installer', async () => {
+  const updaterPath = require.resolve('../lib/updater');
+  const originalLoad = Module._load;
+  const originalFetch = global.fetch;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-updater-refresh-test-'));
+  const installer = Buffer.alloc(128 * 1024, 0);
+  installer[0] = 0x4d;
+  installer[1] = 0x5a;
+  const sha512 = crypto.createHash('sha512').update(installer).digest('base64');
+  const oldVersion = '2.1.23';
+  const latestVersion = '2.1.24';
+  const createRelease = version => ({
+    name: `Multi-Hoster-Upload v${version}`,
+    tag_name: `v${version}`,
+    html_url: `https://update.invalid/releases/${version}`,
+    body: `Release ${version}`,
+    assets: [
+      {
+        name: `Multi-Hoster-Upload Setup ${version}.exe`,
+        size: installer.length,
+        browser_download_url: `https://update.invalid/${version}/setup.exe`
+      },
+      {
+        name: 'latest.yml',
+        browser_download_url: `https://update.invalid/${version}/latest.yml`
+      }
+    ]
+  });
+  const createResponse = payload => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify(payload),
+    json: async () => payload
+  });
+  const createInstallerResponse = () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader: () => {
+        let served = false;
+        return {
+          read: async () => {
+            if (served) return { done: true };
+            served = true;
+            return { done: false, value: installer };
+          }
+        };
+      }
+    }
+  });
+  const createManifestResponse = version => ({
+    ok: true,
+    status: 200,
+    text: async () => `version: ${version}\npath: Multi-Hoster-Upload Setup ${version}.exe\nsha512: ${sha512}\nsize: ${installer.length}\n`
+  });
+
+  Module._load = function load(request, parent, isMain) {
+    if (request === 'electron') return { app: { getVersion: () => '2.1.22', getPath: () => tempDir } };
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[updaterPath];
+  const isolatedUpdater = require(updaterPath);
+
+  try {
+    global.fetch = async url => {
+      const value = String(url);
+      if (value.includes('/api/v1/repos/')) return createResponse([createRelease(oldVersion)]);
+      if (value.includes('api.github.com')) return createResponse({ body: `Release ${oldVersion}` });
+      throw new Error(`Unexpected initial request: ${value}`);
+    };
+    const oldCheck = await isolatedUpdater.checkForUpdate();
+    assert.equal(oldCheck.remoteVersion, oldVersion);
+
+    global.fetch = async url => {
+      const value = String(url);
+      if (value.includes('/api/v1/repos/')) return createResponse([createRelease(latestVersion)]);
+      if (value.includes('api.github.com')) return createResponse({ body: `Release ${latestVersion}` });
+      if (value.endsWith(`${oldVersion}/latest.yml`)) return createManifestResponse(oldVersion);
+      if (value.endsWith(`${latestVersion}/latest.yml`)) return createManifestResponse(latestVersion);
+      if (value.endsWith(`${oldVersion}/setup.exe`) || value.endsWith(`${latestVersion}/setup.exe`)) return createInstallerResponse();
+      throw new Error(`Unexpected refreshed request: ${value}`);
+    };
+
+    const prepared = await isolatedUpdater.prepareUpdate(null, { tempDir });
+    assert.equal(prepared.remoteVersion, latestVersion);
+    assert.equal(prepared.assetName, `Multi-Hoster-Upload Setup ${latestVersion}.exe`);
+  } finally {
+    global.fetch = originalFetch;
+    Module._load = originalLoad;
+    delete require.cache[updaterPath];
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('an update found before renderer readiness remains announceable afterwards', () => {
+  const state = createUpdateAnnouncementState();
+  const update = { available: true, remoteVersion: '2.1.24' };
+
+  assert.equal(state.canAnnounce(update, false), false);
+  assert.equal(state.canAnnounce(update, true), true);
+  assert.equal(state.canAnnounce(update, true), true);
+  state.markAnnounced(update);
+  assert.equal(state.canAnnounce(update, true), false);
+
+  state.reset();
+  assert.equal(state.canAnnounce(update, true), true);
 });
 
 test('update preparation fails closed when checksum metadata is unavailable', async () => {

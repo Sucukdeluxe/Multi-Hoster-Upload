@@ -21,3 +21,18 @@ test('queue totals keep skipped and aborted jobs out of remaining work', () => {
   });
   assert.equal(stats.remainingSize, 160);
 });
+
+test('remaining bytes decrease with progress and return when a failed job is queued again', () => {
+  const jobs = [
+    { status: 'queued', bytesTotal: 1024, bytesUploaded: 0 },
+    { status: 'uploading', bytesTotal: 2048, bytesUploaded: 512 },
+    { status: 'error', bytesTotal: 4096, bytesUploaded: 1024 }
+  ];
+
+  assert.equal(calculateQueueStats(jobs).bytesRemaining, 2560);
+  jobs[1].bytesUploaded = 1536;
+  assert.equal(calculateQueueStats(jobs).bytesRemaining, 1536);
+  jobs[2].status = 'queued';
+  jobs[2].bytesUploaded = 0;
+  assert.equal(calculateQueueStats(jobs).bytesRemaining, 5632);
+});

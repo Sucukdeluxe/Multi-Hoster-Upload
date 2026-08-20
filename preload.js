@@ -63,7 +63,7 @@ contextBridge.exposeInMainWorld('api', {
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
 
   // Updates
-  checkForUpdate: () => ipcRenderer.invoke('app:check-updates'),
+  checkForUpdate: (options = {}) => ipcRenderer.invoke('app:check-updates', { forceRefresh: options && options.forceRefresh === true }),
   installUpdate: () => ipcRenderer.invoke('app:install-update'),
   abortUpdate: () => ipcRenderer.invoke('app:abort-update'),
   getVersion: () => ipcRenderer.invoke('app:get-version'),

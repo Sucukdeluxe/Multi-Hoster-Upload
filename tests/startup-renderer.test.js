@@ -103,3 +103,24 @@ test('startup load forwards navigation options before the renderer becomes visib
 
   assert.deepEqual(startup.window.loadOptions, options);
 });
+
+test('desktop drag and drop is accepted before asynchronous renderer initialization', () => {
+  const projectRoot = path.join(__dirname, '..');
+  const appSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
+  const earlyBinding = appSource.lastIndexOf('\nsetupDragDrop();');
+  const initialization = appSource.lastIndexOf('\ninit().then(');
+
+  assert.notEqual(earlyBinding, -1);
+  assert.notEqual(initialization, -1);
+  assert.ok(earlyBinding < initialization);
+  assert.match(appSource, /dataTransfer\.dropEffect\s*=\s*['"]copy['"]/u);
+});
+
+test('upload sidebar renders and updates the remaining upload size', () => {
+  const projectRoot = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(projectRoot, 'renderer', 'index.html'), 'utf8');
+  const appSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /Verbleibende Größe[\s\S]*id="uploadTelemetryRemainingSize"[^>]*>0 B</u);
+  assert.match(appSource, /_setUploadTelemetryText\(['"]uploadTelemetryRemainingSize['"],\s*formatBytes\(stats\.bytesRemaining\)\)/u);
+});

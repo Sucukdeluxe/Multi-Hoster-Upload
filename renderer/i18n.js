@@ -82,6 +82,7 @@
     ['Aktuelle Upload-Geschwindigkeit', 'Current upload speed'],
     ['Gesamt', 'Total'],
     ['Verbindungen', 'Connections'],
+    ['Verbleibende Größe', 'Remaining size'],
     ['Verbleibend', 'Remaining'],
     ['Läuft', 'Running'],
     ['Suche Aktualisierungen', 'Check for updates'],
