@@ -2381,7 +2381,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .update-dialog {
-  width: min(480px, 100%);
+  width: min(576px, 100%);
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 0 16px;
@@ -2468,7 +2468,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .update-release-notes {
   grid-column: 1 / -1;
-  max-height: 150px;
+  max-height: 180px;
   margin-top: 18px;
   padding: 12px;
   overflow: auto;
