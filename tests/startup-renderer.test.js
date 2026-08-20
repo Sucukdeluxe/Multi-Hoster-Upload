@@ -160,6 +160,7 @@ test('header occupies its final geometry before asynchronous initialization', ()
   const asynchronousInitialization = appSource.lastIndexOf('\ninit().then(');
 
   assert.doesNotMatch(updateButton, /\shidden(?:\s|>)/u);
+  assert.doesNotMatch(updateButton, /\stitle=/u);
   assert.ok(updateSlotIndex >= 0 && updateSlotIndex < speedWidgetIndex);
   assert.match(css, /\.header-update-slot\s*\{[^}]*width:\s*0;[^}]*flex:\s*0 0 0;[^}]*overflow:\s*hidden;/su);
   assert.match(css, /\.header-update-slot\.is-visible\s*\{[^}]*width:\s*146px;[^}]*flex-basis:\s*146px;/su);

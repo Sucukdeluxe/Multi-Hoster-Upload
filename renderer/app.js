@@ -820,7 +820,6 @@ function _syncHeaderUpdateState() {
     button.tabIndex = available ? 0 : -1;
     button.setAttribute('aria-busy', _updateCheckBusy ? 'true' : 'false');
     button.setAttribute('aria-label', hint);
-    button.title = hint;
     button.dataset.tooltip = hint;
     _setHeaderUpdateLabel(_updateCheckBusy ? 'Prüfen…' : (available ? 'Update verfügbar' : 'Update'));
   }
