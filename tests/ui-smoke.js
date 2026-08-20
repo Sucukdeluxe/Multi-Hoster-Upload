@@ -2475,15 +2475,21 @@ setTimeout(async () => {
         messageHidden: document.getElementById('updateMessage').hidden,
         messageText: document.getElementById('updateMessage').textContent,
         progressLabel: progress.getAttribute('aria-label'),
-        progressText: progress.getAttribute('aria-valuetext')
+        progressText: progress.getAttribute('aria-valuetext'),
+        progressState: progress.dataset.state,
+        progressColor: getComputedStyle(progress).backgroundColor,
+        progressTrackWidth: progress.parentElement.getBoundingClientRect().width,
+        progressTextTop: document.getElementById('updateProgressText').getBoundingClientRect().top,
+        progressTrackBottom: progress.parentElement.getBoundingClientRect().bottom
       };
     })()\`);
     check('Busy update keeps its progress dialog open with a dangerous download cancellation action', busyUpdateState.display === 'flex' && busyUpdateState.hidden === 'false' && busyUpdateState.closeDisabled === true && busyUpdateState.dismissDisabled === false && busyUpdateState.dismissText === 'Download abbrechen' && busyUpdateState.dismissDanger === true && busyUpdateState.headerHidden === false);
     check('Update progress exposes an accessible live value', busyUpdateState.progressLabel === 'Update-Fortschritt' && busyUpdateState.progressText === 'Download 50%');
+    check('Update download progress is green, wide, and places its status below the line', busyUpdateState.progressState === 'downloading' && busyUpdateState.progressColor === 'rgb(117, 211, 155)' && busyUpdateState.progressTrackWidth >= 390 && busyUpdateState.progressTextTop >= busyUpdateState.progressTrackBottom);
     check('Busy update shows progress only below the bar', busyUpdateState.messageHidden === true && busyUpdateState.messageText === 'Update v9.9.9 verfügbar');
 
-    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "error", error: "Netzwerkfehler" }); document.getElementById("dismissUpdateBtn").click(); document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden');
-    check('Update errors restore all close actions', updateErrorRecovery === 'none|false|false|false');
+    const updateErrorRecovery = await wc.executeJavaScript('handleUpdateProgress({ stage: "aborted", error: "Update abgebrochen" }); (() => { const bar = document.getElementById("updateProgressBar"); const state = [bar.style.width, bar.dataset.state, getComputedStyle(bar).backgroundColor].join("|"); document.getElementById("dismissUpdateBtn").click(); return state + "|" + document.getElementById("updateBanner").style.display + "|" + document.getElementById("updateCloseBtn").disabled + "|" + document.getElementById("dismissUpdateBtn").disabled + "|" + document.getElementById("headerUpdateBtn").hidden; })()');
+    check('Canceled updates preserve progress in red and restore all close actions', updateErrorRecovery === '50%|aborted|rgb(255, 133, 140)|none|false|false|false');
 
     const initialInstallUpdateHandler = initialIpcHandlers.get('app:install-update');
     const initialUpdateQueueHandler = initialIpcHandlers.get('save-pending-queue');

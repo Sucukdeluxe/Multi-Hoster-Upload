@@ -7492,7 +7492,7 @@ function showUpdateBanner(info) {
     installButton.disabled = false;
     installButton.textContent = 'Jetzt installieren';
   }
-  _setUpdateProgress(0, 'Bereit zum Download');
+  _setUpdateProgress(0, 'Bereit zum Download', 'ready');
   _setUpdateDialogBusy(false);
   _syncHeaderUpdateState();
   _setUpdateDialogVisible(true);
@@ -7505,38 +7505,39 @@ function handleUpdateProgress(data) {
   if (progress.stage === 'starting') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, true);
-    _setUpdateProgress(0, 'Download 0%');
+    _setUpdateProgress(0, 'Download 0%', 'downloading');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Download 0%';
   } else if (progress.stage === 'downloading') {
     const percent = Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0)));
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, true);
-    _setUpdateProgress(percent, `Download ${percent}%`);
+    _setUpdateProgress(percent, `Download ${percent}%`, 'downloading');
     if (message) message.hidden = true;
     if (button) button.textContent = `Download ${percent}%`;
   } else if (progress.stage === 'verifying') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, false);
-    _setUpdateProgress(100, 'Prüfen…');
+    _setUpdateProgress(100, 'Prüfen…', 'verifying');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Prüfen…';
   } else if (progress.stage === 'prepared') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, false);
-    _setUpdateProgress(100, 'Neustart…');
+    _setUpdateProgress(100, 'Neustart…', 'prepared');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'launching' || progress.stage === 'done') {
     _updateInstallBusy = true;
     _setUpdateDialogBusy(true, false);
-    _setUpdateProgress(100, 'Neustart…');
+    _setUpdateProgress(100, 'Neustart…', 'prepared');
     if (message) message.hidden = true;
     if (button) button.textContent = 'Neustart…';
   } else if (progress.stage === 'aborted') {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
-    _setUpdateProgress(0, 'Download abgebrochen');
+    const currentProgress = Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0;
+    _setUpdateProgress(currentProgress, 'Download abgebrochen', 'aborted');
     if (message) {
       message.hidden = false;
       message.textContent = 'Download abgebrochen';
@@ -7549,7 +7550,8 @@ function handleUpdateProgress(data) {
   } else if (progress.stage === 'error') {
     _updateInstallBusy = false;
     _setUpdateDialogBusy(false);
-    _setUpdateProgress(0, 'Update fehlgeschlagen');
+    const currentProgress = Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0;
+    _setUpdateProgress(currentProgress, 'Update fehlgeschlagen', 'error');
     if (message) {
       message.hidden = false;
       message.textContent = `Update fehlgeschlagen: ${String(progress.error || 'Unbekannter Fehler').slice(0, 400)}`;
@@ -7669,7 +7671,7 @@ async function handleUpdateDismiss() {
   if (!_updateDownloadCancelable || _updateCancelBusy) return false;
   _updateCancelBusy = true;
   _setUpdateDialogBusy(true, true);
-  _setUpdateProgress(Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0, 'Abbrechen…');
+  _setUpdateProgress(Number(document.getElementById('updateProgressBar')?.getAttribute('aria-valuenow')) || 0, 'Abbrechen…', 'aborted');
   try {
     const canceled = await window.api.abortUpdate();
     if (!canceled) handleUpdateProgress({ stage: 'error', error: 'Update konnte nicht abgebrochen werden' });
@@ -7699,7 +7701,7 @@ function _setUpdateDialogBusy(busy, cancelable = false) {
   if (busy && dialog && (!dialog.contains(document.activeElement) || document.activeElement.matches?.(':disabled'))) dialog.focus();
 }
 
-function _setUpdateProgress(percent, text) {
+function _setUpdateProgress(percent, text, state = 'ready') {
   const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
   const progressText = document.getElementById('updateProgressText');
   const progressBar = document.getElementById('updateProgressBar');
@@ -7707,6 +7709,7 @@ function _setUpdateProgress(percent, text) {
   if (progressBar) {
     progressBar.setAttribute('aria-valuenow', String(value));
     progressBar.setAttribute('aria-valuetext', String(text || `${value}%`));
+    progressBar.dataset.state = state;
     if ('value' in progressBar) progressBar.value = value;
     progressBar.style.width = `${value}%`;
   }
@@ -7720,7 +7723,7 @@ async function installKnownUpdate() {
   }
   _updateInstallBusy = true;
   _setUpdateDialogBusy(true, true);
-  _setUpdateProgress(0, 'Download 0%');
+  _setUpdateProgress(0, 'Download 0%', 'downloading');
   const message = document.getElementById('updateMessage');
   const button = document.getElementById('installUpdateBtn');
   if (message) message.hidden = true;

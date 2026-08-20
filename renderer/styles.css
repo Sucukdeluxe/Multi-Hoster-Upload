@@ -2424,9 +2424,8 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .update-progress {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
   margin-top: 22px;
 }
 
@@ -2473,12 +2472,18 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   height: 100%;
   display: block;
   border-radius: inherit;
-  background: var(--accent);
-  transition: width .2s ease;
+  background: var(--success);
+  transition: width .48s cubic-bezier(.22, 1, .36, 1), background-color .16s ease;
+}
+
+.update-progress-track span[data-state="aborted"],
+.update-progress-track span[data-state="error"] {
+  background: var(--danger);
 }
 
 #updateProgressText {
   min-width: 34px;
+  justify-self: end;
   color: var(--text-dim);
   font-size: 11px;
   text-align: right;
