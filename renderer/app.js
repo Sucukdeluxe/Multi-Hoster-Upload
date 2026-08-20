@@ -7690,6 +7690,7 @@ function _setUpdateDialogBusy(busy, cancelable = false) {
   if (installButton) installButton.disabled = busy;
   if (closeButton) closeButton.disabled = busy;
   if (dismissButton) {
+    dismissButton.classList.toggle('update-cancel-button', Boolean(busy && cancelable));
     dismissButton.disabled = Boolean(busy && (!cancelable || _updateCancelBusy));
     dismissButton.textContent = busy && cancelable
       ? (_updateCancelBusy ? 'Abbrechen…' : 'Download abbrechen')
