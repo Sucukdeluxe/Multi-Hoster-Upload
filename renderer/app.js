@@ -801,6 +801,7 @@ function _setHeaderUpdateLabel(text) {
 
 function _syncHeaderUpdateState() {
   const button = document.getElementById('headerUpdateBtn');
+  const slot = document.getElementById('headerUpdateSlot');
   const available = !!(_knownUpdateInfo && _knownUpdateInfo.available);
   const version = available ? String(_knownUpdateInfo.remoteVersion || '').replace(/^v/i, '') : '';
   const hint = _updateCheckBusy
@@ -808,10 +809,15 @@ function _syncHeaderUpdateState() {
     : available
       ? `Update v${version || 'unbekannt'} verfügbar. Klicken zum Installieren.`
       : 'Nach Aktualisierungen suchen';
+  if (slot) {
+    slot.classList.toggle('is-visible', available);
+    slot.setAttribute('aria-hidden', available ? 'false' : 'true');
+  }
   if (button) {
     button.classList.toggle('update-available', available);
     button.classList.toggle('is-checking', _updateCheckBusy);
-    button.disabled = _updateCheckBusy;
+    button.disabled = !available || _updateCheckBusy;
+    button.tabIndex = available ? 0 : -1;
     button.setAttribute('aria-busy', _updateCheckBusy ? 'true' : 'false');
     button.setAttribute('aria-label', hint);
     button.title = hint;
@@ -843,6 +849,7 @@ async function requestUpdateCheck({ forceRefresh = true } = {}) {
     } else if (result && result.error) {
       showCopyToast('Updateprüfung fehlgeschlagen');
     } else {
+      _knownUpdateInfo = null;
       showCopyToast('Kein Update verfügbar');
     }
     return result;

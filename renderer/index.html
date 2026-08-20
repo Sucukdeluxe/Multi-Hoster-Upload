@@ -54,6 +54,12 @@
     </div>
     <div class="header-spacer" aria-hidden="true"></div>
     <div class="header-cluster header-utilities">
+      <div class="header-update-slot" id="headerUpdateSlot" aria-hidden="true">
+        <button class="header-update-button" id="headerUpdateBtn" title="Nach Aktualisierungen suchen" aria-label="Nach Aktualisierungen suchen" data-tooltip="Nach Aktualisierungen suchen" tabindex="-1" disabled>
+          <svg class="header-action-icon" aria-hidden="true"><use href="#icon-download"></use></svg>
+          <span class="header-update-label">Update</span>
+        </button>
+      </div>
       <div class="upload-speed-sparkline" id="uploadSpeedSparkline" title="Aktuelle Upload-Geschwindigkeit" aria-label="Aktuelle Upload-Geschwindigkeit">
         <span class="upload-speed-chart" aria-hidden="true">
           <span class="upload-speed-baseline"></span>
@@ -61,10 +67,6 @@
         </span>
         <strong id="uploadSpeedValue">0 B/s</strong>
       </div>
-      <button class="header-update-button" id="headerUpdateBtn" title="Nach Aktualisierungen suchen" aria-label="Nach Aktualisierungen suchen" data-tooltip="Nach Aktualisierungen suchen">
-        <svg class="header-action-icon" aria-hidden="true"><use href="#icon-download"></use></svg>
-        <span class="header-update-label">Update</span>
-      </button>
       <span class="header-divider" aria-hidden="true"></span>
       <nav class="menu-bar" id="menuBar" aria-label="Anwendungsmenüs">
         <div class="menu-bar-item" data-menu="datei">

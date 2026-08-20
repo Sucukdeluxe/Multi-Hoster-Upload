@@ -185,8 +185,8 @@ setTimeout(async () => {
   }
 
   try {
-    const startupUpdateState = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [_knownUpdateInfo?.remoteVersion, button?.hidden, getComputedStyle(button).display, document.getElementById("updateBanner")?.style.display].join("|"); })()');
-    check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|false|flex|flex');
+    const startupUpdateState = await wc.executeJavaScript('(() => { const slot = document.getElementById("headerUpdateSlot"); return [_knownUpdateInfo?.remoteVersion, slot?.classList.contains("is-visible"), slot?.getAttribute("aria-hidden"), document.getElementById("updateBanner")?.style.display].join("|"); })()');
+    check('Startup update survives pending renderer initialization', startupUpdateState === '9.9.8|true|false|flex');
     await wc.executeJavaScript('_knownUpdateInfo = null; closeUpdateDialog(); _syncHeaderUpdateState();');
 
     const germanStartupReady = await waitUntil(() => wc.executeJavaScript('document.documentElement.lang + "|" + document.getElementById("languageInput")?.value + "|" + [...document.querySelectorAll(".tab")].map(tab => tab.textContent.trim()).join(",")'));
@@ -290,8 +290,8 @@ setTimeout(async () => {
     const headerUpdateButtonExists = await wc.executeJavaScript('Boolean(document.getElementById("headerUpdateBtn"))');
     check('App header exposes the update action', headerUpdateButtonExists);
 
-    const initialHeaderUpdateVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
-    check('Header update action keeps its layout slot before an update is available', initialHeaderUpdateVisibility === 'false|flex');
+    const initialHeaderUpdateVisibility = await wc.executeJavaScript('(() => { const slot = document.getElementById("headerUpdateSlot"); const button = document.getElementById("headerUpdateBtn"); return [slot?.classList.contains("is-visible"), slot?.getAttribute("aria-hidden"), Math.round(slot?.getBoundingClientRect().width || 0), button?.disabled, button?.tabIndex].join("|"); })()');
+    check('Header update action is fully collapsed before an update is available', initialHeaderUpdateVisibility === 'false|true|0|true|-1');
 
     const initialUpdateLabel = await wc.executeJavaScript('document.querySelector("#headerUpdateBtn .header-update-label")?.textContent?.trim()');
     check('App header uses the compact update label', initialUpdateLabel === 'Update');
@@ -1198,20 +1198,20 @@ setTimeout(async () => {
       document.getElementById('headerUpdateBtn').click();
     })()\`);
     await new Promise(resolve => setTimeout(resolve, 100));
-    const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy"), header?.hidden].join("|"); })()');
-    check('All update entry points share one in-flight check', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true|false');
+    const coordinatedUpdateBusy = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); const slot = document.getElementById("headerUpdateSlot"); return [manual?.disabled, manual?.getAttribute("aria-busy"), manual?.textContent?.trim(), header?.disabled, header?.getAttribute("aria-busy"), slot?.classList.contains("is-visible")].join("|"); })()');
+    check('All update entry points share one in-flight check without revealing the header action', updateCheckCallCount === 1 && coordinatedUpdateBusy === 'true|true|Prüfe…|true|true|false');
     updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false, error: 'Simulierter Netzwerkfehler' }));
     await new Promise(resolve => setTimeout(resolve, 150));
-    const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); return [manual?.disabled, header?.disabled, header?.hidden, manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
-    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|false|false|Nach Updates suchen|Updateprüfung fehlgeschlagen');
+    const coordinatedUpdateError = await wc.executeJavaScript('(() => { const manual = document.getElementById("manualUpdateCheckBtn"); const header = document.getElementById("headerUpdateBtn"); const slot = document.getElementById("headerUpdateSlot"); return [manual?.disabled, header?.disabled, slot?.classList.contains("is-visible"), manual?.textContent?.trim(), document.getElementById("copyToast")?.textContent?.trim()].join("|"); })()');
+    check('Settings update check uses the shared error contract', coordinatedUpdateError === 'false|true|false|Nach Updates suchen|Updateprüfung fehlgeschlagen');
     await wc.executeJavaScript('document.getElementById("copyToast")?.classList.remove("show")');
 
     await wc.executeJavaScript('requestUpdateCheck(); true');
     await new Promise(resolve => setTimeout(resolve, 100));
     updateCheckResolvers.splice(0).forEach(resolve => resolve({ available: false }));
     await new Promise(resolve => setTimeout(resolve, 150));
-    const noUpdateHeaderVisibility = await wc.executeJavaScript('(() => { const button = document.getElementById("headerUpdateBtn"); return [button?.hidden, getComputedStyle(button).display].join("|"); })()');
-    check('Successful no-update result keeps the header action in its stable slot', noUpdateHeaderVisibility === 'false|flex');
+    const noUpdateHeaderVisibility = await wc.executeJavaScript('(() => { const slot = document.getElementById("headerUpdateSlot"); const button = document.getElementById("headerUpdateBtn"); return [slot?.classList.contains("is-visible"), Math.round(slot?.getBoundingClientRect().width || 0), button?.disabled].join("|"); })()');
+    check('Successful no-update result keeps the header action collapsed', noUpdateHeaderVisibility === 'false|0|true');
 
     const settingsNavigation = await wc.executeJavaScript('(() => { const buttons = [...document.querySelectorAll(".settings-nav-button")]; return [buttons.length, buttons.map(button => button.textContent.trim()).join("|"), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage, document.getElementById("settingsSearchInput")?.placeholder].join("::"); })()');
     check('Settings use the task-based sidebar navigation', settingsNavigation === '8::Allgemein|Uploads|Automatik|Benachrichtigungen|Logs & Support|Fernsteuerung|Diagnose-Zugriff|Backup & Übertragen::allgemein::Einstellungen durchsuchen');

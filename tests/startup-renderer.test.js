@@ -154,11 +154,16 @@ test('header occupies its final geometry before asynchronous initialization', ()
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
   const css = fs.readFileSync(path.join(projectRoot, 'renderer', 'styles.css'), 'utf8');
   const updateButton = html.match(/<button class="header-update-button"[^>]*id="headerUpdateBtn"[^>]*>/u)?.[0] || '';
+  const updateSlotIndex = html.indexOf('class="header-update-slot"');
+  const speedWidgetIndex = html.indexOf('id="uploadSpeedSparkline"');
   const firstFrameInitialization = appSource.lastIndexOf('\ninitializeStaticHeader();');
   const asynchronousInitialization = appSource.lastIndexOf('\ninit().then(');
 
   assert.doesNotMatch(updateButton, /\shidden(?:\s|>)/u);
-  assert.match(css, /\.header-update-button\s*\{[^}]*width:\s*146px;[^}]*flex:\s*0 0 146px;/su);
+  assert.ok(updateSlotIndex >= 0 && updateSlotIndex < speedWidgetIndex);
+  assert.match(css, /\.header-update-slot\s*\{[^}]*width:\s*0;[^}]*flex:\s*0 0 0;[^}]*overflow:\s*hidden;/su);
+  assert.match(css, /\.header-update-slot\.is-visible\s*\{[^}]*width:\s*146px;[^}]*flex-basis:\s*146px;/su);
+  assert.match(css, /\.header-update-slot\.is-visible\s+\.header-update-button\s*\{[^}]*opacity:\s*1;[^}]*transform:\s*translateX\(0\);/su);
   assert.match(css, /\.version-badge\s*\{[^}]*min-width:\s*48px;/su);
   assert.notEqual(firstFrameInitialization, -1);
   assert.ok(firstFrameInitialization < asynchronousInitialization);
