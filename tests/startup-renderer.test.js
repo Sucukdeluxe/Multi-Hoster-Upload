@@ -1,9 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
-const { configureStartupRenderer, createStartupWindow, resolveStartupLanguage, createStartupQuery } = require('../lib/startup-renderer');
+const { createStartupWindow, resolveStartupLanguage, createStartupQuery } = require('../lib/startup-renderer');
 
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
@@ -32,16 +34,98 @@ class TestBrowserWindow extends EventEmitter {
   }
 }
 
-test('configureStartupRenderer leaves hardware acceleration enabled for a local Windows session', () => {
-  let calls = 0;
-  configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'Console' }, 'win32');
-  assert.equal(calls, 0);
+test('production startup never forces software compositing', () => {
+  const projectRoot = path.join(__dirname, '..');
+  const pending = [path.join(projectRoot, 'main.js'), path.join(projectRoot, 'lib')];
+  const sourceFiles = [];
+  while (pending.length) {
+    const target = pending.pop();
+    const stat = fs.statSync(target);
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(target)) pending.push(path.join(target, entry));
+    } else if (target.endsWith('.js')) {
+      sourceFiles.push(target);
+    }
+  }
+  for (const sourceFile of sourceFiles) {
+    const source = fs.readFileSync(sourceFile, 'utf8');
+    assert.doesNotMatch(source, /disableHardwareAcceleration|disable-gpu(?:-compositing)?/u, path.relative(projectRoot, sourceFile));
+  }
 });
 
-test('configureStartupRenderer disables hardware acceleration for a Windows Remote Desktop session', () => {
-  let calls = 0;
-  configureStartupRenderer({ disableHardwareAcceleration() { calls++; } }, { SESSIONNAME: 'RDP-Tcp#12' }, 'win32');
-  assert.equal(calls, 1);
+test('Windows compositor paints the full hidden surface with an RDP session environment', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-rdp-compositor-'));
+  const probePath = path.join(probeRoot, 'probe.cjs');
+  const outputPath = path.join(probeRoot, 'result.json');
+  const userDataPath = path.join(probeRoot, 'user-data');
+  const probeSource = `
+const { app, BrowserWindow } = require('electron');
+const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
+const outputPath = process.env.MHU_RDP_COMPOSITOR_OUTPUT;
+function pixelAt(bitmap, width, x, y) {
+  const offset = (y * width + x) * 4;
+  return [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset], bitmap[offset + 3]];
+}
+app.whenReady().then(async () => {
+  const window = new BrowserWindow({
+    show: false,
+    width: 2544,
+    height: 1353,
+    useContentSize: true,
+    backgroundColor: '#0f0f0f',
+    webPreferences: { contextIsolation: true, nodeIntegration: false }
+  });
+  const readyToShow = new Promise(resolve => window.once('ready-to-show', resolve));
+  const document = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#102030}.left,.right{position:fixed;top:0;bottom:0;width:8px}.left{left:0;background:#00ff00}.right{right:0;background:#ff00ff}</style></head><body><div class="left"></div><div class="right"></div></body></html>';
+  await window.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(document));
+  await readyToShow;
+  await app.getGPUInfo('complete');
+  const image = await window.webContents.capturePage();
+  const size = image.getSize();
+  const bitmap = image.toBitmap();
+  const dom = await window.webContents.executeJavaScript('({ innerWidth, innerHeight, devicePixelRatio })');
+  const rendererPid = window.webContents.getOSProcessId();
+  const rendererCommandLine = execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-CimInstance Win32_Process -Filter "ProcessId = ' + rendererPid + '").CommandLine'], { encoding: 'utf8' }).trim();
+  const middleY = Math.floor(size.height / 2);
+  fs.writeFileSync(outputPath, JSON.stringify({
+    size,
+    dom,
+    gpuFeatureStatus: app.getGPUFeatureStatus(),
+    rendererCommandLine,
+    leftEdge: pixelAt(bitmap, size.width, 0, middleY),
+    rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY)
+  }), 'utf8');
+  window.destroy();
+  app.exit(0);
+}).catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
+  app.exit(1);
+});
+`;
+  fs.writeFileSync(probePath, probeSource, 'utf8');
+  try {
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    execFileSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: projectRoot,
+      env: { ...process.env, SESSIONNAME: 'RDP-Tcp#12', MHU_RDP_COMPOSITOR_OUTPUT: outputPath },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30000,
+      windowsHide: true
+    });
+    const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(result.error, undefined);
+    assert.doesNotMatch(result.rendererCommandLine, /--disable-gpu-compositing/u);
+    assert.equal(result.size.width, Math.round(result.dom.innerWidth * result.dom.devicePixelRatio));
+    assert.equal(result.size.height, Math.round(result.dom.innerHeight * result.dom.devicePixelRatio));
+    assert.ok(result.size.width > 2048);
+    assert.ok(result.leftEdge[1] > result.leftEdge[0] && result.leftEdge[1] > result.leftEdge[2]);
+    assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
 });
 
 test('resolveStartupLanguage accepts only the supported persisted language', () => {

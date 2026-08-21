@@ -1,8 +1,7 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
-const { configureStartupRenderer, createStartupWindow, createStartupQuery } = require('./lib/startup-renderer');
-configureStartupRenderer(app);
+const { createStartupWindow, createStartupQuery } = require('./lib/startup-renderer');
 nativeTheme.themeSource = 'dark';
 const path = require('path');
 const fs = require('fs');
