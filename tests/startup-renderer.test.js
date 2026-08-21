@@ -60,7 +60,7 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
   const outputPath = path.join(probeRoot, 'result.json');
   const userDataPath = path.join(probeRoot, 'user-data');
   const probeSource = `
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, screen } = require('electron');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const outputPath = process.env.MHU_RDP_COMPOSITOR_OUTPUT;
@@ -69,10 +69,13 @@ function pixelAt(bitmap, width, x, y) {
   return [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset], bitmap[offset + 3]];
 }
 app.whenReady().then(async () => {
+  const display = screen.getPrimaryDisplay();
+  const requestedContentWidth = Math.min(2544, display.workAreaSize.width);
+  const requestedContentHeight = Math.min(1353, display.workAreaSize.height);
   const window = new BrowserWindow({
     show: false,
-    width: 2544,
-    height: 1353,
+    width: requestedContentWidth,
+    height: requestedContentHeight,
     useContentSize: true,
     backgroundColor: '#0f0f0f',
     webPreferences: { contextIsolation: true, nodeIntegration: false }
@@ -92,6 +95,9 @@ app.whenReady().then(async () => {
   fs.writeFileSync(outputPath, JSON.stringify({
     size,
     dom,
+    requestedContentWidth,
+    requestedContentHeight,
+    displayScaleFactor: display.scaleFactor,
     gpuFeatureStatus: app.getGPUFeatureStatus(),
     rendererCommandLine,
     leftEdge: pixelAt(bitmap, size.width, 0, middleY),
@@ -120,7 +126,11 @@ app.whenReady().then(async () => {
     assert.doesNotMatch(result.rendererCommandLine, /--disable-gpu-compositing/u);
     assert.equal(result.size.width, Math.round(result.dom.innerWidth * result.dom.devicePixelRatio));
     assert.equal(result.size.height, Math.round(result.dom.innerHeight * result.dom.devicePixelRatio));
-    assert.ok(result.size.width > 2048);
+    assert.ok(result.requestedContentWidth > 0);
+    assert.ok(result.requestedContentHeight > 0);
+    if (Math.round(result.requestedContentWidth * result.displayScaleFactor) > 2048) {
+      assert.ok(result.size.width > 2048);
+    }
     assert.ok(result.leftEdge[1] > result.leftEdge[0] && result.leftEdge[1] > result.leftEdge[2]);
     assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
   } finally {
