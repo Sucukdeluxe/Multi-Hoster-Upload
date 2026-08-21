@@ -2367,6 +2367,7 @@ let alwaysOnTopState = false;
 // never changes after it's created).
 let _hosterCountsCache = { sig: '', result: new Map() };
 let contextMenuReturnFocus = null;
+let contextMenuTargetJobId = null;
 function _getHosterCounts() {
   const sig = `${queueJobs.length}`;
   if (_hosterCountsCache.sig === sig) return _hosterCountsCache.result;
@@ -2382,6 +2383,7 @@ function _getHosterCounts() {
 function handleRowContextMenu(e, row) {
   e.preventDefault();
   const jobId = row.dataset.jobId;
+  contextMenuTargetJobId = jobId;
   if (!selectedJobIds.has(jobId)) {
     selectedJobIds.clear();
     selectedJobIds.add(jobId);
@@ -2394,6 +2396,9 @@ function handleRowContextMenu(e, row) {
 
 function showContextMenu(x, y) {
   const menu = document.getElementById('contextMenu');
+  const targetJob = _jobIndexById.get(contextMenuTargetJobId);
+  const copyFailureItem = menu.querySelector('[data-action="copy-failure-details"]');
+  if (copyFailureItem) copyFailureItem.style.display = targetJob?.status === 'error' && (targetJob.error || targetJob.failureDetails) ? '' : 'none';
   // Update "Always on top" text
   const aotItem = menu.querySelector('[data-action="always-on-top"]');
   if (aotItem) aotItem.textContent = alwaysOnTopState ? 'Immer im Vordergrund ✓' : 'Immer im Vordergrund';
@@ -2882,11 +2887,12 @@ document.getElementById('contextMenu').addEventListener('click', (e) => {
   if (!item) return;
   const action = item.dataset.action;
   if (!action) return;
+  const targetJobId = contextMenuTargetJobId;
   hideContextMenu();
-  handleContextAction(action);
+  handleContextAction(action, targetJobId);
 });
 
-async function handleContextAction(action) {
+async function handleContextAction(action, targetJobId = null) {
   _normalizeQueueSelectionToVisible();
   if (action === 'start-selected') {
     startSelectedUpload();
@@ -2897,6 +2903,8 @@ async function handleContextAction(action) {
     retrySelectedJobs();
   } else if (action === 'show-log') {
     showJobLogModal();
+  } else if (action === 'copy-failure-details') {
+    await copyFailureDetails(targetJobId);
   } else if (action === 'delete-selected') {
     const count = selectedJobIds.size;
     if (!count || !await showAppConfirm({ title: 'Uploads entfernen?', message: count === 1 ? 'Ein ausgewählter Upload wird aus der Liste entfernt.' : `${count} ausgewählte Uploads werden aus der Liste entfernt.`, confirmText: 'Entfernen', danger: true })) return;
@@ -3561,6 +3569,41 @@ function _handleStatsImpl(data) {
 }
 
 // --- Per-job log modal ---
+function _sanitizeFailureClipboardValue(value, limit = 320) {
+  let text = String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  text = text.replace(/https?:\/\/[^\s"'<>]+/gi, '[URL]');
+  text = text.replace(/((?:api[_-]?key|token|password|cookie|authorization|session)\s*[:=]\s*)[^,;\s}"']+/gi, '$1[redacted]');
+  return text.slice(0, limit);
+}
+
+function formatFailureDetailsForClipboard(job) {
+  if (!job || job.status !== 'error') return '';
+  const english = getUiLocale() === 'en-US';
+  const details = job.failureDetails && typeof job.failureDetails === 'object' ? job.failureDetails : {};
+  const labels = english
+    ? { file: 'File', host: 'Host', account: 'Account', attempt: 'Attempt', error: 'Error', http: 'HTTP status', contentType: 'Content type', response: 'Response excerpt' }
+    : { file: 'Datei', host: 'Hoster', account: 'Account', attempt: 'Versuch', error: 'Fehler', http: 'HTTP-Status', contentType: 'Inhaltstyp', response: 'Antwortauszug' };
+  const account = getAccountLabel(job) || _sanitizeFailureClipboardValue(job.accountId, 80) || '–';
+  return [
+    `${labels.file}: ${_sanitizeFailureClipboardValue(job.fileName || job.file, 260) || '–'}`,
+    `${labels.host}: ${_sanitizeFailureClipboardValue(job.hoster, 120) || '–'}`,
+    `${labels.account}: ${account}`,
+    `${labels.attempt}: ${Math.max(0, Number(job.attempt) || 0)} / ${Math.max(0, Number(job.maxAttempts) || 0)}`,
+    `${labels.error}: ${_sanitizeFailureClipboardValue(job.error, 400) || '–'}`,
+    details.httpStatus ? `${labels.http}: ${details.httpStatus}` : '',
+    details.contentType ? `${labels.contentType}: ${_sanitizeFailureClipboardValue(details.contentType, 120)}` : '',
+    details.responseSnippet ? `${labels.response}: ${_sanitizeFailureClipboardValue(details.responseSnippet, 320)}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+async function copyFailureDetails(jobId) {
+  const job = _jobIndexById.get(jobId);
+  const text = formatFailureDetailsForClipboard(job);
+  if (!text) return;
+  await window.api.copyToClipboard(text);
+  showCopyToast(localizeUiText('Fehlerdetails kopiert'));
+}
+
 async function showJobLogModal() {
   const selectedJobs = _getVisibleSelectedQueueJobs();
   if (selectedJobs.length === 0) return;

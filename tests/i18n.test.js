@@ -21,6 +21,12 @@ test('translates the account check timestamp label', () => {
   assert.equal(translateText('checked', 'de'), 'geprüft');
 });
 
+test('translates the failure detail clipboard action', () => {
+  assert.equal(translateText('Fehlerdetails kopieren', 'en'), 'Copy failure details');
+  assert.equal(translateText('Failure details copied', 'de'), 'Fehlerdetails kopiert');
+  assert.equal(translateText('Antwortauszug', 'en'), 'Response excerpt');
+});
+
 test('English is the fallback language and German remains selectable', () => {
   assert.equal(normalizeLanguage(), 'en');
   assert.equal(normalizeLanguage('fr'), 'en');

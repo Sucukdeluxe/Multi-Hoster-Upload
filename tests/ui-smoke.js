@@ -2092,6 +2092,34 @@ setTimeout(async () => {
     if (!(recentCapScrollState.before > 0 && Math.abs(recentCapScrollState.delta - 28) <= 1)) console.log('Recent cap scroll state: ' + JSON.stringify(recentCapScrollState));
     check('A capped recent-upload list preserves the visible rows when a new item arrives', recentCapScrollState.before > 0 && Math.abs(recentCapScrollState.delta - 28) <= 1);
 
+    const failureClipboardContract = await wc.executeJavaScript(\`(() => {
+      setUiLanguage('en');
+      queueJobs = [
+        { id: 'failure-a', file: 'C:/ui/failure-a.mkv', fileName: 'failure-a.mkv', hoster: 'byse.sx', accountId: 'account-a', status: 'error', error: 'Wrong failure', attempt: 1, maxAttempts: 3, bytesUploaded: 0, bytesTotal: 100, progress: 0 },
+        { id: 'failure-b', file: 'C:/ui/failure-b.mkv', fileName: 'failure-b.mkv', hoster: 'doodstream.com', accountId: 'account-b', status: 'error', error: 'Request failed at https://secret.invalid/path?token=secret', attempt: 2, maxAttempts: 4, failureDetails: { httpStatus: 503, contentType: 'text/html', responseSnippet: 'apiKey=very-secret temporary gateway response' }, bytesUploaded: 0, bytesTotal: 100, progress: 0 }
+      ];
+      selectedJobIds.clear();
+      selectedJobIds.add('failure-a');
+      selectedJobIds.add('failure-b');
+      rebuildJobIndex();
+      setUploadSidebarFilter('all');
+      updateUploadView();
+      renderQueueTable();
+      const row = document.querySelector('[data-job-id="failure-b"]');
+      handleRowContextMenu({ preventDefault() {}, clientX: 50, clientY: 50 }, row);
+      const item = document.querySelector('[data-action="copy-failure-details"]');
+      const text = formatFailureDetailsForClipboard(_jobIndexById.get(contextMenuTargetJobId));
+      hideContextMenu();
+      setUiLanguage('de');
+      queueJobs = [];
+      selectedJobIds.clear();
+      rebuildJobIndex();
+      updateUploadView();
+      renderQueueTable();
+      return { target: contextMenuTargetJobId, visible: getComputedStyle(item).display !== 'none', label: item.textContent.trim(), text };
+    })()\`);
+    check('Failure detail copying targets the right-clicked job and redacts sensitive values', failureClipboardContract.target === 'failure-b' && failureClipboardContract.visible === true && failureClipboardContract.label === 'Copy failure details' && failureClipboardContract.text.includes('File: failure-b.mkv') && failureClipboardContract.text.includes('HTTP status: 503') && failureClipboardContract.text.includes('Content type: text/html') && failureClipboardContract.text.includes('[URL]') && failureClipboardContract.text.includes('apiKey=[redacted]') && !failureClipboardContract.text.includes('secret.invalid') && !failureClipboardContract.text.includes('very-secret'));
+
     const keyboardInteractionContract = await wc.executeJavaScript(\`(() => {
       HOSTERS.forEach(name => { config.hosters[name] = []; });
       config.hosters['byse.sx'] = [{ id: 'ui-keyboard-account', enabled: true, authType: 'api', apiKey: 'keyboard-key' }];
