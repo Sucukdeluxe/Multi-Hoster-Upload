@@ -63,8 +63,9 @@ let hosterSettings = {};
 let uploading = false;
 let healthCheckRunning = false;
 let managedOnlineBackups = [];
+let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupLoadGeneration = 0;
-const managedOnlineBackupPendingActions = new Map();
+const managedOnlineBackupOperationQueues = new Map();
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
 function _rElLabel(el) {
@@ -2667,6 +2668,13 @@ function normalizeManagedOnlineBackups(entries) {
 
 function replaceManagedOnlineBackups(entries) {
   managedOnlineBackups = normalizeManagedOnlineBackups(entries);
+  managedOnlineBackupsAuthoritative = true;
+  renderManagedOnlineBackups();
+}
+
+function invalidateManagedOnlineBackups() {
+  managedOnlineBackups = [];
+  managedOnlineBackupsAuthoritative = false;
   renderManagedOnlineBackups();
 }
 
@@ -2674,6 +2682,10 @@ function renderManagedOnlineBackups() {
   const list = document.getElementById('managedOnlineBackupList');
   if (!list) return;
   const content = document.createDocumentFragment();
+  if (!managedOnlineBackupsAuthoritative) {
+    list.replaceChildren(content);
+    return;
+  }
   if (managedOnlineBackups.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'online-backup-managed-empty';
@@ -2699,11 +2711,11 @@ function renderManagedOnlineBackups() {
       deleteButton.type = 'button';
       deleteButton.className = 'btn btn-danger online-backup-delete-btn';
       deleteButton.textContent = localizeUiText('Online-Backup löschen');
-      const pendingAction = managedOnlineBackupPendingActions.get(entry.id);
-      copyButton.disabled = pendingAction === 'copy' || pendingAction === 'delete';
-      deleteButton.disabled = pendingAction === 'delete';
-      copyButton.addEventListener('click', () => copyManagedOnlineBackup(entry, copyButton));
-      deleteButton.addEventListener('click', () => deleteManagedOnlineBackup(entry, row));
+      const pending = managedOnlineBackupOperationQueues.has(entry.id);
+      copyButton.disabled = pending;
+      deleteButton.disabled = pending;
+      copyButton.addEventListener('click', () => copyManagedOnlineBackup(entry));
+      deleteButton.addEventListener('click', () => deleteManagedOnlineBackup(entry));
       actions.append(copyButton, deleteButton);
       row.append(key, created, actions);
       content.append(row);
@@ -2718,63 +2730,90 @@ async function loadManagedOnlineBackups() {
     const result = await window.api.listManagedOnlineBackups();
     if (generation !== managedOnlineBackupLoadGeneration) return false;
     if (!result?.ok || !Array.isArray(result.entries)) {
+      invalidateManagedOnlineBackups();
       setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
       return false;
     }
     replaceManagedOnlineBackups(result.entries);
+    setOnlineBackupStatus('', '');
     return true;
   } catch {
-    if (generation === managedOnlineBackupLoadGeneration) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+    if (generation === managedOnlineBackupLoadGeneration) {
+      invalidateManagedOnlineBackups();
+      setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+    }
     return false;
   }
 }
 
-async function copyManagedOnlineBackup(entry, button) {
-  if (button.disabled || managedOnlineBackupPendingActions.has(entry.id)) return;
-  managedOnlineBackupPendingActions.set(entry.id, 'copy');
-  button.disabled = true;
-  try {
-    const result = await window.api.copyManagedOnlineBackup(entry.id);
-    if (!result?.ok) {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
-      return;
-    }
-    showCopyToast('Online-Schlüssel kopiert');
-  } catch {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
-  } finally {
-    managedOnlineBackupPendingActions.delete(entry.id);
-    renderManagedOnlineBackups();
-  }
+function hasManagedOnlineBackup(id) {
+  return managedOnlineBackups.some(entry => entry.id === id);
 }
 
-async function deleteManagedOnlineBackup(entry, row) {
+function enqueueManagedOnlineBackupOperation(id, action, operation) {
+  const previous = managedOnlineBackupOperationQueues.get(id)?.promise || Promise.resolve();
+  const promise = previous.catch(() => {}).then(operation);
+  const state = { action, promise };
+  managedOnlineBackupOperationQueues.set(id, state);
+  renderManagedOnlineBackups();
+  return promise.finally(() => {
+    if (managedOnlineBackupOperationQueues.get(id) !== state) return;
+    managedOnlineBackupOperationQueues.delete(id);
+    renderManagedOnlineBackups();
+  });
+}
+
+async function copyManagedOnlineBackup(entry) {
+  const id = entry.id;
+  if (!hasManagedOnlineBackup(id) || managedOnlineBackupOperationQueues.has(id)) return;
+  await enqueueManagedOnlineBackupOperation(id, 'copy', async () => {
+    try {
+      const result = await window.api.copyManagedOnlineBackup(id);
+      if (!result?.ok) {
+        setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+        return;
+      }
+      showCopyToast('Online-Schlüssel kopiert');
+    } catch {
+      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+    }
+  });
+}
+
+async function deleteManagedOnlineBackup(entry) {
+  const id = entry.id;
   const confirmed = await showAppConfirm({
     title: 'Online-Backup löschen',
     message: 'Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.',
     confirmText: 'Löschen',
     danger: true
   });
-  if (!confirmed || !row.isConnected) return;
-  if (managedOnlineBackupPendingActions.has(entry.id)) return;
-  managedOnlineBackupPendingActions.set(entry.id, 'delete');
-  const controls = [...row.querySelectorAll('button')];
-  controls.forEach(button => { button.disabled = true; });
-  try {
-    const result = await window.api.deleteManagedOnlineBackup(entry.id);
-    if (!result?.ok || result.removedId !== entry.id) {
+  if (!confirmed) return;
+  if (!hasManagedOnlineBackup(id)) {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+    return;
+  }
+  if (managedOnlineBackupOperationQueues.get(id)?.action === 'delete') {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+    return;
+  }
+  await enqueueManagedOnlineBackupOperation(id, 'delete', async () => {
+    if (!hasManagedOnlineBackup(id)) {
       setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
       return;
     }
-    managedOnlineBackupLoadGeneration++;
-    replaceManagedOnlineBackups(managedOnlineBackups.filter(item => item.id !== result.removedId));
-    setOnlineBackupStatus('Schlüssel gelöscht', 'success');
-  } catch {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
-  } finally {
-    managedOnlineBackupPendingActions.delete(entry.id);
-    renderManagedOnlineBackups();
-  }
+    try {
+      const result = await window.api.deleteManagedOnlineBackup(id);
+      if (!result?.ok || result.removedId !== id) {
+        setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+        return;
+      }
+      if (!await loadManagedOnlineBackups()) return;
+      setOnlineBackupStatus('Schlüssel gelöscht', 'success');
+    } catch {
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+    }
+  });
 }
 
 async function doOnlineBackupCreate() {
@@ -2783,7 +2822,6 @@ async function doOnlineBackupCreate() {
   try {
     await flushPendingSettingsSaves();
     openOnlineBackupView();
-    await loadManagedOnlineBackups();
   } catch {
     openOnlineBackupView();
     setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error');
@@ -2795,12 +2833,11 @@ async function doOnlineBackupCreate() {
   setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy');
   try {
     const result = await window.api.createManagedOnlineBackup();
-    if (!result?.ok || normalizeManagedOnlineBackups([result.entry]).length !== 1) {
+    if (!result?.ok) {
       setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error');
       return;
     }
-    managedOnlineBackupLoadGeneration++;
-    replaceManagedOnlineBackups([...managedOnlineBackups, result.entry]);
+    if (!await loadManagedOnlineBackups()) return;
     setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success');
     showCopyToast('Online-Schlüssel erstellt');
   } catch {
