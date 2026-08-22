@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -63,28 +63,28 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
   fs.writeFileSync(preloadPath, `
 const { contextBridge } = require('electron');
 const managedOnlineBackupProbeCalls = [];
+const managedOnlineBackupIds = {
+  a: 'AAAAAAAAAAAAAAAAAAAAAA',
+  b: 'AQEBAQEBAQEBAQEBAQEBAQ',
+  c: 'AgICAgICAgICAgICAgICAg',
+  d: 'AwMDAwMDAwMDAwMDAwMDAw'
+};
 const managedOnlineBackupListResponses = [
-  { ok: true, entries: [
-    { id: 'AAAAAAAAAAAAAAAAAAAAAA', displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' },
-    { id: 'BBBBBBBBBBBBBBBBBBBBBB', displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' }
+  { ok: true, warningCode: 'KEYRING_DECRYPT_FAILED', warning: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden', entries: [
+    { id: managedOnlineBackupIds.a, displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' },
+    { id: managedOnlineBackupIds.b, displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' },
+    { id: 'BBBBBBBBBBBBBBBBBBBBBB', displayKey: 'MHU2-FAIL…1111', createdAt: '2026-08-23T10:00:00.000Z' },
+    { id: managedOnlineBackupIds.c, displayKey: 'invalid', createdAt: '2026-08-24T10:00:00.000Z' }
   ] },
+  { ok: false, entries: [], code: 'KEYRING_DECRYPT_FAILED', error: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden' },
+  { ok: false, entries: [], code: 'KEYRING_DECRYPT_FAILED', error: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden' },
   { ok: true, entries: [
-    { id: 'DDDDDDDDDDDDDDDDDDDDDD', displayKey: 'MHU2-DFGH…2468', createdAt: '2026-08-25T10:00:00.000Z' },
-    { id: 'AAAAAAAAAAAAAAAAAAAAAA', displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' }
+    { id: managedOnlineBackupIds.c, displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' },
+    { id: managedOnlineBackupIds.a, displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' }
   ] },
-  { ok: true, entries: [
-    { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' },
-    { id: 'EEEEEEEEEEEEEEEEEEEEEE', displayKey: 'MHU2-ETYU…1357', createdAt: '2026-08-26T10:00:00.000Z' },
-    { id: 'DDDDDDDDDDDDDDDDDDDDDD', displayKey: 'MHU2-DFGH…2468', createdAt: '2026-08-25T10:00:00.000Z' }
-  ] },
-  { ok: false, error: 'Online-Sicherungen konnten nicht geladen werden' }
+  null,
+  { ok: false, entries: [], code: 'KEYRING_ID_MISMATCH', error: 'Gespeicherte Online-Sicherungskennung stimmt nicht mit dem Schlüssel überein' }
 ];
-const managedOnlineBackupAdditionalListResponses = new Map([
-  [6, { ok: true, entries: [{ id: 'KKKKKKKKKKKKKKKKKKKKKK', displayKey: 'MHU2-KLMN…1111', createdAt: '2026-08-30T08:00:00.000Z' }] }],
-  [8, { ok: true, entries: [{ id: 'NNNNNNNNNNNNNNNNNNNNNN', displayKey: 'MHU2-NMNB…2222', createdAt: '2026-08-30T10:00:00.000Z' }] }],
-  [9, { ok: true, entries: [{ id: 'PPPPPPPPPPPPPPPPPPPPPP', displayKey: 'MHU2-POIU…3333', createdAt: '2026-08-30T11:00:00.000Z' }] }],
-  [10, { ok: true, entries: [{ id: 'JJJJJJJJJJJJJJJJJJJJJJ', displayKey: 'MHU2-JKLO…4444', createdAt: '2026-08-30T12:00:00.000Z' }] }]
-]);
 let managedOnlineBackupListIndex = 0;
 let managedOnlineBackupCreateIndex = 0;
 const pendingManagedOnlineBackupLists = new Map();
@@ -98,26 +98,26 @@ contextBridge.exposeInMainWorld('api', {
   listManagedOnlineBackups() {
     managedOnlineBackupListIndex++;
     managedOnlineBackupProbeCalls.push(['list', managedOnlineBackupListIndex]);
-    if (managedOnlineBackupListIndex === 5 || managedOnlineBackupListIndex === 7) {
+    if (managedOnlineBackupListIndex === 5) {
       return new Promise(resolve => { pendingManagedOnlineBackupLists.set(managedOnlineBackupListIndex, resolve); });
     }
-    return Promise.resolve(managedOnlineBackupListResponses[managedOnlineBackupListIndex - 1] || managedOnlineBackupAdditionalListResponses.get(managedOnlineBackupListIndex));
+    return Promise.resolve(managedOnlineBackupListResponses[managedOnlineBackupListIndex - 1]);
   },
   releaseManagedOnlineBackupList(index) {
     const resolve = pendingManagedOnlineBackupLists.get(index);
     pendingManagedOnlineBackupLists.delete(index);
-    const entry = index === 5
-      ? { id: 'XXXXXXXXXXXXXXXXXXXXXX', displayKey: 'MHU2-XCVB…9753', createdAt: '2026-08-28T12:00:00.000Z' }
-      : { id: 'HHHHHHHHHHHHHHHHHHHHHH', displayKey: 'MHU2-HJKL…8642', createdAt: '2026-08-30T09:00:00.000Z' };
-    resolve({ ok: true, entries: [entry] });
+    resolve({ ok: true, entries: [
+      { id: managedOnlineBackupIds.d, displayKey: 'MHU2-DFGH…2468', createdAt: '2026-08-25T10:00:00.000Z' },
+      { id: managedOnlineBackupIds.c, displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' },
+      { id: managedOnlineBackupIds.a, displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' }
+    ] });
   },
   createManagedOnlineBackup() {
     managedOnlineBackupCreateIndex++;
     managedOnlineBackupProbeCalls.push(['create', managedOnlineBackupCreateIndex]);
-    if (managedOnlineBackupCreateIndex === 3 || managedOnlineBackupCreateIndex === 5) return Promise.resolve({ ok: false, error: 'Online-Sicherung konnte nicht erstellt werden' });
     const entry = managedOnlineBackupCreateIndex === 1
-      ? { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' }
-      : { id: 'FFFFFFFFFFFFFFFFFFFFFF', displayKey: 'MHU2-FGHJ…8642', createdAt: '2026-08-27T12:00:00.000Z' };
+      ? { id: managedOnlineBackupIds.c, displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' }
+      : { id: managedOnlineBackupIds.d, displayKey: 'MHU2-DFGH…2468', createdAt: '2026-08-25T10:00:00.000Z' };
     return Promise.resolve({ ok: true, entry });
   },
   copyManagedOnlineBackup(id) {
@@ -142,16 +142,24 @@ contextBridge.exposeInMainWorld('api', {
 });
 `, 'utf8');
   const onlineBackupBehaviorScript = `(async () => {
+    const ids = {
+      a: 'AAAAAAAAAAAAAAAAAAAAAA',
+      b: 'AQEBAQEBAQEBAQEBAQEBAQ',
+      c: 'AgICAgICAgICAgICAgICAg',
+      d: 'AwMDAwMDAwMDAwMDAwMDAw'
+    };
     const fixture = document.createElement('section');
-    fixture.innerHTML = '<div id="managedOnlineBackupList"></div><div id="onlineBackupStatus"></div><button id="createOnlineBackupBtn"></button><input id="onlineBackupKeyInput"><button id="restoreOnlineBackupBtn"></button>';
+    fixture.innerHTML = '<div id="managedOnlineBackupList"></div><div id="managedOnlineBackupRefreshStatus" hidden><span id="managedOnlineBackupRefreshMessage"></span><button id="reloadManagedOnlineBackupsBtn" type="button">Erneut laden</button></div><div id="onlineBackupStatus"></div><button id="createOnlineBackupBtn"></button><input id="onlineBackupKeyInput"><button id="restoreOnlineBackupBtn"></button>';
     document.body.append(fixture);
+    document.documentElement.lang = 'en';
     const waitFor = async predicate => {
-      for (let attempt = 0; attempt < 80; attempt++) {
+      for (let attempt = 0; attempt < 120; attempt++) {
         if (await predicate()) return true;
         await new Promise(resolve => setTimeout(resolve, 0));
       }
       return false;
     };
+    const calls = async type => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === type);
     let confirmation = null;
     let resolveConfirmation = null;
     showAppConfirm = options => {
@@ -159,128 +167,97 @@ contextBridge.exposeInMainWorld('api', {
       return new Promise(resolve => { resolveConfirmation = resolve; });
     };
     flushPendingSettingsSaves = async () => {};
+    openOnlineBackupView = () => {};
     await loadManagedOnlineBackups();
+    await new Promise(resolve => setTimeout(resolve, 0));
     const initialKeys = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
-    const maliciousEntry = { id: 'DDDDDDDDDDDDDDDDDDDDDD', displayKey: 'prefix MHU2-' + 'X'.repeat(70) + ' suffix', createdAt: '2026-08-24T12:00:00.000Z' };
-    replaceManagedOnlineBackups([...managedOnlineBackups, maliciousEntry]);
-    const secretRejected = !document.body.textContent.includes(maliciousEntry.displayKey) && managedOnlineBackups.every(entry => entry.displayKey !== maliciousEntry.displayKey);
-    const originalRow = document.querySelector('.online-backup-managed-row');
-    originalRow.querySelector('.online-backup-delete-btn').click();
+    const initialWarning = {
+      hidden: document.getElementById('managedOnlineBackupRefreshStatus')?.hidden,
+      text: document.getElementById('managedOnlineBackupRefreshMessage')?.textContent
+    };
+    const exactSanitizedState = managedOnlineBackups.every(entry => /^[A-Za-z0-9_-]{22}$/.test(entry.id) && /^MHU2-[A-Za-z0-9_-]{4}…[A-Za-z0-9_-]{4}$/.test(entry.displayKey));
+    const ariaDescriptions = [...document.querySelectorAll('.online-backup-managed-row')].every(row => {
+      const keyId = row.querySelector('.online-backup-managed-key')?.id;
+      return Boolean(keyId) && [...row.querySelectorAll('button')].every(button => button.getAttribute('aria-describedby') === keyId);
+    });
+    const deleteButton = document.querySelector('.online-backup-delete-btn');
+    deleteButton.focus();
+    deleteButton.click();
     await waitFor(() => typeof resolveConfirmation === 'function');
-    renderManagedOnlineBackups();
-    const rowReplacedDuringConfirmation = !originalRow.isConnected;
-    document.querySelector('.online-backup-copy-btn').click();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).some(call => call[0] === 'copy'));
-    const copyPendingControlsDisabled = [...document.querySelector('.online-backup-managed-row').querySelectorAll('button')].every(button => button.disabled);
     resolveConfirmation(true);
+    await waitFor(async () => (await calls('delete')).length === 1);
+    window.api.releaseManagedOnlineBackupDelete();
+    await waitFor(async () => (await calls('list')).length === 2);
+    await waitFor(() => document.getElementById('onlineBackupStatus').textContent === 'Key deleted');
+    const afterDelete = {
+      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
+      status: document.getElementById('onlineBackupStatus').textContent,
+      statusState: document.getElementById('onlineBackupStatus').dataset.state,
+      warning: document.getElementById('managedOnlineBackupRefreshMessage')?.textContent,
+      retryVisible: document.getElementById('reloadManagedOnlineBackupsBtn')?.offsetParent !== null,
+      focusAction: document.activeElement?.dataset.managedOnlineBackupAction,
+      focusId: document.activeElement?.dataset.managedOnlineBackupId
+    };
+    await doOnlineBackupCreate();
     await new Promise(resolve => setTimeout(resolve, 0));
-    const deleteStartedBeforeCopyFinished = (await window.api.getManagedOnlineBackupProbeCalls()).some(call => call[0] === 'delete');
-    window.api.releaseManagedOnlineBackupCopy();
-    const deleteStartedAfterCopy = await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'delete').length === 1);
-    const deletePendingControlsDisabled = deleteStartedAfterCopy && [...document.querySelector('.online-backup-managed-row').querySelectorAll('button')].every(button => button.disabled);
-    if (deleteStartedAfterCopy) window.api.releaseManagedOnlineBackupDelete();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 2);
-    const afterDelete = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
-    const deletePostRefreshCount = (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length - 1;
-    const listCallsBeforeCreate = (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length;
-    await doOnlineBackupCreate();
-    const afterCreate = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
-    const authoritativeStateFields = [...new Set(managedOnlineBackups.flatMap(entry => Object.keys(entry)))].sort();
-    const callsAfterCreate = await window.api.getManagedOnlineBackupProbeCalls();
-    const createPostRefreshCount = callsAfterCreate.filter(call => call[0] === 'list').length - listCallsBeforeCreate;
-    const listCallsBeforeFailedCreate = callsAfterCreate.filter(call => call[0] === 'list').length;
-    await doOnlineBackupCreate();
-    const failedCreatePostRefreshCount = (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length - listCallsBeforeFailedCreate;
     const refreshFailure = {
-      rowCount: document.querySelectorAll('.online-backup-managed-row').length,
-      stateCount: managedOnlineBackups.length,
-      emptyStateVisible: Boolean(document.querySelector('.online-backup-managed-empty')),
+      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
       status: document.getElementById('onlineBackupStatus').textContent,
-      statusState: document.getElementById('onlineBackupStatus').dataset.state
+      statusState: document.getElementById('onlineBackupStatus').dataset.state,
+      warning: document.getElementById('managedOnlineBackupRefreshMessage')?.textContent,
+      retryVisible: document.getElementById('reloadManagedOnlineBackupsBtn')?.offsetParent !== null
     };
-    const navigation = document.createElement('button');
-    navigation.dataset.settingsPage = 'backup';
-    navigation.addEventListener('click', () => { loadManagedOnlineBackups(); });
-    fixture.append(navigation);
-    replaceManagedOnlineBackups([
-      { id: 'GGGGGGGGGGGGGGGGGGGGGG', displayKey: 'MHU2-GHJK…7531', createdAt: '2026-08-29T12:00:00.000Z' }
-    ]);
-    setOnlineBackupStatus('', '');
-    const failedCreate = doOnlineBackupCreate();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 5);
-    await failedCreate;
-    const statusBeforeStaleNavigationResponse = {
-      text: document.getElementById('onlineBackupStatus').textContent,
-      state: document.getElementById('onlineBackupStatus').dataset.state
+    const beforeRetryCalls = (await calls('list')).length;
+    document.getElementById('reloadManagedOnlineBackupsBtn')?.click();
+    const retryTriggeredLoad = await waitFor(async () => (await calls('list')).length === beforeRetryCalls + 1);
+    if (!retryTriggeredLoad) await loadManagedOnlineBackups();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const afterRetry = {
+      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
+      warningHidden: document.getElementById('managedOnlineBackupRefreshStatus')?.hidden
     };
+    const racingCreate = doOnlineBackupCreate();
+    await waitFor(async () => (await calls('list')).length === 5);
+    const copyButton = [...document.querySelectorAll('.online-backup-copy-btn')].find(button => button.dataset.managedOnlineBackupId === ids.a) || document.querySelector('.online-backup-copy-btn');
+    copyButton.focus();
+    copyButton.click();
+    await waitFor(async () => (await calls('copy')).length === 1);
+    window.api.releaseManagedOnlineBackupCopy();
+    const copyFocusRestored = await waitFor(() => document.activeElement?.dataset.managedOnlineBackupAction === 'copy' && document.activeElement?.dataset.managedOnlineBackupId === ids.a);
     window.api.releaseManagedOnlineBackupList(5);
+    await racingCreate;
     await new Promise(resolve => setTimeout(resolve, 0));
-    const staleNavigationResponse = {
+    const raceResult = {
       keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
       status: document.getElementById('onlineBackupStatus').textContent,
-      statusState: document.getElementById('onlineBackupStatus').dataset.state
+      statusState: document.getElementById('onlineBackupStatus').dataset.state,
+      warningHidden: document.getElementById('managedOnlineBackupRefreshStatus')?.hidden
     };
-    const concurrentCreate = doOnlineBackupCreate();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 7);
-    const statusBeforeConcurrentNavigation = {
-      text: document.getElementById('onlineBackupStatus').textContent,
-      state: document.getElementById('onlineBackupStatus').dataset.state
-    };
-    navigation.click();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 8);
+    managedOnlineBackups = [];
+    managedOnlineBackupsAuthoritative = false;
+    renderManagedOnlineBackups(null);
+    await loadManagedOnlineBackups();
     await new Promise(resolve => setTimeout(resolve, 0));
-    const concurrentNavigationState = {
-      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
-      status: document.getElementById('onlineBackupStatus').textContent,
-      statusState: document.getElementById('onlineBackupStatus').dataset.state
+    const hardCorruption = {
+      emptyStateVisible: Boolean(document.querySelector('.online-backup-managed-empty')),
+      rowCount: document.querySelectorAll('.online-backup-managed-row').length,
+      warning: document.getElementById('managedOnlineBackupRefreshMessage')?.textContent,
+      retryVisible: document.getElementById('reloadManagedOnlineBackupsBtn')?.offsetParent !== null
     };
-    window.api.releaseManagedOnlineBackupList(7);
-    await concurrentCreate;
-    const authoritativeCreateResult = {
-      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
-      status: document.getElementById('onlineBackupStatus').textContent,
-      statusState: document.getElementById('onlineBackupStatus').dataset.state
-    };
-    const failedCreateBeforeNavigation = doOnlineBackupCreate();
-    await failedCreateBeforeNavigation;
-    const completedOperationError = {
-      text: document.getElementById('onlineBackupStatus').textContent,
-      state: document.getElementById('onlineBackupStatus').dataset.state
-    };
-    navigation.click();
-    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 10);
-    await new Promise(resolve => setTimeout(resolve, 0));
-    const navigationAfterOperationError = {
-      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
-      status: document.getElementById('onlineBackupStatus').textContent,
-      statusState: document.getElementById('onlineBackupStatus').dataset.state
-    };
-    const calls = await window.api.getManagedOnlineBackupProbeCalls();
     return {
       initialKeys,
-      secretRejected,
-      rowReplacedDuringConfirmation,
-      copyPendingControlsDisabled,
-      deleteStartedBeforeCopyFinished,
-      deleteStartedAfterCopy,
-      deletePendingControlsDisabled,
-      deleteCallCount: calls.filter(call => call[0] === 'delete').length,
+      initialWarning,
+      exactSanitizedState,
+      ariaDescriptions,
       afterDelete,
-      deletePostRefreshCount,
-      afterCreate,
-      authoritativeStateFields,
-      createPostRefreshCount,
-      failedCreatePostRefreshCount,
       refreshFailure,
-      statusBeforeStaleNavigationResponse,
-      staleNavigationResponse,
-      statusBeforeConcurrentNavigation,
-      concurrentNavigationState,
-      authoritativeCreateResult,
-      completedOperationError,
-      navigationAfterOperationError,
+      retryTriggeredLoad,
+      afterRetry,
+      copyFocusRestored,
+      raceResult,
+      hardCorruption,
       confirmation,
-      calls,
+      calls: await window.api.getManagedOnlineBackupProbeCalls(),
       secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent)
     };
   })()`;
@@ -419,59 +396,46 @@ app.whenReady().then(async () => {
     assert.ok(result.liveSpeedChart.canvasWidth > 0);
     assert.equal(result.liveSpeedChart.baselinePresent, false);
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
-    assert.equal(result.onlineBackupBehavior.secretRejected, true);
-    assert.equal(result.onlineBackupBehavior.rowReplacedDuringConfirmation, true);
-    assert.equal(result.onlineBackupBehavior.copyPendingControlsDisabled, true);
-    assert.equal(result.onlineBackupBehavior.deleteStartedBeforeCopyFinished, false);
-    assert.equal(result.onlineBackupBehavior.deleteStartedAfterCopy, true);
-    assert.equal(result.onlineBackupBehavior.deletePendingControlsDisabled, true);
-    assert.equal(result.onlineBackupBehavior.deleteCallCount, 1);
-    assert.deepEqual(result.onlineBackupBehavior.afterDelete, ['MHU2-DFGH…2468', 'MHU2-ABCD…1234']);
-    assert.equal(result.onlineBackupBehavior.deletePostRefreshCount, 1);
-    assert.deepEqual(result.onlineBackupBehavior.afterCreate, ['MHU2-ETYU…1357', 'MHU2-DFGH…2468', 'MHU2-QWER…4321']);
-    assert.deepEqual(result.onlineBackupBehavior.authoritativeStateFields, ['createdAt', 'displayKey', 'id']);
-    assert.equal(result.onlineBackupBehavior.createPostRefreshCount, 1);
-    assert.equal(result.onlineBackupBehavior.failedCreatePostRefreshCount, 1);
+    assert.deepEqual(result.onlineBackupBehavior.initialWarning, {
+      hidden: false,
+      text: 'Stored online backup key could not be decrypted'
+    });
+    assert.equal(result.onlineBackupBehavior.exactSanitizedState, true);
+    assert.equal(result.onlineBackupBehavior.ariaDescriptions, true);
+    assert.deepEqual(result.onlineBackupBehavior.afterDelete, {
+      keys: ['MHU2-ABCD…1234'],
+      status: 'Key deleted',
+      statusState: 'success',
+      warning: 'Stored online backup key could not be decrypted',
+      retryVisible: true,
+      focusAction: 'delete',
+      focusId: 'AAAAAAAAAAAAAAAAAAAAAA'
+    });
     assert.deepEqual(result.onlineBackupBehavior.refreshFailure, {
-      rowCount: 0,
-      stateCount: 0,
+      keys: ['MHU2-QWER…4321', 'MHU2-ABCD…1234'],
+      status: 'New key created.',
+      statusState: 'success',
+      warning: 'Stored online backup key could not be decrypted',
+      retryVisible: true
+    });
+    assert.equal(result.onlineBackupBehavior.retryTriggeredLoad, true);
+    assert.deepEqual(result.onlineBackupBehavior.afterRetry, {
+      keys: ['MHU2-QWER…4321', 'MHU2-ABCD…1234'],
+      warningHidden: true
+    });
+    assert.equal(result.onlineBackupBehavior.copyFocusRestored, true);
+    assert.deepEqual(result.onlineBackupBehavior.raceResult, {
+      keys: ['MHU2-DFGH…2468', 'MHU2-QWER…4321', 'MHU2-ABCD…1234'],
+      status: 'New key created.',
+      statusState: 'success',
+      warningHidden: true
+    });
+    assert.deepEqual(result.onlineBackupBehavior.hardCorruption, {
       emptyStateVisible: false,
-      status: 'Online backups could not be loaded',
-      statusState: 'error'
+      rowCount: 0,
+      warning: 'Stored online backup ID does not match its key',
+      retryVisible: true
     });
-    assert.deepEqual(result.onlineBackupBehavior.statusBeforeStaleNavigationResponse, {
-      text: 'Online backup could not be created',
-      state: 'error'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.staleNavigationResponse, {
-      keys: ['MHU2-GHJK…7531'],
-      status: 'Online backup could not be created',
-      statusState: 'error'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.statusBeforeConcurrentNavigation, {
-      text: 'Encrypting and saving settings…',
-      state: 'busy'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.concurrentNavigationState, {
-      keys: ['MHU2-GHJK…7531'],
-      status: 'Encrypting and saving settings…',
-      statusState: 'busy'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.authoritativeCreateResult, {
-      keys: ['MHU2-HJKL…8642'],
-      status: 'New key created. Older keys remain valid.',
-      statusState: 'success'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.completedOperationError, {
-      text: 'Online backup could not be created',
-      state: 'error'
-    });
-    assert.deepEqual(result.onlineBackupBehavior.navigationAfterOperationError, {
-      keys: ['MHU2-JKLO…4444'],
-      status: '',
-      statusState: ''
-    });
-    assert.equal(result.onlineBackupBehavior.afterCreate.length, 3);
     assert.deepEqual(result.onlineBackupBehavior.confirmation, {
       title: 'Online-Backup löschen',
       message: 'Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.',
@@ -480,22 +444,15 @@ app.whenReady().then(async () => {
     });
     assert.deepEqual(result.onlineBackupBehavior.calls, [
       ['list', 1],
-      ['copy', 'BBBBBBBBBBBBBBBBBBBBBB'],
-      ['delete', 'BBBBBBBBBBBBBBBBBBBBBB'],
+      ['delete', 'AQEBAQEBAQEBAQEBAQEBAQ'],
       ['list', 2],
       ['create', 1],
       ['list', 3],
-      ['create', 2],
       ['list', 4],
+      ['create', 2],
       ['list', 5],
-      ['create', 3],
-      ['list', 6],
-      ['create', 4],
-      ['list', 7],
-      ['list', 8],
-      ['list', 9],
-      ['create', 5],
-      ['list', 10]
+      ['copy', 'AAAAAAAAAAAAAAAAAAAAAA'],
+      ['list', 6]
     ]);
     assert.equal(result.onlineBackupBehavior.secretInBody, false);
     assert.ok(Math.abs(result.onlineBackupLayout.german.createRight - result.onlineBackupLayout.german.contentRight) <= 1);
@@ -516,6 +473,243 @@ app.whenReady().then(async () => {
     assert.equal(result.onlineBackupNarrowLayout.createStretched, true);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
+});
+
+test('Windows DPAPI key management composes through hidden real IPC and local transport', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-dpapi-ipc-'));
+  const probePath = path.join(probeRoot, 'probe.cjs');
+  const preloadPath = path.join(probeRoot, 'preload.cjs');
+  const rendererPath = path.join(probeRoot, 'renderer.html');
+  const outputPath = path.join(probeRoot, 'result.json');
+  const userDataPath = path.join(probeRoot, 'user-data');
+  const serverDataPath = path.join(probeRoot, 'server-data');
+  fs.writeFileSync(preloadPath, `
+const { contextBridge, ipcRenderer } = require('electron');
+contextBridge.exposeInMainWorld('managedBackup', {
+  list: () => ipcRenderer.invoke('online-backup:list-managed'),
+  create: () => ipcRenderer.invoke('online-backup:create-managed'),
+  copy: id => ipcRenderer.invoke('online-backup:copy-managed', id),
+  delete: id => ipcRenderer.invoke('online-backup:delete-managed', id)
+});
+`, 'utf8');
+  fs.writeFileSync(rendererPath, `<!doctype html><html><body><script>
+(async () => {
+  const created = await window.managedBackup.create();
+  const listed = await window.managedBackup.list();
+  const id = listed.entries[0].id;
+  const copied = await window.managedBackup.copy(id);
+  const deleted = await window.managedBackup.delete(id);
+  const after = await window.managedBackup.list();
+  window.__managedBackupResult = { created, listed, copied, deleted, after, id };
+})().catch(error => { window.__managedBackupResult = { error: error.message || String(error) }; });
+</script></body></html>`, 'utf8');
+  const probeSource = `
+const { app, BrowserWindow, clipboard, ipcMain, safeStorage } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+const { createOnlineBackupKeyring } = require(${JSON.stringify(path.join(projectRoot, 'lib', 'online-backup-keyring.js'))});
+const { createOnlineBackupManager } = require(${JSON.stringify(path.join(projectRoot, 'lib', 'online-backup-manager.js'))});
+const { deleteOnlineBackup, parseOnlineBackupKey, uploadOnlineBackup } = require(${JSON.stringify(path.join(projectRoot, 'lib', 'online-backup.js'))});
+const secretStore = require(${JSON.stringify(path.join(projectRoot, 'lib', 'secret-store.js'))});
+const outputPath = process.env.MHU_DPAPI_OUTPUT;
+const userDataPath = process.env.MHU_DPAPI_USER_DATA;
+const serverDataPath = process.env.MHU_DPAPI_SERVER_DATA;
+const rendererPath = process.env.MHU_DPAPI_RENDERER;
+const preloadPath = process.env.MHU_DPAPI_PRELOAD;
+const serverModulePath = process.env.MHU_DPAPI_SERVER_MODULE;
+app.setPath('userData', userDataPath);
+let server = null;
+let window = null;
+let previousClipboard = '';
+const logs = [];
+const originalConsole = { log: console.log, warn: console.warn, error: console.error };
+for (const method of Object.keys(originalConsole)) console[method] = (...values) => { logs.push(values.map(String).join(' ')); };
+function canonicalId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(value)) return false;
+  const decoded = Buffer.from(value, 'base64url');
+  return decoded.length === 16 && decoded.toString('base64url') === value;
+}
+function trusted(event) {
+  return Boolean(window && !window.isDestroyed() && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame);
+}
+function requireId(value) {
+  if (!canonicalId(value)) throw new Error('invalid id');
+  return value;
+}
+async function closeServer() {
+  if (!server) return;
+  await new Promise(resolve => server.close(resolve));
+  server = null;
+}
+app.whenReady().then(async () => {
+  previousClipboard = clipboard.readText();
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage unavailable');
+  const { createBackupServer } = await import(pathToFileURL(serverModulePath).href);
+  fs.mkdirSync(serverDataPath, { recursive: true });
+  server = createBackupServer({
+    rootDir: serverDataPath,
+    allowedOrigins: [],
+    rateLimit: { max: 100, windowMs: 60000 },
+    uploadRateLimit: { max: 100, windowMs: 60000 },
+    requestRateLimit: { max: 100, windowMs: 60000 }
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const baseUrl = 'http://127.0.0.1:' + server.address().port;
+  const keyringPath = path.join(userDataPath, 'online-backup-keys.json');
+  const keyring = createOnlineBackupKeyring({ filePath: keyringPath });
+  const transport = [];
+  let fullKey = '';
+  let diskBeforeDelete = '';
+  let clipboardMatched = false;
+  let serverRecordBeforeDelete = false;
+  const manager = createOnlineBackupManager({
+    keyring,
+    loadSettings: async () => ({ globalSettings: { language: 'de' }, hosters: {}, hosterSettings: {} }),
+    appVersion: () => '2.1.31',
+    uploadBackup: async record => {
+      transport.push({ operation: 'upload', id: record.id });
+      return uploadOnlineBackup(record, baseUrl);
+    },
+    deleteBackup: async value => {
+      const parsed = parseOnlineBackupKey(value);
+      transport.push({ operation: 'delete', id: parsed.id });
+      return deleteOnlineBackup(value, baseUrl);
+    },
+    copyText: value => clipboard.writeText(value)
+  });
+  ipcMain.handle('online-backup:list-managed', event => trusted(event) ? manager.listManaged() : { ok: false, error: 'rejected' });
+  ipcMain.handle('online-backup:create-managed', async event => {
+    if (!trusted(event)) return { ok: false, error: 'rejected' };
+    const result = await manager.createManaged();
+    if (result.ok) {
+      fullKey = await keyring.getKey(result.entry.id);
+      diskBeforeDelete = fs.readFileSync(keyringPath, 'utf8');
+      serverRecordBeforeDelete = fs.existsSync(path.join(serverDataPath, result.entry.id + '.json'));
+    }
+    return result;
+  });
+  ipcMain.handle('online-backup:copy-managed', async (event, id) => {
+    if (!trusted(event)) return { ok: false, error: 'rejected' };
+    const result = await manager.copyManaged(requireId(id));
+    clipboardMatched = clipboard.readText() === fullKey;
+    return result;
+  });
+  ipcMain.handle('online-backup:delete-managed', (event, id) => trusted(event) ? manager.deleteManaged(requireId(id)) : { ok: false, error: 'rejected' });
+  window = new BrowserWindow({
+    show: false,
+    width: 640,
+    height: 480,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: preloadPath }
+  });
+  await window.loadFile(rendererPath);
+  let rendererResult = null;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    rendererResult = await window.webContents.executeJavaScript('window.__managedBackupResult || null');
+    if (rendererResult) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  if (!rendererResult || rendererResult.error) throw new Error(rendererResult?.error || 'renderer timed out');
+  const stored = JSON.parse(diskBeforeDelete);
+  const encryptedKey = stored.keys[0].encryptedKey;
+  const ipcJson = JSON.stringify(rendererResult);
+  const afterDocument = JSON.parse(fs.readFileSync(keyringPath, 'utf8'));
+  const remainingServerRecords = fs.readdirSync(serverDataPath).filter(name => name.endsWith('.json'));
+  const result = {
+    platform: process.platform,
+    safeStorageAvailable: safeStorage.isEncryptionAvailable(),
+    hidden: window.isVisible() === false,
+    canonicalId: canonicalId(rendererResult.id),
+    createOk: rendererResult.created.ok === true,
+    copyOk: rendererResult.copied.ok === true,
+    deleteOk: rendererResult.deleted.ok === true,
+    afterEmpty: rendererResult.after.ok === true && rendererResult.after.entries.length === 0,
+    diskUsesKeysSchema: Array.isArray(stored.keys) && !Object.hasOwn(stored, 'entries'),
+    diskHadCiphertext: secretStore.isEncrypted(encryptedKey) && encryptedKey !== fullKey && !diskBeforeDelete.includes(fullKey),
+    dpapiRoundTrip: safeStorage.decryptString(Buffer.from(encryptedKey.slice('enc:v1:'.length), 'base64')) === fullKey,
+    rendererSecretAbsent: !ipcJson.includes(fullKey) && !/MHU2-[A-Za-z0-9_-]{70}/.test(ipcJson),
+    logSecretAbsent: logs.every(line => !line.includes(fullKey)) && !logs.join(' ').match(/MHU2-[A-Za-z0-9_-]{70}/),
+    clipboardMatched,
+    serverRecordBeforeDelete,
+    serverEmptyAfterDelete: remainingServerRecords.length === 0,
+    keyringEmptyAfterDelete: afterDocument.keys.length === 0,
+    transport
+  };
+  fs.writeFileSync(outputPath, JSON.stringify(result), 'utf8');
+}).catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
+  process.exitCode = 1;
+}).finally(async () => {
+  clipboard.writeText(previousClipboard);
+  if (fs.existsSync(outputPath)) {
+    const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    result.clipboardRestored = clipboard.readText() === previousClipboard;
+    fs.writeFileSync(outputPath, JSON.stringify(result), 'utf8');
+  }
+  for (const channel of ['online-backup:list-managed', 'online-backup:create-managed', 'online-backup:copy-managed', 'online-backup:delete-managed']) ipcMain.removeHandler(channel);
+  if (window && !window.isDestroyed()) window.destroy();
+  await closeServer();
+  for (const [method, value] of Object.entries(originalConsole)) console[method] = value;
+  app.exit(process.exitCode || 0);
+});
+`;
+  fs.writeFileSync(probePath, probeSource, 'utf8');
+  try {
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const probeEnvironment = {
+      ...process.env,
+      MHU_DPAPI_OUTPUT: outputPath,
+      MHU_DPAPI_USER_DATA: userDataPath,
+      MHU_DPAPI_SERVER_DATA: serverDataPath,
+      MHU_DPAPI_RENDERER: rendererPath,
+      MHU_DPAPI_PRELOAD: preloadPath,
+      MHU_DPAPI_SERVER_MODULE: path.join(projectRoot, 'services', 'backup-api', 'src', 'server.mjs')
+    };
+    delete probeEnvironment.RUN_UI_SMOKE;
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: projectRoot,
+      env: probeEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000
+    });
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+    const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(result.error, undefined);
+    assert.deepEqual(result, {
+      platform: 'win32',
+      safeStorageAvailable: true,
+      hidden: true,
+      canonicalId: true,
+      createOk: true,
+      copyOk: true,
+      deleteOk: true,
+      afterEmpty: true,
+      diskUsesKeysSchema: true,
+      diskHadCiphertext: true,
+      dpapiRoundTrip: true,
+      rendererSecretAbsent: true,
+      logSecretAbsent: true,
+      clipboardMatched: true,
+      clipboardRestored: true,
+      serverRecordBeforeDelete: true,
+      serverEmptyAfterDelete: true,
+      keyringEmptyAfterDelete: true,
+      transport: [
+        { operation: 'upload', id: result.transport[0].id },
+        { operation: 'delete', id: result.transport[0].id }
+      ]
+    });
+    assert.match(result.transport[0].id, /^[A-Za-z0-9_-]{22}$/u);
+    assert.doesNotMatch(`${execution.stdout}\n${execution.stderr}\n${fs.readFileSync(outputPath, 'utf8')}`, /MHU2-[A-Za-z0-9_-]{70}/u);
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+    assert.equal(fs.existsSync(probeRoot), false);
   }
 });
 

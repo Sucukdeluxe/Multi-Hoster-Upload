@@ -36,6 +36,17 @@ test('encrypts and decrypts fields when secure storage is available', () => {
   });
 });
 
+test('recognizes only canonical enc:v1 envelopes as encrypted', () => {
+  withSecretStore(availableSafeStorage(), secretStore => {
+    const canonical = `enc:v1:${Buffer.from('protected:secret').toString('base64')}`;
+    assert.equal(secretStore.isEncrypted(canonical), true);
+    assert.equal(secretStore.isEncrypted('secret'), false);
+    assert.equal(secretStore.isEncrypted(canonical.replace('enc:v1:', 'enc:v2:')), false);
+    assert.equal(secretStore.isEncrypted(canonical.replace(/=+$/u, '')), false);
+    assert.equal(secretStore.isEncrypted(`${canonical}\n`), false);
+  });
+});
+
 test('refuses plaintext storage by default when secure storage is unavailable', () => {
   withSecretStore(null, secretStore => {
     assert.throws(
@@ -94,11 +105,28 @@ test('throws an identifiable error when decryption fails', () => {
   const failure = new Error('decryption failed');
   withSecretStore(availableSafeStorage({ decryptString: () => { throw failure; } }), secretStore => {
     assert.throws(
-      () => secretStore.decryptField('enc:v1:invalid'),
+      () => secretStore.decryptField('enc:v1:aW52YWxpZA=='),
       error => error instanceof secretStore.SecretStoreError
         && error.code === 'SECRET_STORE_DECRYPT_FAILED'
         && error.cause === failure
     );
+  });
+});
+
+test('rejects malformed enc:v1 values instead of treating them as legacy plaintext', () => {
+  let decryptCalls = 0;
+  withSecretStore(availableSafeStorage({
+    decryptString: () => {
+      decryptCalls++;
+      return 'unexpected';
+    }
+  }), secretStore => {
+    assert.throws(
+      () => secretStore.decryptField('enc:v1:YWJjZA'),
+      error => error instanceof secretStore.SecretStoreError
+        && error.code === 'SECRET_STORE_DECRYPT_FAILED'
+    );
+    assert.equal(decryptCalls, 0);
   });
 });
 

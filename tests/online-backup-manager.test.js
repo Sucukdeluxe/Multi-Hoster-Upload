@@ -1,12 +1,23 @@
-const { describe, it } = require('node:test');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { afterEach, describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
 const { createOnlineBackupManager } = require('../lib/online-backup-manager');
+const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+const { createOnlineBackup, parseOnlineBackupKey } = require('../lib/online-backup');
 
 const key = `MHU2-${'K'.repeat(70)}`;
 const id = 'managed-backup-id';
 const record = { id, blob: 'encrypted-blob', deleteVerifier: 'delete-verifier' };
 const settings = { globalSettings: { alwaysOnTop: true } };
+const directories = [];
+
+afterEach(() => {
+  for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
+});
 
 function createFixture(overrides = {}) {
   const events = [];
@@ -22,10 +33,15 @@ function createFixture(overrides = {}) {
   }
   let createdAt;
   let createArguments;
+  const removalPlans = new WeakMap();
   const keyring = {
     list: async () => {
       events.push('list');
-      return [...entries.values()];
+      if (overrides.listError) throw overrides.listError;
+      return {
+        entries: [...entries.values()],
+        issues: overrides.listIssues || []
+      };
     },
     prepare: (value, timestamp) => {
       events.push('prepare');
@@ -43,15 +59,29 @@ function createFixture(overrides = {}) {
         createdAt: entry.createdAt
       });
     },
-    remove: async (entryId) => {
-      events.push('remove');
-      const existed = state.delete(entryId);
-      entries.delete(entryId);
-      return existed;
-    },
     getKey: async (entryId) => {
       events.push('getKey');
+      if (overrides.getKeyError) throw overrides.getKeyError;
       return state.get(entryId) || null;
+    },
+    prepareRemove: async (entryId) => {
+      events.push('prepareRemove');
+      if (overrides.prepareRemoveError) throw overrides.prepareRemoveError;
+      const value = state.get(entryId);
+      if (!value) return null;
+      const plan = { id: entryId, key: value };
+      removalPlans.set(plan, entryId);
+      return plan;
+    },
+    commitRemove: async (plan) => {
+      events.push('commitRemove');
+      if (overrides.commitRemoveError) throw overrides.commitRemoveError;
+      const entryId = removalPlans.get(plan);
+      if (!entryId) throw new Error('invalid plan');
+      removalPlans.delete(plan);
+      state.delete(entryId);
+      entries.delete(entryId);
+      return true;
     }
   };
   const manager = createOnlineBackupManager({
@@ -86,6 +116,55 @@ function createFixture(overrides = {}) {
       return createArguments;
     }
   };
+}
+
+function codedError(code, secret = key) {
+  const error = new Error(`failure ${secret}`);
+  error.code = code;
+  return error;
+}
+
+function encrypted(value) {
+  return `enc:v1:${Buffer.from(value).toString('base64')}`;
+}
+
+function realKeyring(keys) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-manager-keyring-'));
+  directories.push(directory);
+  const filePath = path.join(directory, 'online-backup-keys.json');
+  fs.writeFileSync(filePath, JSON.stringify({ version: 1, keys }));
+  return createOnlineBackupKeyring({
+    filePath,
+    encryptField: encrypted,
+    decryptField: value => Buffer.from(value.slice('enc:v1:'.length), 'base64').toString('utf8'),
+    isEncrypted: value => typeof value === 'string'
+      && value.startsWith('enc:v1:')
+      && Buffer.from(value.slice('enc:v1:'.length), 'base64').toString('base64') === value.slice('enc:v1:'.length)
+  });
+}
+
+function keyWithRecordId(sourceKey, fill) {
+  const idBytes = parseOnlineBackupKey(sourceKey).idBytes;
+  const masterKey = Buffer.alloc(32, fill);
+  const checksum = crypto.createHash('sha256')
+    .update(Buffer.from('MHU2-ONLINE-KEY-V1', 'utf8'))
+    .update(idBytes)
+    .update(masterKey)
+    .digest()
+    .subarray(0, 4);
+  return `MHU2-${Buffer.concat([idBytes, masterKey, checksum]).toString('base64url')}`;
+}
+
+function deleteVerifier(value) {
+  const parsed = parseOnlineBackupKey(value);
+  const deleteSecret = Buffer.from(crypto.hkdfSync(
+    'sha256',
+    parsed.masterKey,
+    parsed.idBytes,
+    Buffer.from('MHU-ONLINE-DELETE-V1', 'utf8'),
+    32
+  ));
+  return crypto.createHash('sha256').update(deleteSecret).digest('base64url');
 }
 
 describe('transactional online backup manager', () => {
@@ -191,12 +270,28 @@ describe('transactional online backup manager', () => {
     assert.equal(JSON.stringify(result).includes(key), false);
   });
 
+  it('returns typed sanitized keyring errors instead of a false not-found copy result', async () => {
+    const fixture = createFixture({
+      getKeyError: codedError('KEYRING_SECURE_STORAGE_UNAVAILABLE')
+    });
+
+    const result = await fixture.manager.copyManaged(id);
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'KEYRING_SECURE_STORAGE_UNAVAILABLE',
+      error: 'Sichere Schlüsselspeicherung ist nicht verfügbar'
+    });
+    assert.equal(result.notFound, undefined);
+    assert.equal(JSON.stringify(result).includes(key), false);
+  });
+
   it('removes the local entry after a successful remote deletion', async () => {
     const fixture = createFixture();
 
     const result = await fixture.manager.deleteManaged(id);
 
-    assert.deepEqual(fixture.events, ['getKey', `delete:${key}`, 'remove']);
+    assert.deepEqual(fixture.events, ['prepareRemove', `delete:${key}`, 'commitRemove']);
     assert.deepEqual(result, { ok: true, removedId: id, notFound: false });
     assert.equal(fixture.state.has(id), false);
     assert.equal(JSON.stringify(result).includes(key), false);
@@ -207,7 +302,7 @@ describe('transactional online backup manager', () => {
 
     const result = await fixture.manager.deleteManaged(id);
 
-    assert.deepEqual(fixture.events, ['getKey', `delete:${key}`, 'remove']);
+    assert.deepEqual(fixture.events, ['prepareRemove', `delete:${key}`, 'commitRemove']);
     assert.deepEqual(result, { ok: true, removedId: id, notFound: true });
     assert.equal(fixture.state.has(id), false);
   });
@@ -217,10 +312,64 @@ describe('transactional online backup manager', () => {
 
     const result = await fixture.manager.deleteManaged(id);
 
-    assert.deepEqual(fixture.events, ['getKey', `delete:${key}`]);
+    assert.deepEqual(fixture.events, ['prepareRemove', `delete:${key}`]);
     assert.deepEqual(result, { ok: false, error: 'Online-Sicherung konnte nicht gelöscht werden' });
     assert.equal(fixture.state.has(id), true);
     assert.equal(JSON.stringify(result).includes(key), false);
+  });
+
+  it('blocks remote deletion when a valid target has a corrupt neighboring entry', async () => {
+    const valid = createOnlineBackup({}, '2.1.31').key;
+    const corrupt = createOnlineBackup({}, '2.1.31').key;
+    const keyring = realKeyring([
+      { id: parseOnlineBackupKey(valid).id, encryptedKey: encrypted(valid), createdAt: '2026-08-22T10:00:00.000Z' },
+      { id: parseOnlineBackupKey(corrupt).id, encryptedKey: 'enc:v1:YWJjZA', createdAt: '2026-08-22T11:00:00.000Z' }
+    ]);
+    let remoteCalls = 0;
+    const manager = createOnlineBackupManager({
+      keyring,
+      loadSettings: async () => settings,
+      appVersion: () => '2.1.31',
+      deleteBackup: async () => { remoteCalls++; return { deleted: true, notFound: false }; },
+      copyText: () => {}
+    });
+
+    const result = await manager.deleteManaged(parseOnlineBackupKey(valid).id);
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'KEYRING_STRUCTURE_INVALID',
+      error: 'Gespeicherter Online-Schlüsselbund ist beschädigt'
+    });
+    assert.equal(remoteCalls, 0);
+  });
+
+  it('blocks duplicate IDs with different delete verifiers before remote deletion', async () => {
+    const first = createOnlineBackup({}, '2.1.31').key;
+    const second = keyWithRecordId(first, 0x33);
+    const entryId = parseOnlineBackupKey(first).id;
+    assert.notEqual(deleteVerifier(first), deleteVerifier(second));
+    const keyring = realKeyring([
+      { id: entryId, encryptedKey: encrypted(first), createdAt: '2026-08-22T10:00:00.000Z' },
+      { id: entryId, encryptedKey: encrypted(second), createdAt: '2026-08-22T11:00:00.000Z' }
+    ]);
+    let remoteCalls = 0;
+    const manager = createOnlineBackupManager({
+      keyring,
+      loadSettings: async () => settings,
+      appVersion: () => '2.1.31',
+      deleteBackup: async () => { remoteCalls++; return { deleted: true, notFound: false }; },
+      copyText: () => {}
+    });
+
+    const result = await manager.deleteManaged(entryId);
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'KEYRING_DUPLICATE_ID',
+      error: 'Gespeicherte Online-Sicherungskennung ist mehrdeutig'
+    });
+    assert.equal(remoteCalls, 0);
   });
 
   it('does not call copy or remote deletion dependencies for unknown IDs', async () => {
@@ -229,7 +378,7 @@ describe('transactional online backup manager', () => {
     const copied = await fixture.manager.copyManaged('unknown-id');
     const deleted = await fixture.manager.deleteManaged('unknown-id');
 
-    assert.deepEqual(fixture.events, ['getKey', 'getKey']);
+    assert.deepEqual(fixture.events, ['getKey', 'prepareRemove']);
     assert.deepEqual(copied, {
       ok: false,
       notFound: true,
@@ -282,9 +431,9 @@ describe('transactional online backup manager', () => {
       'upload:start',
       'upload:end',
       'commit',
-      'getKey',
+      'prepareRemove',
       `delete:${key}`,
-      'remove'
+      'commitRemove'
     ]);
   });
 
@@ -305,5 +454,28 @@ describe('transactional online backup manager', () => {
     const failed = await fixture.manager.listManaged();
     assert.deepEqual(failed, { ok: false, error: 'Online-Sicherungen konnten nicht geladen werden' });
     assert.equal(JSON.stringify(failed).includes(key), false);
+  });
+
+  it('keeps readable list entries with a typed warning and never reports damaged nonempty state as empty success', async () => {
+    const readable = createFixture({ listIssues: ['KEYRING_DECRYPT_FAILED'] });
+
+    assert.deepEqual(await readable.manager.listManaged(), {
+      ok: true,
+      entries: [{
+        id,
+        displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
+        createdAt: '2026-08-22T10:00:00.000Z'
+      }],
+      warningCode: 'KEYRING_DECRYPT_FAILED',
+      warning: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden'
+    });
+
+    const damaged = createFixture({ initialKey: null, listIssues: ['KEYRING_ID_MISMATCH'] });
+    assert.deepEqual(await damaged.manager.listManaged(), {
+      ok: false,
+      entries: [],
+      code: 'KEYRING_ID_MISMATCH',
+      error: 'Gespeicherte Online-Sicherungskennung stimmt nicht mit dem Schlüssel überein'
+    });
   });
 });

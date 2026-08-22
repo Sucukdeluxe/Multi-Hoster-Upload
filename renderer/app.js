@@ -42,6 +42,7 @@ function refreshLocalizedRuntimeUi() {
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
   renderManagedOnlineBackups();
+  renderManagedOnlineBackupRefreshIssue();
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -64,11 +65,12 @@ let uploading = false;
 let healthCheckRunning = false;
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
-let managedOnlineBackupOperationGeneration = 0;
+let managedOnlineBackupMutationGeneration = 0;
 let managedOnlineBackupNavigationLoadGeneration = 0;
 let managedOnlineBackupAuthoritativeLoadGeneration = 0;
-let managedOnlineBackupActiveOperations = 0;
+let managedOnlineBackupActiveMutations = 0;
 let onlineBackupStatusContextGeneration = 0;
+let managedOnlineBackupRefreshIssue = null;
 const managedOnlineBackupOperationQueues = new Map();
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
@@ -2647,15 +2649,18 @@ function beginOnlineBackupStatusContext() {
   return ++onlineBackupStatusContextGeneration;
 }
 
-function beginManagedOnlineBackupOperation() {
-  managedOnlineBackupActiveOperations++;
-  managedOnlineBackupOperationGeneration++;
+function beginManagedOnlineBackupMutation() {
+  managedOnlineBackupActiveMutations++;
+  managedOnlineBackupMutationGeneration++;
   managedOnlineBackupNavigationLoadGeneration++;
-  return beginOnlineBackupStatusContext();
+  return Object.freeze({
+    mutationGeneration: managedOnlineBackupMutationGeneration,
+    statusContext: beginOnlineBackupStatusContext()
+  });
 }
 
-function endManagedOnlineBackupOperation() {
-  managedOnlineBackupActiveOperations = Math.max(0, managedOnlineBackupActiveOperations - 1);
+function endManagedOnlineBackupMutation() {
+  managedOnlineBackupActiveMutations = Math.max(0, managedOnlineBackupActiveMutations - 1);
 }
 
 function setOnlineBackupStatus(message, state = '', statusContext = null) {
@@ -2675,34 +2680,84 @@ function syncOnlineBackupRestoreButton(busy = false) {
   restoreButton.disabled = busy || !/^MHU2-[A-Za-z0-9_-]{70}$/.test(document.getElementById('onlineBackupKeyInput')?.value.trim() || '');
 }
 
-function normalizeManagedOnlineBackups(entries) {
-  const sanitized = new Map();
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    if (!entry || typeof entry !== 'object') continue;
-    if (typeof entry.id !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(entry.id)) continue;
-    if (typeof entry.displayKey !== 'string' || !entry.displayKey || /MHU2-[A-Za-z0-9_-]{70}/.test(entry.displayKey)) continue;
-    const createdAt = new Date(entry.createdAt);
-    if (Number.isNaN(createdAt.getTime())) continue;
-    sanitized.set(entry.id, { id: entry.id, displayKey: entry.displayKey, createdAt: createdAt.toISOString() });
+function isCanonicalManagedOnlineBackupId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(value)) return false;
+  try {
+    const decoded = window.atob(`${value.replace(/-/g, '+').replace(/_/g, '/')}==`);
+    if (decoded.length !== 16) return false;
+    const encoded = window.btoa(decoded).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    return encoded === value;
+  } catch {
+    return false;
   }
-  return [...sanitized.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
-function replaceManagedOnlineBackups(entries) {
+function normalizeManagedOnlineBackups(entries) {
+  const candidates = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (Object.keys(entry).sort().join(',') !== 'createdAt,displayKey,id') continue;
+    if (!isCanonicalManagedOnlineBackupId(entry.id)) continue;
+    if (typeof entry.displayKey !== 'string' || !/^MHU2-[A-Za-z0-9_-]{4}…[A-Za-z0-9_-]{4}$/.test(entry.displayKey)) continue;
+    const createdAt = new Date(entry.createdAt);
+    if (Number.isNaN(createdAt.getTime()) || createdAt.toISOString() !== entry.createdAt) continue;
+    candidates.push({ id: entry.id, displayKey: entry.displayKey, createdAt: entry.createdAt });
+  }
+  const counts = new Map();
+  for (const entry of candidates) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
+  return candidates
+    .filter(entry => counts.get(entry.id) === 1)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function managedOnlineBackupFocusTarget() {
+  const active = document.activeElement;
+  const id = active?.dataset?.managedOnlineBackupId;
+  const action = active?.dataset?.managedOnlineBackupAction;
+  if (!id || !action) return null;
+  return { id, action, fallbackIndex: managedOnlineBackups.findIndex(entry => entry.id === id) };
+}
+
+function restoreManagedOnlineBackupFocus(target) {
+  if (!target) return;
+  let button = [...document.querySelectorAll('[data-managed-online-backup-action]')]
+    .find(candidate => candidate.dataset.managedOnlineBackupId === target.id && candidate.dataset.managedOnlineBackupAction === target.action);
+  if (!button && Number.isInteger(target.fallbackIndex)) {
+    const rows = [...document.querySelectorAll('.online-backup-managed-row')];
+    const row = rows[Math.min(Math.max(0, target.fallbackIndex), Math.max(0, rows.length - 1))];
+    button = row?.querySelector(`[data-managed-online-backup-action="${target.action}"]`);
+  }
+  button ||= document.getElementById('createOnlineBackupBtn');
+  if (button && !button.disabled) button.focus();
+}
+
+function replaceManagedOnlineBackups(entries, focusTarget = undefined) {
+  const target = focusTarget === undefined ? managedOnlineBackupFocusTarget() : focusTarget;
   managedOnlineBackups = normalizeManagedOnlineBackups(entries);
   managedOnlineBackupsAuthoritative = true;
-  renderManagedOnlineBackups();
+  renderManagedOnlineBackups(target);
 }
 
-function invalidateManagedOnlineBackups() {
-  managedOnlineBackups = [];
-  managedOnlineBackupsAuthoritative = false;
-  renderManagedOnlineBackups();
+function upsertManagedOnlineBackup(entry) {
+  const normalized = normalizeManagedOnlineBackups([entry]);
+  if (normalized.length !== 1) return false;
+  replaceManagedOnlineBackups([
+    ...managedOnlineBackups.filter(current => current.id !== normalized[0].id),
+    normalized[0]
+  ]);
+  return true;
 }
 
-function renderManagedOnlineBackups() {
+function removeManagedOnlineBackup(id, focusTarget = null) {
+  if (!hasManagedOnlineBackup(id)) return false;
+  replaceManagedOnlineBackups(managedOnlineBackups.filter(entry => entry.id !== id), focusTarget);
+  return true;
+}
+
+function renderManagedOnlineBackups(focusTarget = undefined) {
   const list = document.getElementById('managedOnlineBackupList');
   if (!list) return;
+  const target = focusTarget === undefined ? managedOnlineBackupFocusTarget() : focusTarget;
   const content = document.createDocumentFragment();
   if (!managedOnlineBackupsAuthoritative) {
     list.replaceChildren(content);
@@ -2717,8 +2772,10 @@ function renderManagedOnlineBackups() {
     for (const entry of managedOnlineBackups) {
       const row = document.createElement('article');
       row.className = 'online-backup-managed-row';
+      row.dataset.managedOnlineBackupId = entry.id;
       const key = document.createElement('span');
       key.className = 'online-backup-managed-key';
+      key.id = `managedOnlineBackupKey-${entry.id}`;
       key.textContent = entry.displayKey;
       const created = document.createElement('span');
       created.className = 'online-backup-managed-created';
@@ -2729,10 +2786,16 @@ function renderManagedOnlineBackups() {
       copyButton.type = 'button';
       copyButton.className = 'btn btn-secondary online-backup-copy-btn';
       copyButton.textContent = localizeUiText('Schlüssel kopieren');
+      copyButton.dataset.managedOnlineBackupId = entry.id;
+      copyButton.dataset.managedOnlineBackupAction = 'copy';
+      copyButton.setAttribute('aria-describedby', key.id);
       const deleteButton = document.createElement('button');
       deleteButton.type = 'button';
       deleteButton.className = 'btn btn-danger online-backup-delete-btn';
       deleteButton.textContent = localizeUiText('Online-Backup löschen');
+      deleteButton.dataset.managedOnlineBackupId = entry.id;
+      deleteButton.dataset.managedOnlineBackupAction = 'delete';
+      deleteButton.setAttribute('aria-describedby', key.id);
       const pending = managedOnlineBackupOperationQueues.has(entry.id);
       copyButton.disabled = pending;
       deleteButton.disabled = pending;
@@ -2744,39 +2807,61 @@ function renderManagedOnlineBackups() {
     }
   }
   list.replaceChildren(content);
+  restoreManagedOnlineBackupFocus(target);
 }
 
-async function loadManagedOnlineBackups({ statusContext = null } = {}) {
-  const authoritative = statusContext !== null;
-  const operationGeneration = managedOnlineBackupOperationGeneration;
-  const startedDuringOperation = managedOnlineBackupActiveOperations > 0;
+function renderManagedOnlineBackupRefreshIssue() {
+  const container = document.getElementById('managedOnlineBackupRefreshStatus');
+  const message = document.getElementById('managedOnlineBackupRefreshMessage');
+  const retry = document.getElementById('reloadManagedOnlineBackupsBtn');
+  if (!container || !message || !retry) return;
+  const issue = managedOnlineBackupRefreshIssue;
+  container.hidden = !issue;
+  container.dataset.state = issue?.state || '';
+  message.textContent = issue ? localizeUiText(issue.message) : '';
+  retry.textContent = localizeUiText('Erneut laden');
+  retry.onclick = issue ? async () => {
+    retry.disabled = true;
+    await loadManagedOnlineBackups();
+    if (!retry.isConnected) return;
+    retry.disabled = false;
+    if (!container.hidden) retry.focus();
+    else restoreManagedOnlineBackupFocus({ id: managedOnlineBackups[0]?.id, action: 'copy', fallbackIndex: 0 });
+  } : null;
+}
+
+function setManagedOnlineBackupRefreshIssue(message = '', state = 'warning') {
+  const sanitized = String(message || '').replace(/MHU2-[A-Za-z0-9_-]{70}/gu, localizeUiText('Geschützter Schlüssel'));
+  managedOnlineBackupRefreshIssue = sanitized ? { message: sanitized, state } : null;
+  renderManagedOnlineBackupRefreshIssue();
+}
+
+async function loadManagedOnlineBackups({ mutationGeneration = null } = {}) {
+  const authoritative = mutationGeneration !== null;
+  const capturedMutationGeneration = managedOnlineBackupMutationGeneration;
+  const startedDuringMutation = managedOnlineBackupActiveMutations > 0;
   const generation = authoritative
     ? ++managedOnlineBackupAuthoritativeLoadGeneration
     : ++managedOnlineBackupNavigationLoadGeneration;
-  const loaderStatusContext = authoritative || !startedDuringOperation ? statusContext ?? beginOnlineBackupStatusContext() : null;
-  const mayUpdateStatus = loaderStatusContext !== null;
   try {
     const result = await window.api.listManagedOnlineBackups();
     const stale = authoritative
-      ? generation !== managedOnlineBackupAuthoritativeLoadGeneration || operationGeneration !== managedOnlineBackupOperationGeneration
-      : generation !== managedOnlineBackupNavigationLoadGeneration || operationGeneration !== managedOnlineBackupOperationGeneration || startedDuringOperation;
+      ? generation !== managedOnlineBackupAuthoritativeLoadGeneration || mutationGeneration !== managedOnlineBackupMutationGeneration
+      : generation !== managedOnlineBackupNavigationLoadGeneration || capturedMutationGeneration !== managedOnlineBackupMutationGeneration || startedDuringMutation;
     if (stale) return false;
     if (!result?.ok || !Array.isArray(result.entries)) {
-      invalidateManagedOnlineBackups();
-      if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
+      setManagedOnlineBackupRefreshIssue(result?.error || 'Online-Sicherungen konnten nicht geladen werden', 'error');
       return false;
     }
     replaceManagedOnlineBackups(result.entries);
-    if (mayUpdateStatus) setOnlineBackupStatus('', '', loaderStatusContext);
+    if (result.warning) setManagedOnlineBackupRefreshIssue(result.warning, 'warning');
+    else setManagedOnlineBackupRefreshIssue();
     return true;
   } catch {
     const current = authoritative
-      ? generation === managedOnlineBackupAuthoritativeLoadGeneration && operationGeneration === managedOnlineBackupOperationGeneration
-      : generation === managedOnlineBackupNavigationLoadGeneration && operationGeneration === managedOnlineBackupOperationGeneration && !startedDuringOperation;
-    if (current) {
-      invalidateManagedOnlineBackups();
-      if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
-    }
+      ? generation === managedOnlineBackupAuthoritativeLoadGeneration && mutationGeneration === managedOnlineBackupMutationGeneration
+      : generation === managedOnlineBackupNavigationLoadGeneration && capturedMutationGeneration === managedOnlineBackupMutationGeneration && !startedDuringMutation;
+    if (current) setManagedOnlineBackupRefreshIssue('Online-Sicherungen konnten nicht geladen werden', 'error');
     return false;
   }
 }
@@ -2785,15 +2870,21 @@ function hasManagedOnlineBackup(id) {
   return managedOnlineBackups.some(entry => entry.id === id);
 }
 
-function enqueueManagedOnlineBackupOperation(id, action, operation) {
-  const statusContext = beginManagedOnlineBackupOperation();
+function enqueueManagedOnlineBackupOperation(id, action, operation, mutation = false) {
   const previous = managedOnlineBackupOperationQueues.get(id)?.promise || Promise.resolve();
-  const promise = previous.catch(() => {}).then(() => operation(statusContext));
-  const state = { action, promise };
+  const state = { action, promise: null };
+  const promise = previous.catch(() => {}).then(async () => {
+    const authority = mutation ? beginManagedOnlineBackupMutation() : null;
+    try {
+      return await operation(authority);
+    } finally {
+      if (authority) endManagedOnlineBackupMutation();
+    }
+  });
+  state.promise = promise;
   managedOnlineBackupOperationQueues.set(id, state);
   renderManagedOnlineBackups();
   return promise.finally(() => {
-    endManagedOnlineBackupOperation();
     if (managedOnlineBackupOperationQueues.get(id) !== state) return;
     managedOnlineBackupOperationQueues.delete(id);
     renderManagedOnlineBackups();
@@ -2803,18 +2894,20 @@ function enqueueManagedOnlineBackupOperation(id, action, operation) {
 async function copyManagedOnlineBackup(entry) {
   const id = entry.id;
   if (!hasManagedOnlineBackup(id) || managedOnlineBackupOperationQueues.has(id)) return;
-  await enqueueManagedOnlineBackupOperation(id, 'copy', async (statusContext) => {
+  const focusTarget = { id, action: 'copy', fallbackIndex: managedOnlineBackups.findIndex(current => current.id === id) };
+  await enqueueManagedOnlineBackupOperation(id, 'copy', async () => {
     try {
       const result = await window.api.copyManagedOnlineBackup(id);
       if (!result?.ok) {
-        setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error', statusContext);
+        showCopyToast(result?.error || 'Online-Sicherung konnte nicht kopiert werden');
         return;
       }
       showCopyToast('Online-Schlüssel kopiert');
     } catch {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error', statusContext);
+      showCopyToast('Online-Sicherung konnte nicht kopiert werden');
     }
   });
+  renderManagedOnlineBackups(focusTarget);
 }
 
 async function deleteManagedOnlineBackup(entry) {
@@ -2827,32 +2920,35 @@ async function deleteManagedOnlineBackup(entry) {
   });
   if (!confirmed) return;
   if (!hasManagedOnlineBackup(id)) {
-    const statusContext = beginManagedOnlineBackupOperation();
+    const statusContext = beginOnlineBackupStatusContext();
     setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
-    endManagedOnlineBackupOperation();
     return;
   }
   if (managedOnlineBackupOperationQueues.get(id)?.action === 'delete') {
     setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
     return;
   }
-  await enqueueManagedOnlineBackupOperation(id, 'delete', async (statusContext) => {
+  const fallbackIndex = managedOnlineBackups.findIndex(current => current.id === id);
+  let removed = false;
+  await enqueueManagedOnlineBackupOperation(id, 'delete', async (authority) => {
     if (!hasManagedOnlineBackup(id)) {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', authority.statusContext);
       return;
     }
     try {
       const result = await window.api.deleteManagedOnlineBackup(id);
       if (!result?.ok || result.removedId !== id) {
-        setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
+        setOnlineBackupStatus(result?.error || 'Online-Sicherung konnte nicht gelöscht werden', 'error', authority.statusContext);
         return;
       }
-      if (!await loadManagedOnlineBackups({ statusContext })) return;
-      setOnlineBackupStatus('Schlüssel gelöscht', 'success', statusContext);
+      removed = removeManagedOnlineBackup(id, { id, action: 'delete', fallbackIndex });
+      await loadManagedOnlineBackups({ mutationGeneration: authority.mutationGeneration });
+      setOnlineBackupStatus('Schlüssel gelöscht', 'success', authority.statusContext);
     } catch {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', authority.statusContext);
     }
-  });
+  }, true);
+  renderManagedOnlineBackups({ id, action: 'delete', fallbackIndex: removed ? fallbackIndex : managedOnlineBackups.findIndex(current => current.id === id) });
 }
 
 async function doOnlineBackupCreate() {
@@ -2863,29 +2959,29 @@ async function doOnlineBackupCreate() {
     openOnlineBackupView();
   } catch {
     openOnlineBackupView();
-    const statusContext = beginManagedOnlineBackupOperation();
+    const statusContext = beginOnlineBackupStatusContext();
     setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error', statusContext);
-    endManagedOnlineBackupOperation();
     doOnlineBackupCreate.busy = false;
     return;
   }
-  const statusContext = beginManagedOnlineBackupOperation();
+  const authority = beginManagedOnlineBackupMutation();
   const createButton = document.getElementById('createOnlineBackupBtn');
   if (createButton) createButton.disabled = true;
-  setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', statusContext);
+  setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', authority.statusContext);
   try {
     const result = await window.api.createManagedOnlineBackup();
     if (!result?.ok) {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', statusContext);
+      setOnlineBackupStatus(result?.error || 'Online-Sicherung konnte nicht erstellt werden', 'error', authority.statusContext);
       return;
     }
-    if (!await loadManagedOnlineBackups({ statusContext })) return;
-    setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success', statusContext);
+    if (!upsertManagedOnlineBackup(result.entry)) setManagedOnlineBackupRefreshIssue('Online-Sicherungen konnten nicht geladen werden', 'error');
+    await loadManagedOnlineBackups({ mutationGeneration: authority.mutationGeneration });
+    setOnlineBackupStatus('Neuer Schlüssel erstellt.', 'success', authority.statusContext);
     showCopyToast('Online-Schlüssel erstellt');
   } catch {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', statusContext);
+    setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', authority.statusContext);
   } finally {
-    endManagedOnlineBackupOperation();
+    endManagedOnlineBackupMutation();
     if (createButton?.isConnected) createButton.disabled = false;
     doOnlineBackupCreate.busy = false;
   }
@@ -5088,6 +5184,10 @@ function renderSettings() {
         <section class="online-backup-managed" aria-labelledby="managedOnlineBackupHeading">
           <h4 id="managedOnlineBackupHeading">Auf diesem Gerät erstellt</h4>
           <div class="online-backup-managed-list" id="managedOnlineBackupList"></div>
+          <div class="online-backup-refresh-status" id="managedOnlineBackupRefreshStatus" role="status" hidden>
+            <span id="managedOnlineBackupRefreshMessage"></span>
+            <button class="btn btn-secondary" id="reloadManagedOnlineBackupsBtn" type="button">Erneut laden</button>
+          </div>
         </section>
         <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
         <footer class="online-backup-footer">
@@ -5401,6 +5501,7 @@ function renderSettings() {
   });
   document.getElementById('createOnlineBackupBtn').addEventListener('click', () => doOnlineBackupCreate());
   renderManagedOnlineBackups();
+  renderManagedOnlineBackupRefreshIssue();
   document.getElementById('onlineBackupKeyInput').addEventListener('input', (event) => {
     const valid = /^MHU2-[A-Za-z0-9_-]{70}$/.test(event.target.value.trim());
     document.getElementById('restoreOnlineBackupBtn').disabled = document.getElementById('restoreOnlineBackupBtn').dataset.busy === 'true' || !valid;

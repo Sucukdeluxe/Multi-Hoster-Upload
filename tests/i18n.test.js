@@ -31,7 +31,15 @@ test('translates managed online backup controls in both directions', () => {
     ['Online-Backup löschen', 'Delete online backup'],
     ['Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.', 'This encrypted online backup will be permanently deleted from the server.'],
     ['Schlüssel gelöscht', 'Key deleted'],
-    ['Importieren', 'Import']
+    ['Importieren', 'Import'],
+    ['Neuer Schlüssel erstellt.', 'New key created.'],
+    ['Erneut laden', 'Reload'],
+    ['Gespeicherter Online-Schlüsselbund ist beschädigt', 'Stored online keyring is damaged'],
+    ['Sichere Schlüsselspeicherung ist nicht verfügbar', 'Secure key storage is unavailable'],
+    ['Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden', 'Stored online backup key could not be decrypted'],
+    ['Gespeicherte Online-Sicherungskennung stimmt nicht mit dem Schlüssel überein', 'Stored online backup ID does not match its key'],
+    ['Gespeicherte Online-Sicherungskennung ist mehrdeutig', 'Stored online backup ID is ambiguous'],
+    ['Online-Schlüsselbund wurde aus einer Wiederherstellungsdatei geladen', 'Online keyring was loaded from a recovery file']
   ];
 
   for (const [german, english] of pairs) {

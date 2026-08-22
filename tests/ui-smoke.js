@@ -63,7 +63,7 @@ let initialConfigReadDelayed = false;
 let startupLanguagePendingSnapshot = null;
 let managedOnlineBackupEntries = [
   { id: 'AAAAAAAAAAAAAAAAAAAAAA', displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' },
-  { id: 'BBBBBBBBBBBBBBBBBBBBBB', displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' }
+  { id: 'AQEBAQEBAQEBAQEBAQEBAQ', displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' }
 ];
 const managedOnlineBackupCopyIds = [];
 const managedOnlineBackupDeleteIds = [];
@@ -74,7 +74,7 @@ const managedOnlineBackupHandlers = {
   'online-backup:list-managed': async () => ({ ok: true, entries: managedOnlineBackupEntries.map(entry => ({ ...entry })) }),
   'online-backup:create-managed': async () => {
     managedOnlineBackupCreateCalls++;
-    const entry = { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' };
+    const entry = { id: 'AgICAgICAgICAgICAgICAg', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' };
     managedOnlineBackupEntries = [...managedOnlineBackupEntries, entry];
     return { ok: true, entry: { ...entry } };
   },
@@ -1405,7 +1405,7 @@ setTimeout(async () => {
     check('Global parallel uploads default 0', parallel === '0');
 
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'backup\\']")?.click()');
-    const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "managedOnlineBackupHeading", "managedOnlineBackupList", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id))) && !document.getElementById("onlineBackupKeyOutput") && !document.getElementById("copyOnlineBackupKeyBtn")');
+    const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "managedOnlineBackupHeading", "managedOnlineBackupList", "managedOnlineBackupRefreshStatus", "reloadManagedOnlineBackupsBtn", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id))) && !document.getElementById("onlineBackupKeyOutput") && !document.getElementById("copyOnlineBackupKeyBtn")');
     check('Online backup controls exist', onlineBackupControls);
 
     const onlineBackupKeyContract = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput")?.maxLength + "|" + document.getElementById("onlineBackupKeyInput")?.getAttribute("pattern")');
@@ -1415,12 +1415,13 @@ setTimeout(async () => {
     check('Online backup uses a narrow managed preload bridge', onlineBackupBridge === 'function|function|function|function|function|undefined');
 
     const managedOnlineBackupLoaded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 2'));
-    const managedOnlineBackupInitialState = await wc.executeJavaScript('(() => ({ keys: [...document.querySelectorAll(".online-backup-managed-key")].map(element => element.textContent), secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
-    check('Managed online backups render newest first without a complete key in the DOM', managedOnlineBackupLoaded === true && managedOnlineBackupInitialState.keys.join('|') === 'MHU2-ZYXW…9876|MHU2-ABCD…1234' && managedOnlineBackupInitialState.secretInBody === false);
+    const managedOnlineBackupInitialState = await wc.executeJavaScript('(() => ({ keys: [...document.querySelectorAll(".online-backup-managed-key")].map(element => element.textContent), described: [...document.querySelectorAll(".online-backup-managed-row")].every(row => [...row.querySelectorAll("button")].every(button => button.getAttribute("aria-describedby") === row.querySelector(".online-backup-managed-key").id)), secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Managed online backups render canonical masked IDs with accessible actions', managedOnlineBackupLoaded === true && managedOnlineBackupInitialState.keys.join('|') === 'MHU2-ZYXW…9876|MHU2-ABCD…1234' && managedOnlineBackupInitialState.described === true && managedOnlineBackupInitialState.secretInBody === false);
 
     await wc.executeJavaScript('document.querySelector(".online-backup-managed-row .online-backup-copy-btn").click()');
     await waitUntil(() => managedOnlineBackupCopyIds.length === 1);
-    check('Managed online backup copy passes only the selected sanitized entry ID', managedOnlineBackupCopyIds.length === 1 && managedOnlineBackupCopyIds[0] === 'BBBBBBBBBBBBBBBBBBBBBB');
+    const managedCopyFocus = await waitUntil(() => wc.executeJavaScript('document.activeElement?.dataset.managedOnlineBackupAction === "copy" && document.activeElement?.dataset.managedOnlineBackupId === "AQEBAQEBAQEBAQEBAQEBAQ"'));
+    check('Managed online backup copy passes only the selected ID and restores keyboard focus', managedOnlineBackupCopyIds.length === 1 && managedOnlineBackupCopyIds[0] === 'AQEBAQEBAQEBAQEBAQEBAQ' && managedCopyFocus === true);
 
     await wc.executeJavaScript('document.querySelector(".online-backup-managed-row .online-backup-delete-btn").click()');
     await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
@@ -1439,13 +1440,13 @@ setTimeout(async () => {
     const managedDeletePendingState = await wc.executeJavaScript('(() => { const row = document.querySelector(".online-backup-managed-row"); return { count: document.querySelectorAll(".online-backup-managed-row").length, controlsDisabled: [...row.querySelectorAll("button")].every(button => button.disabled) }; })()');
     releaseManagedOnlineBackupDelete();
     const managedDeleteSucceeded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 1'));
-    const managedDeleteSuccessState = await wc.executeJavaScript('(() => ({ key: document.querySelector(".online-backup-managed-key")?.textContent, status: document.getElementById("onlineBackupStatus")?.textContent, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
-    check('Managed online backup row disappears only after successful deletion', managedDeletePendingState.count === 2 && managedDeletePendingState.controlsDisabled === true && managedDeleteSucceeded === true && managedDeleteSuccessState.key === 'MHU2-ABCD…1234' && managedDeleteSuccessState.status === 'Schlüssel gelöscht' && managedDeleteSuccessState.secretInBody === false);
+    const managedDeleteSuccessState = await wc.executeJavaScript('(() => ({ key: document.querySelector(".online-backup-managed-key")?.textContent, status: document.getElementById("onlineBackupStatus")?.textContent, focusAction: document.activeElement?.dataset.managedOnlineBackupAction, focusId: document.activeElement?.dataset.managedOnlineBackupId, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Managed online backup row disappears only after successful deletion and focuses the neighboring action', managedDeletePendingState.count === 2 && managedDeletePendingState.controlsDisabled === true && managedDeleteSucceeded === true && managedDeleteSuccessState.key === 'MHU2-ABCD…1234' && managedDeleteSuccessState.status === 'Schlüssel gelöscht' && managedDeleteSuccessState.focusAction === 'delete' && managedDeleteSuccessState.focusId === 'AAAAAAAAAAAAAAAAAAAAAA' && managedDeleteSuccessState.secretInBody === false);
 
     await wc.executeJavaScript('document.getElementById("createOnlineBackupBtn").click()');
     const managedCreateSucceeded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 2'));
-    const managedCreateState = await wc.executeJavaScript('(() => ({ first: document.querySelector(".online-backup-managed-key")?.textContent, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
-    check('Creating a managed online backup inserts the returned sanitized entry newest first', managedOnlineBackupCreateCalls === 1 && managedCreateSucceeded === true && managedCreateState.first === 'MHU2-QWER…4321' && managedCreateState.secretInBody === false);
+    const managedCreateState = await wc.executeJavaScript('(() => ({ first: document.querySelector(".online-backup-managed-key")?.textContent, status: document.getElementById("onlineBackupStatus")?.textContent, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Creating a managed online backup inserts the returned entry with the exact success text', managedOnlineBackupCreateCalls === 1 && managedCreateSucceeded === true && managedCreateState.first === 'MHU2-QWER…4321' && managedCreateState.status === 'Neuer Schlüssel erstellt.' && managedCreateState.secretInBody === false);
 
     const invalidOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-short"; document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled + "|" + document.getElementById("onlineBackupStatus").textContent');
     check('Invalid online backup keys stay blocked with visible guidance', invalidOnlineBackup === 'true|Der Schlüssel muss exakt 75 Zeichen lang sein.');
