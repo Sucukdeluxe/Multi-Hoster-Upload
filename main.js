@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu,
 const { createStartupWindow, createStartupQuery } = require('./lib/startup-renderer');
 nativeTheme.themeSource = 'dark';
 const path = require('path');
+const { pathToFileURL } = require('node:url');
 const fs = require('fs');
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
@@ -166,6 +167,43 @@ function assertConfigWriteAllowed() {
 
 async function waitForConfigStoreWrites() {
   await configStore.drainWrites();
+}
+
+const ONLINE_BACKUP_RENDERER_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html'));
+
+function isExpectedOnlineBackupRendererUrl(value) {
+  try {
+    const candidate = new URL(value);
+    return candidate.protocol === ONLINE_BACKUP_RENDERER_URL.protocol
+      && candidate.username === ONLINE_BACKUP_RENDERER_URL.username
+      && candidate.password === ONLINE_BACKUP_RENDERER_URL.password
+      && candidate.host === ONLINE_BACKUP_RENDERER_URL.host
+      && candidate.pathname === ONLINE_BACKUP_RENDERER_URL.pathname
+      && candidate.hash === '';
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedOnlineBackupIpcEvent(event) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const webContents = mainWindow.webContents;
+    if (!webContents || webContents.isDestroyed()) return false;
+    const mainFrame = webContents.mainFrame;
+    if (!mainFrame || event?.sender !== webContents || event.senderFrame !== mainFrame) return false;
+    if (mainFrame.url !== webContents.getURL()) return false;
+    return isExpectedOnlineBackupRendererUrl(mainFrame.url);
+  } catch {
+    return false;
+  }
+}
+
+function invokeTrustedOnlineBackupIpc(event, operation) {
+  if (!isTrustedOnlineBackupIpcEvent(event)) {
+    return { ok: false, error: 'Online-Sicherungsanfrage wurde abgewiesen' };
+  }
+  return operation();
 }
 
 function requireCanonicalOnlineBackupId(id) {
@@ -2806,25 +2844,33 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
   }
 });
 
-ipcMain.handle('online-backup:list-managed', () => onlineBackupManager.listManaged());
+ipcMain.handle('online-backup:list-managed', (event) => (
+  invokeTrustedOnlineBackupIpc(event, () => onlineBackupManager.listManaged())
+));
 
-ipcMain.handle('online-backup:create-managed', () => onlineBackupManager.createManaged());
+ipcMain.handle('online-backup:create-managed', (event) => (
+  invokeTrustedOnlineBackupIpc(event, () => onlineBackupManager.createManaged())
+));
 
-ipcMain.handle('online-backup:copy-managed', (_event, id) => {
-  try {
-    return onlineBackupManager.copyManaged(requireCanonicalOnlineBackupId(id));
-  } catch (error) {
-    return { ok: false, error: error.message || String(error) };
-  }
-});
+ipcMain.handle('online-backup:copy-managed', (event, id) => (
+  invokeTrustedOnlineBackupIpc(event, () => {
+    try {
+      return onlineBackupManager.copyManaged(requireCanonicalOnlineBackupId(id));
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  })
+));
 
-ipcMain.handle('online-backup:delete-managed', (_event, id) => {
-  try {
-    return onlineBackupManager.deleteManaged(requireCanonicalOnlineBackupId(id));
-  } catch (error) {
-    return { ok: false, error: error.message || String(error) };
-  }
-});
+ipcMain.handle('online-backup:delete-managed', (event, id) => (
+  invokeTrustedOnlineBackupIpc(event, () => {
+    try {
+      return onlineBackupManager.deleteManaged(requireCanonicalOnlineBackupId(id));
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  })
+));
 
 ipcMain.handle('online-backup:restore', async (_event, key) => {
   try {

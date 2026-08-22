@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
+const vm = require('node:vm');
+const { pathToFileURL } = require('node:url');
 const packageJson = require('../package.json');
 
 const projectRoot = path.join(__dirname, '..');
@@ -32,6 +34,95 @@ test('exposes managed online backup operations through narrow IPC boundaries', (
   assert.match(mainSource, /ipcMain\.handle\('online-backup:create-managed',[\s\S]*?onlineBackupManager\.createManaged\(\)/u);
   assert.match(mainSource, /ipcMain\.handle\('online-backup:copy-managed',[\s\S]*?onlineBackupManager\.copyManaged\(/u);
   assert.match(mainSource, /ipcMain\.handle\('online-backup:delete-managed',[\s\S]*?onlineBackupManager\.deleteManaged\(/u);
+});
+
+test('managed online backup handlers reject every sender outside the local main frame', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const boundaryStart = mainSource.indexOf('const ONLINE_BACKUP_RENDERER_URL');
+  const boundaryEnd = mainSource.indexOf('\nfunction clearCloseFlushTimer', boundaryStart);
+  const handlersStart = mainSource.indexOf("ipcMain.handle('online-backup:list-managed'");
+  const handlersEnd = mainSource.indexOf("\nipcMain.handle('online-backup:restore'", handlersStart);
+  assert.notEqual(boundaryStart, -1, 'central online backup sender boundary is missing');
+  assert.notEqual(boundaryEnd, -1, 'central online backup sender boundary is incomplete');
+  assert.notEqual(handlersStart, -1, 'managed online backup handlers are missing');
+  assert.notEqual(handlersEnd, -1, 'managed online backup handler block is incomplete');
+
+  const expectedUrl = `${pathToFileURL(path.join(projectRoot, 'renderer', 'index.html')).href}?language=de&version=2.1.31`;
+  const state = {
+    frameUrl: expectedUrl,
+    currentUrl: expectedUrl,
+    windowDestroyed: false,
+    webContentsDestroyed: false
+  };
+  const mainFrame = {};
+  Object.defineProperty(mainFrame, 'url', { get: () => state.frameUrl });
+  const webContents = {
+    mainFrame,
+    getURL: () => state.currentUrl,
+    isDestroyed: () => state.webContentsDestroyed
+  };
+  const mainWindow = {
+    webContents,
+    isDestroyed: () => state.windowDestroyed
+  };
+  const managerCalls = [];
+  const onlineBackupManager = {
+    listManaged: () => { managerCalls.push('list'); return { ok: true, entries: [] }; },
+    createManaged: () => { managerCalls.push('create'); return { ok: true, entry: { id: 'AAAAAAAAAAAAAAAAAAAAAA' } }; },
+    copyManaged: (id) => { managerCalls.push(`copy:${id}`); return { ok: true }; },
+    deleteManaged: (id) => { managerCalls.push(`delete:${id}`); return { ok: true, removedId: id }; }
+  };
+  const handlers = new Map();
+  const context = {
+    Buffer,
+    URL,
+    __dirname: projectRoot,
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    mainWindow,
+    onlineBackupManager,
+    path,
+    pathToFileURL
+  };
+  vm.runInNewContext(
+    `${mainSource.slice(boundaryStart, boundaryEnd)}\n${mainSource.slice(handlersStart, handlersEnd)}`,
+    context
+  );
+
+  const id = 'AAAAAAAAAAAAAAAAAAAAAA';
+  const invokeAll = async (event) => Promise.all([
+    handlers.get('online-backup:list-managed')(event),
+    handlers.get('online-backup:create-managed')(event),
+    handlers.get('online-backup:copy-managed')(event, id),
+    handlers.get('online-backup:delete-managed')(event, id)
+  ].map(result => Promise.resolve(result)));
+  const legitimateEvent = { sender: webContents, senderFrame: mainFrame };
+  const legitimateResults = await invokeAll(legitimateEvent);
+  assert.deepEqual(managerCalls, ['list', 'create', `copy:${id}`, `delete:${id}`]);
+  assert.equal(legitimateResults.every(result => result.ok === true), true);
+  assert.equal(JSON.stringify(legitimateResults).includes('MHU2-'), false);
+
+  const foreignSender = { mainFrame: { url: expectedUrl }, getURL: () => expectedUrl, isDestroyed: () => false };
+  const cases = [
+    ['foreign sender', { sender: foreignSender, senderFrame: foreignSender.mainFrame }, () => {}],
+    ['destroyed main window', legitimateEvent, () => { state.windowDestroyed = true; }],
+    ['destroyed sender', legitimateEvent, () => { state.webContentsDestroyed = true; }],
+    ['subframe', { sender: webContents, senderFrame: { url: expectedUrl } }, () => {}],
+    ['remote URL', legitimateEvent, () => { state.frameUrl = 'https://example.invalid/renderer/index.html'; state.currentUrl = state.frameUrl; }],
+    ['different local file', legitimateEvent, () => { state.frameUrl = pathToFileURL(path.join(projectRoot, 'renderer', 'drop-target.html')).href; state.currentUrl = state.frameUrl; }]
+  ];
+
+  for (const [name, event, arrange] of cases) {
+    state.frameUrl = expectedUrl;
+    state.currentUrl = expectedUrl;
+    state.windowDestroyed = false;
+    state.webContentsDestroyed = false;
+    managerCalls.length = 0;
+    arrange();
+    const results = await invokeAll(event);
+    assert.equal(managerCalls.length, 0, `${name} reached the manager`);
+    assert.equal(results.every(result => result.ok === false), true, `${name} was not rejected`);
+    assert.equal(JSON.stringify(results).includes('MHU2-'), false, `${name} leaked a complete key`);
+  }
 });
 
 test('afterPack brands the executable metadata shown by Windows', async () => {
