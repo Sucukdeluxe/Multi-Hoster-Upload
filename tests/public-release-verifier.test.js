@@ -6,19 +6,6 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const rootFiles = [
-  '.gitignore',
-  'README.md',
-  'SECURITY.md',
-  'eslint.config.mjs',
-  'main.js',
-  'package-lock.json',
-  'package.json',
-  'preload-drop-target.js',
-  'preload.js'
-];
-const directoryRoots = [`.${['gi', 'tea'].join('')}`, `.${['git', 'hub'].join('')}`, 'assets', 'docs', 'lib', 'renderer', 'services/backup-api', 'tests'];
-const scriptFiles = ['scripts/afterPack.cjs', 'scripts/dev-runner.cjs', 'scripts/release-plan.mjs', 'scripts/verify-public-release.mjs'];
 const screenshotFiles = [
   'assets/product-overview.png',
   'docs/screenshots/upload-workspace.png',
@@ -28,42 +15,15 @@ const screenshotFiles = [
 ];
 const currentVersion = require('../package.json').version;
 
-function copyDirectory(source, destination) {
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    if (/^_ui-inject\..+\.tmp\.js$/.test(entry.name)) continue;
-    const sourcePath = path.join(source, entry.name);
-    const destinationPath = path.join(destination, entry.name);
-    if (entry.isDirectory()) copyDirectory(sourcePath, destinationPath);
-    else if (entry.isFile()) fs.copyFileSync(sourcePath, destinationPath);
-  }
-}
-
-function copyDocumentationScreenshots(stage) {
-  for (const relativePath of screenshotFiles.slice(1)) {
-    const destination = path.join(stage, relativePath);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(root, screenshotFiles[0]), destination);
-  }
-}
-
 function createStage() {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-public-verifier-'));
-  for (const relativePath of rootFiles) {
+  const tracked = spawnSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  for (const relativePath of tracked.stdout.trim().split(/\r?\n/u)) {
     const destination = path.join(stage, relativePath);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(path.join(root, relativePath), destination);
   }
-  for (const relativePath of directoryRoots) {
-    if (relativePath === 'docs') copyDocumentationScreenshots(stage);
-    else copyDirectory(path.join(root, relativePath), path.join(stage, relativePath));
-  }
-  for (const relativePath of scriptFiles) {
-    const destination = path.join(stage, relativePath);
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(path.join(root, relativePath), destination);
-  }
-  fs.rmSync(path.join(stage, 'assets', 'product-overview.png'), { force: true });
   return stage;
 }
 
@@ -83,7 +43,10 @@ test('public release verifier accepts only the exact source manifest and target 
 
   const baseline = verify(stage);
   assert.equal(baseline.status, 0, baseline.stderr);
-  assert.match(baseline.stdout, /layout=exact/);
+  assert.equal(
+    baseline.stdout,
+    `public-release-source-ok files=157 denied-paths=0 internal-terms=0 version=${currentVersion} scripts=8 build-files=7 layout=exact screenshot=deferred\n`
+  );
 
   fs.writeFileSync(path.join(stage, 'tests', 'unexpected.json'), '{}');
   const extra = verify(stage);
@@ -105,7 +68,6 @@ test('public release verifier accepts only the exact source manifest and target 
 test('public release verifier requires and validates every approved screenshot', (t) => {
   const stage = createStage();
   t.after(() => fs.rmSync(stage, { recursive: true, force: true }));
-  fs.copyFileSync(path.join(root, screenshotFiles[0]), path.join(stage, screenshotFiles[0]));
 
   const baseline = verify(stage, currentVersion, false);
   assert.equal(baseline.status, 0, baseline.stderr);
