@@ -284,6 +284,32 @@ describe('encrypted online backup keyring', () => {
     assert.deepEqual((await keyring.list()).entries, []);
   });
 
+  it('invalidates a stale removal plan when the same ID now belongs to a different key', async () => {
+    const { filePath, keyring } = fixture();
+    const original = validKey();
+    const replacement = keyWithRecordId(original, 0x5a);
+    const id = parseOnlineBackupKey(original).id;
+    await keyring.commit(keyring.prepare(original, timestamp));
+    const stalePlan = await keyring.prepareRemove(id);
+    const currentPlan = await keyring.prepareRemove(id);
+    assert.equal(await keyring.commitRemove(currentPlan), true);
+    assert.equal(await keyring.commit(keyring.prepare(replacement, '2026-08-22T11:00:00.000Z')), true);
+    const generationBefore = JSON.parse(fs.readFileSync(filePath, 'utf8')).generation;
+
+    await assert.rejects(
+      keyring.commitRemove(stalePlan),
+      error => error.code === 'KEYRING_REMOVE_PLAN_INVALID'
+    );
+    await assert.rejects(
+      keyring.commitRemove(stalePlan),
+      error => error.code === 'KEYRING_REMOVE_PLAN_INVALID'
+    );
+
+    assert.equal(await keyring.getKey(id), replacement);
+    assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).generation, generationBefore);
+    assert.equal(generationBefore, 3);
+  });
+
   it('blocks removal before remote work when any neighboring entry is corrupt', async () => {
     const { filePath, keyring } = fixture();
     const valid = validKey();
