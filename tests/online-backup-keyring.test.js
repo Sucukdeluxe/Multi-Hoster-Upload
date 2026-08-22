@@ -318,6 +318,107 @@ describe('encrypted online backup keyring', () => {
     assert.equal(fs.existsSync(filePath), true);
     assert.equal(fs.existsSync(backupPath), true);
     assert.ok(events.filter(event => event === `sync:${path.basename(path.dirname(filePath))}`).length >= 2);
+    assert.ok(
+      events.indexOf(`sync:${path.basename(path.dirname(filePath))}`)
+      < events.indexOf(renames.find(rename => rename.endsWith(`>${path.basename(filePath)}`)))
+    );
+  });
+
+  it('leaves the primary unchanged when the pre-publication directory sync fails', async () => {
+    const first = fixture();
+    const firstKey = validKey();
+    await first.keyring.commit(first.keyring.prepare(firstKey, timestamp));
+    const original = fs.readFileSync(first.filePath, 'utf8');
+    let directorySyncs = 0;
+    const fsImpl = {
+      ...fs.promises,
+      open: async (target, flags, mode) => {
+        const handle = await fs.promises.open(target, flags, mode);
+        if (path.resolve(String(target)) !== path.resolve(first.directory)) return handle;
+        return {
+          sync: async () => {
+            directorySyncs++;
+            if (directorySyncs === 1) throw Object.assign(new Error('directory sync failed'), { code: 'EIO' });
+            return handle.sync();
+          },
+          close: () => handle.close()
+        };
+      }
+    };
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const keyring = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope,
+      fsImpl
+    });
+
+    await assert.rejects(
+      keyring.commit(keyring.prepare(validKey(), '2026-08-22T11:00:00.000Z')),
+      /directory sync failed/u
+    );
+    assert.equal(fs.readFileSync(first.filePath, 'utf8'), original);
+    assert.equal(fs.readdirSync(first.directory).some(name => name.endsWith('.tmp')), false);
+    assert.equal(await first.keyring.getKey(parseOnlineBackupKey(firstKey).id), firstKey);
+  });
+
+  it('keeps a durable recovery temp after a post-publication sync failure', async () => {
+    const first = fixture();
+    const firstKey = validKey();
+    const secondKey = validKey();
+    await first.keyring.commit(first.keyring.prepare(firstKey, timestamp));
+    let primaryPublished = false;
+    let postPublicationSyncFailed = false;
+    const fsImpl = {
+      ...fs.promises,
+      open: async (target, flags, mode) => {
+        const handle = await fs.promises.open(target, flags, mode);
+        if (path.resolve(String(target)) !== path.resolve(first.directory)) return handle;
+        return {
+          sync: async () => {
+            if (primaryPublished && !postPublicationSyncFailed) {
+              postPublicationSyncFailed = true;
+              throw Object.assign(new Error('post-publication sync failed'), { code: 'EIO' });
+            }
+            return handle.sync();
+          },
+          close: () => handle.close()
+        };
+      },
+      rename: async (source, target) => {
+        await fs.promises.rename(source, target);
+        if (target === first.filePath) primaryPublished = true;
+      }
+    };
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const keyring = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope,
+      fsImpl
+    });
+
+    assert.equal(await keyring.commit(keyring.prepare(secondKey, '2026-08-22T11:00:00.000Z')), true);
+    const recoveryTemp = fs.readdirSync(first.directory).find(name => name.endsWith('.recovery.tmp'));
+    assert.ok(recoveryTemp);
+    fs.writeFileSync(first.filePath, '{damaged-primary');
+    fs.writeFileSync(first.backupPath, '{damaged-backup');
+    const recovered = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope
+    });
+
+    const snapshot = await recovered.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [
+      parseOnlineBackupKey(secondKey).id,
+      parseOnlineBackupKey(firstKey).id
+    ]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
   });
 
   it('recovers a validated backup without presenting corruption as an empty keyring', async () => {
@@ -401,6 +502,65 @@ describe('encrypted online backup keyring', () => {
     writeKeyring(recoveryTemp, [olderEntry, newerEntry]);
     const future = new Date(Date.now() + 60_000);
     fs.utimesSync(recoveryTemp, future, future);
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const recovered = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope
+    });
+
+    const snapshot = await recovered.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [
+      parseOnlineBackupKey(newer).id,
+      parseOnlineBackupKey(older).id
+    ]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+  });
+
+  it('prefers a recovery temp over the backup when both have the same modification time', async () => {
+    const first = fixture();
+    const older = validKey();
+    const newer = validKey();
+    const olderEntry = first.keyring.prepare(older, timestamp);
+    const newerEntry = first.keyring.prepare(newer, '2026-08-22T11:00:00.000Z');
+    await first.keyring.commit(olderEntry);
+    fs.writeFileSync(first.filePath, '{damaged-primary');
+    const recoveryTemp = path.join(first.directory, `.online-backup-keyring.json.${process.pid}.${crypto.randomUUID()}.recovery.tmp`);
+    writeKeyring(recoveryTemp, [olderEntry, newerEntry]);
+    const sameTime = new Date('2026-08-22T12:00:00.000Z');
+    fs.utimesSync(first.backupPath, sameTime, sameTime);
+    fs.utimesSync(recoveryTemp, sameTime, sameTime);
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const recovered = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope
+    });
+
+    const snapshot = await recovered.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [
+      parseOnlineBackupKey(newer).id,
+      parseOnlineBackupKey(older).id
+    ]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+  });
+
+  it('recovers an equal-time commit temp instead of skipping it behind the valid primary', async () => {
+    const first = fixture();
+    const older = validKey();
+    const newer = validKey();
+    const olderEntry = first.keyring.prepare(older, timestamp);
+    const newerEntry = first.keyring.prepare(newer, '2026-08-22T11:00:00.000Z');
+    await first.keyring.commit(olderEntry);
+    const recoveryTemp = path.join(first.directory, `.online-backup-keyring.json.${process.pid}.${crypto.randomUUID()}.recovery.tmp`);
+    writeKeyring(recoveryTemp, [olderEntry, newerEntry]);
+    const sameTime = new Date('2026-08-22T12:00:00.000Z');
+    fs.utimesSync(first.filePath, sameTime, sameTime);
+    fs.utimesSync(recoveryTemp, sameTime, sameTime);
     const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
     const recovered = createOnlineBackupKeyring({
       filePath: first.filePath,
