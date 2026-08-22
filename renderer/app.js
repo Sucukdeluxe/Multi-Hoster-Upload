@@ -4241,6 +4241,7 @@ function drawUploadSpeedSparkline() {
   const context = canvas.getContext('2d');
   context.setTransform(scale, 0, 0, scale, 0, 0);
   context.clearRect(0, 0, width, height);
+  document.querySelector('.upload-speed-baseline')?.remove();
   const values = uploadSpeedState.history;
   if (values.length < 2) return;
   const maximum = Math.max(1, ...values);

@@ -57,8 +57,18 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
   const projectRoot = path.join(__dirname, '..');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-rdp-compositor-'));
   const probePath = path.join(probeRoot, 'probe.cjs');
+  const preloadPath = path.join(probeRoot, 'preload.cjs');
   const outputPath = path.join(probeRoot, 'result.json');
   const userDataPath = path.join(probeRoot, 'user-data');
+  fs.writeFileSync(preloadPath, `
+const { contextBridge } = require('electron');
+contextBridge.exposeInMainWorld('api', {
+  onUpdateAvailable() {},
+  onUpdateProgress() {},
+  onPrepareClose() {},
+  getConfig() { return new Promise(() => {}); }
+});
+`, 'utf8');
   const probeSource = `
 const { app, BrowserWindow, screen } = require('electron');
 const { execFileSync } = require('node:child_process');
@@ -78,7 +88,7 @@ app.whenReady().then(async () => {
     height: requestedContentHeight,
     useContentSize: true,
     backgroundColor: '#0f0f0f',
-    webPreferences: { contextIsolation: true, nodeIntegration: false }
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: process.env.MHU_PRELOAD_PATH }
   });
   const readyToShow = new Promise(resolve => window.once('ready-to-show', resolve));
   const document = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#102030}.left,.right{position:fixed;top:0;bottom:0;width:8px}.left{left:0;background:#00ff00}.right{right:0;background:#ff00ff}</style></head><body><div class="left"></div><div class="right"></div></body></html>';
@@ -92,6 +102,8 @@ app.whenReady().then(async () => {
   const rendererPid = window.webContents.getOSProcessId();
   const rendererCommandLine = execFileSync('powershell.exe', ['-NoProfile', '-Command', '(Get-CimInstance Win32_Process -Filter "ProcessId = ' + rendererPid + '").CommandLine'], { encoding: 'utf8' }).trim();
   const middleY = Math.floor(size.height / 2);
+  await window.loadFile(process.env.MHU_RENDERER_PATH, { query: { language: 'en', version: '2.1.31' } });
+  const liveSpeedChart = await window.webContents.executeJavaScript('({ baselinePresent: Boolean(document.querySelector(".upload-speed-baseline")), canvasWidth: document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect().width || 0 })');
   fs.writeFileSync(outputPath, JSON.stringify({
     size,
     dom,
@@ -101,7 +113,8 @@ app.whenReady().then(async () => {
     gpuFeatureStatus: app.getGPUFeatureStatus(),
     rendererCommandLine,
     leftEdge: pixelAt(bitmap, size.width, 0, middleY),
-    rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY)
+    rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY),
+    liveSpeedChart
   }), 'utf8');
   window.destroy();
   app.exit(0);
@@ -115,7 +128,13 @@ app.whenReady().then(async () => {
     const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
     execFileSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
       cwd: projectRoot,
-      env: { ...process.env, SESSIONNAME: 'RDP-Tcp#12', MHU_RDP_COMPOSITOR_OUTPUT: outputPath },
+      env: {
+        ...process.env,
+        SESSIONNAME: 'RDP-Tcp#12',
+        MHU_RDP_COMPOSITOR_OUTPUT: outputPath,
+        MHU_RENDERER_PATH: path.join(projectRoot, 'renderer', 'index.html'),
+        MHU_PRELOAD_PATH: preloadPath
+      },
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30000,
@@ -133,6 +152,8 @@ app.whenReady().then(async () => {
     }
     assert.ok(result.leftEdge[1] > result.leftEdge[0] && result.leftEdge[1] > result.leftEdge[2]);
     assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
+    assert.ok(result.liveSpeedChart.canvasWidth > 0);
+    assert.equal(result.liveSpeedChart.baselinePresent, false);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
   }
