@@ -110,13 +110,47 @@ describe('online backup transport', () => {
 
     await uploadOnlineBackup(created.record, baseUrl);
     const restored = await downloadOnlineBackup(created.key, baseUrl);
-    await deleteOnlineBackup(created.key, baseUrl);
+    assert.deepEqual(await deleteOnlineBackup(created.key, baseUrl), { deleted: true, notFound: false });
 
     assert.deepEqual(restored.settings, settings());
     assert.equal(JSON.stringify(stored).includes(parseOnlineBackupKey(created.key).masterKey.toString('base64url')), false);
     assert.match(deleteRequest.deleteSecret, /^[A-Za-z0-9_-]{43}$/);
     assert.deepEqual(requestedUrls, ['/v1/backups', '/v1/backups/restore', '/v1/backups/delete']);
     assert.equal(requestedUrls.join(' ').includes(stored.id), false);
+  });
+
+  it('returns an idempotent outcome when the backup is already missing', async () => {
+    const { createOnlineBackup, deleteOnlineBackup } = require('../lib/online-backup');
+    const server = http.createServer((_request, response) => {
+      response.writeHead(404, { 'content-type': 'application/json' });
+      response.end('{"error":"not_found"}');
+    });
+    servers.push(server);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const missingBaseUrl = `http://127.0.0.1:${server.address().port}`;
+    const { key } = createOnlineBackup(settings(), '2.0.3');
+
+    assert.deepEqual(await deleteOnlineBackup(key, missingBaseUrl), { deleted: false, notFound: true });
+  });
+
+  it('uses the generic deletion error without reflecting the server response body', async () => {
+    const { createOnlineBackup, deleteOnlineBackup } = require('../lib/online-backup');
+    const server = http.createServer((_request, response) => {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end('{"leaked":"server-secret-value"}');
+    });
+    servers.push(server);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const { key } = createOnlineBackup(settings(), '2.0.3');
+
+    await assert.rejects(
+      deleteOnlineBackup(key, baseUrl),
+      (error) => error.message === 'Online-Sicherung konnte nicht gelöscht werden'
+        && !error.message.includes('server-secret-value')
+    );
   });
 
   it('does not reflect server response bodies into client errors', async () => {
