@@ -69,6 +69,17 @@ contextBridge.exposeInMainWorld('api', {
   getConfig() { return new Promise(() => {}); }
 });
 `, 'utf8');
+  const onlineBackupLayoutScript = `(() => {
+    document.documentElement.lang = 'de';
+    document.body.innerHTML = '<section class="online-backup-panel"><div class="online-backup-key-row"><label>Dein neuer Schlüssel</label><input class="key-input"><button class="btn btn-secondary">Kopieren</button></div><div class="online-backup-key-row"><label>Vorhandenen Schlüssel importieren</label><input class="key-input"><button class="btn btn-secondary">Online importieren</button></div></section>';
+    const rows = [...document.querySelectorAll('.online-backup-key-row')];
+    return rows.map(row => {
+      const label = row.querySelector('label').getBoundingClientRect();
+      const input = row.querySelector('input').getBoundingClientRect();
+      const button = row.querySelector('button').getBoundingClientRect();
+      return { labelWidth: label.width, inputLeft: input.left, buttonRight: button.right };
+    });
+  })()`;
   const probeSource = `
 const { app, BrowserWindow, screen } = require('electron');
 const { execFileSync } = require('node:child_process');
@@ -104,6 +115,7 @@ app.whenReady().then(async () => {
   const middleY = Math.floor(size.height / 2);
   await window.loadFile(process.env.MHU_RENDERER_PATH, { query: { language: 'en', version: '2.1.31' } });
   const liveSpeedChart = await window.webContents.executeJavaScript('({ baselinePresent: Boolean(document.querySelector(".upload-speed-baseline")), canvasWidth: document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect().width || 0 })');
+  const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   fs.writeFileSync(outputPath, JSON.stringify({
     size,
     dom,
@@ -114,7 +126,8 @@ app.whenReady().then(async () => {
     rendererCommandLine,
     leftEdge: pixelAt(bitmap, size.width, 0, middleY),
     rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY),
-    liveSpeedChart
+    liveSpeedChart,
+    onlineBackupLayout
   }), 'utf8');
   window.destroy();
   app.exit(0);
@@ -154,6 +167,10 @@ app.whenReady().then(async () => {
     assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
     assert.ok(result.liveSpeedChart.canvasWidth > 0);
     assert.equal(result.liveSpeedChart.baselinePresent, false);
+    assert.equal(result.onlineBackupLayout.length, 2);
+    assert.ok(Math.abs(result.onlineBackupLayout[0].labelWidth - result.onlineBackupLayout[1].labelWidth) <= 1);
+    assert.ok(Math.abs(result.onlineBackupLayout[0].inputLeft - result.onlineBackupLayout[1].inputLeft) <= 1);
+    assert.ok(Math.abs(result.onlineBackupLayout[0].buttonRight - result.onlineBackupLayout[1].buttonRight) <= 1);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
   }

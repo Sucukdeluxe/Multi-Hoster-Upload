@@ -4872,12 +4872,12 @@ function renderSettings() {
           <span class="hint">Jeder Export erzeugt einen neuen Schlüssel. Ältere Schlüssel bleiben gültig.</span>
         </div>
         <div class="online-backup-key-row">
-          <label for="onlineBackupKeyOutput">Dein neuer Schlüssel</label>
+          <label for="onlineBackupKeyOutput">Neuer Schlüssel</label>
           <input type="text" class="key-input" id="onlineBackupKeyOutput" readonly spellcheck="false" autocomplete="off" placeholder="Nach dem Export erscheint hier der 75-stellige Schlüssel">
           <button class="btn btn-secondary" id="copyOnlineBackupKeyBtn" disabled>Kopieren</button>
         </div>
         <div class="online-backup-key-row">
-          <label for="onlineBackupKeyInput">Vorhandenen Schlüssel importieren</label>
+          <label for="onlineBackupKeyInput">Schlüssel importieren</label>
           <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
           <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Online importieren</button>
         </div>

@@ -16,6 +16,13 @@ test('translates the remaining upload size label', () => {
   assert.equal(translateText('Remaining size', 'de'), 'Verbleibende Größe');
 });
 
+test('translates compact online backup labels in both directions', () => {
+  assert.equal(translateText('Neuer Schlüssel', 'en'), 'Your new key');
+  assert.equal(translateText('Your new key', 'de'), 'Neuer Schlüssel');
+  assert.equal(translateText('Schlüssel importieren', 'en'), 'Import existing key');
+  assert.equal(translateText('Import existing key', 'de'), 'Schlüssel importieren');
+});
+
 test('translates the account check timestamp label', () => {
   assert.equal(translateText('geprüft', 'en'), 'checked');
   assert.equal(translateText('checked', 'de'), 'geprüft');
