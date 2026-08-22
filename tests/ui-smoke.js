@@ -1377,8 +1377,11 @@ setTimeout(async () => {
     const onlineBackupKeyContract = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput")?.maxLength + "|" + document.getElementById("onlineBackupKeyInput")?.getAttribute("pattern")');
     check('Online backup input enforces the 75-character MHU key format', onlineBackupKeyContract === '75|MHU2-[A-Za-z0-9_-]{70}');
 
-    const onlineBackupBridge = await wc.executeJavaScript('typeof window.api.createOnlineBackup + "|" + typeof window.api.restoreOnlineBackup');
-    check('Online backup uses a narrow preload bridge', onlineBackupBridge === 'function|function');
+    const onlineBackupBridge = await wc.executeJavaScript('["listManagedOnlineBackups", "createManagedOnlineBackup", "copyManagedOnlineBackup", "deleteManagedOnlineBackup"].map(name => typeof window.api[name]).join("|")');
+    check('Online backup uses a narrow managed preload bridge', onlineBackupBridge === 'function|function|function|function');
+
+    const managedOnlineBackupCopyResult = await wc.executeJavaScript('window.api.copyManagedOnlineBackup("AAAAAAAAAAAAAAAAAAAAAA").then(result => JSON.stringify(result))');
+    check('Managed online backup copy never returns a complete key', !managedOnlineBackupCopyResult.includes('MHU2-'));
 
     const invalidOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-short"; document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled + "|" + document.getElementById("onlineBackupStatus").textContent');
     check('Invalid online backup keys stay blocked with visible guidance', invalidOnlineBackup === 'true|Der Schlüssel muss exakt 75 Zeichen lang sein.');

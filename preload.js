@@ -79,7 +79,11 @@ contextBridge.exposeInMainWorld('api', {
   // Backup
   exportBackup: (options) => ipcRenderer.invoke('export-backup', options),
   importBackup: (legacyPassword) => ipcRenderer.invoke('import-backup', legacyPassword),
-  createOnlineBackup: () => ipcRenderer.invoke('online-backup:create'),
+  listManagedOnlineBackups: () => ipcRenderer.invoke('online-backup:list-managed'),
+  createManagedOnlineBackup: () => ipcRenderer.invoke('online-backup:create-managed'),
+  copyManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:copy-managed', id),
+  deleteManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:delete-managed', id),
+  createOnlineBackup: () => ipcRenderer.invoke('online-backup:create-managed'),
   restoreOnlineBackup: (key) => ipcRenderer.invoke('online-backup:restore', key),
 
   // Folder Monitor

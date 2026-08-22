@@ -18,7 +18,9 @@ const { createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
-const { createOnlineBackup, downloadOnlineBackup, uploadOnlineBackup } = require('./lib/online-backup');
+const { downloadOnlineBackup } = require('./lib/online-backup');
+const { createOnlineBackupKeyring } = require('./lib/online-backup-keyring');
+const { createOnlineBackupManager } = require('./lib/online-backup-manager');
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
 const { createSettingsImportGate } = require('./lib/settings-import-gate');
 const FolderMonitor = require('./lib/folder-monitor');
@@ -119,6 +121,18 @@ let dropTargetWindow = null;
 let tray = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
+const onlineBackupKeyring = createOnlineBackupKeyring({
+  filePath: path.join(app.getPath('userData'), 'online-backup-keys.json')
+});
+const onlineBackupManager = createOnlineBackupManager({
+  keyring: onlineBackupKeyring,
+  loadSettings: async () => {
+    await waitForConfigStoreWrites();
+    return createPortableSettingsSnapshot(configStore.load());
+  },
+  appVersion: () => app.getVersion(),
+  copyText: value => clipboard.writeText(value)
+});
 let uploadManager = null;
 let lastSessionSummary = null;
 let sourceDeleteJournal = null;
@@ -152,6 +166,17 @@ function assertConfigWriteAllowed() {
 
 async function waitForConfigStoreWrites() {
   await configStore.drainWrites();
+}
+
+function requireCanonicalOnlineBackupId(id) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(id)) {
+    throw new Error('Online-Sicherungs-ID ist ungültig');
+  }
+  const decoded = Buffer.from(id, 'base64url');
+  if (decoded.length !== 16 || decoded.toString('base64url') !== id) {
+    throw new Error('Online-Sicherungs-ID ist ungültig');
+  }
+  return id;
 }
 
 function clearCloseFlushTimer() {
@@ -2781,13 +2806,21 @@ ipcMain.handle('import-backup', async (_event, legacyPassword) => {
   }
 });
 
-ipcMain.handle('online-backup:create', async () => {
+ipcMain.handle('online-backup:list-managed', () => onlineBackupManager.listManaged());
+
+ipcMain.handle('online-backup:create-managed', () => onlineBackupManager.createManaged());
+
+ipcMain.handle('online-backup:copy-managed', (_event, id) => {
   try {
-    await waitForConfigStoreWrites();
-    const snapshot = createPortableSettingsSnapshot(configStore.load());
-    const created = createOnlineBackup(snapshot, app.getVersion());
-    await uploadOnlineBackup(created.record);
-    return { ok: true, key: created.key };
+    return onlineBackupManager.copyManaged(requireCanonicalOnlineBackupId(id));
+  } catch (error) {
+    return { ok: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('online-backup:delete-managed', (_event, id) => {
+  try {
+    return onlineBackupManager.deleteManaged(requireCanonicalOnlineBackupId(id));
   } catch (error) {
     return { ok: false, error: error.message || String(error) };
   }
