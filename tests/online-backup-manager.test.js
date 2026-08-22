@@ -94,7 +94,7 @@ describe('transactional online backup manager', () => {
 
     const result = await fixture.manager.createManaged();
 
-    assert.deepEqual(fixture.events, ['prepare', 'upload', 'commit', 'list']);
+    assert.deepEqual(fixture.events, ['prepare', 'upload', 'commit']);
     assert.deepEqual(fixture.createArguments, [settings, '2.1.31', fixture.createdAt]);
     assert.match(fixture.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.deepEqual(result, {
@@ -106,6 +106,26 @@ describe('transactional online backup manager', () => {
       }
     });
     assert.equal(JSON.stringify(result).includes(key), false);
+  });
+
+  it('keeps a committed create successful without a post-commit keyring read', async () => {
+    const fixture = createFixture({ initialKey: null });
+    fixture.keyring.list = async () => {
+      fixture.events.push('list');
+      throw new Error('list unavailable after commit');
+    };
+
+    const result = await fixture.manager.createManaged();
+
+    assert.deepEqual(fixture.events, ['prepare', 'upload', 'commit']);
+    assert.deepEqual(result, {
+      ok: true,
+      entry: {
+        id,
+        displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
+        createdAt: fixture.createdAt
+      }
+    });
   });
 
   it('does not upload when preparing encrypted local state fails', async () => {
@@ -262,7 +282,6 @@ describe('transactional online backup manager', () => {
       'upload:start',
       'upload:end',
       'commit',
-      'list',
       'getKey',
       `delete:${key}`,
       'remove'
