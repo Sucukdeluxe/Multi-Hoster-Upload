@@ -81,6 +81,7 @@ const managedOnlineBackupListResponses = [
 ];
 let managedOnlineBackupListIndex = 0;
 let managedOnlineBackupCreateIndex = 0;
+let pendingManagedOnlineBackupList = null;
 let pendingManagedOnlineBackupCopy = null;
 let pendingManagedOnlineBackupDelete = null;
 contextBridge.exposeInMainWorld('api', {
@@ -91,11 +92,22 @@ contextBridge.exposeInMainWorld('api', {
   listManagedOnlineBackups() {
     managedOnlineBackupListIndex++;
     managedOnlineBackupProbeCalls.push(['list', managedOnlineBackupListIndex]);
+    if (managedOnlineBackupListIndex === 5) {
+      return new Promise(resolve => { pendingManagedOnlineBackupList = resolve; });
+    }
     return Promise.resolve(managedOnlineBackupListResponses[managedOnlineBackupListIndex - 1]);
+  },
+  releaseManagedOnlineBackupList() {
+    const resolve = pendingManagedOnlineBackupList;
+    pendingManagedOnlineBackupList = null;
+    resolve({ ok: true, entries: [
+      { id: 'XXXXXXXXXXXXXXXXXXXXXX', displayKey: 'MHU2-XCVB…9753', createdAt: '2026-08-28T12:00:00.000Z' }
+    ] });
   },
   createManagedOnlineBackup() {
     managedOnlineBackupCreateIndex++;
     managedOnlineBackupProbeCalls.push(['create', managedOnlineBackupCreateIndex]);
+    if (managedOnlineBackupCreateIndex === 3) return Promise.resolve({ ok: false, error: 'Online-Sicherung konnte nicht erstellt werden' });
     const entry = managedOnlineBackupCreateIndex === 1
       ? { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' }
       : { id: 'FFFFFFFFFFFFFFFFFFFFFF', displayKey: 'MHU2-FGHJ…8642', createdAt: '2026-08-27T12:00:00.000Z' };
@@ -140,7 +152,6 @@ contextBridge.exposeInMainWorld('api', {
       return new Promise(resolve => { resolveConfirmation = resolve; });
     };
     flushPendingSettingsSaves = async () => {};
-    openOnlineBackupView = () => {};
     await loadManagedOnlineBackups();
     const initialKeys = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
     const maliciousEntry = { id: 'DDDDDDDDDDDDDDDDDDDDDD', displayKey: 'prefix MHU2-' + 'X'.repeat(70) + ' suffix', createdAt: '2026-08-24T12:00:00.000Z' };
@@ -180,6 +191,28 @@ contextBridge.exposeInMainWorld('api', {
       status: document.getElementById('onlineBackupStatus').textContent,
       statusState: document.getElementById('onlineBackupStatus').dataset.state
     };
+    const navigation = document.createElement('button');
+    navigation.dataset.settingsPage = 'backup';
+    navigation.addEventListener('click', () => { loadManagedOnlineBackups(); });
+    fixture.append(navigation);
+    replaceManagedOnlineBackups([
+      { id: 'GGGGGGGGGGGGGGGGGGGGGG', displayKey: 'MHU2-GHJK…7531', createdAt: '2026-08-29T12:00:00.000Z' }
+    ]);
+    setOnlineBackupStatus('', '');
+    const failedCreate = doOnlineBackupCreate();
+    await waitFor(async () => (await window.api.getManagedOnlineBackupProbeCalls()).filter(call => call[0] === 'list').length === 5);
+    await failedCreate;
+    const statusBeforeStaleNavigationResponse = {
+      text: document.getElementById('onlineBackupStatus').textContent,
+      state: document.getElementById('onlineBackupStatus').dataset.state
+    };
+    window.api.releaseManagedOnlineBackupList();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const staleNavigationResponse = {
+      keys: [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent),
+      status: document.getElementById('onlineBackupStatus').textContent,
+      statusState: document.getElementById('onlineBackupStatus').dataset.state
+    };
     const calls = await window.api.getManagedOnlineBackupProbeCalls();
     return {
       initialKeys,
@@ -197,6 +230,8 @@ contextBridge.exposeInMainWorld('api', {
       createPostRefreshCount,
       failedCreatePostRefreshCount,
       refreshFailure,
+      statusBeforeStaleNavigationResponse,
+      staleNavigationResponse,
       confirmation,
       calls,
       secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent)
@@ -357,6 +392,15 @@ app.whenReady().then(async () => {
       status: 'Online backups could not be loaded',
       statusState: 'error'
     });
+    assert.deepEqual(result.onlineBackupBehavior.statusBeforeStaleNavigationResponse, {
+      text: 'Online backup could not be created',
+      state: 'error'
+    });
+    assert.deepEqual(result.onlineBackupBehavior.staleNavigationResponse, {
+      keys: ['MHU2-GHJK…7531'],
+      status: 'Online backup could not be created',
+      statusState: 'error'
+    });
     assert.equal(result.onlineBackupBehavior.afterCreate.length, 3);
     assert.deepEqual(result.onlineBackupBehavior.confirmation, {
       title: 'Online-Backup löschen',
@@ -372,7 +416,9 @@ app.whenReady().then(async () => {
       ['create', 1],
       ['list', 3],
       ['create', 2],
-      ['list', 4]
+      ['list', 4],
+      ['list', 5],
+      ['create', 3]
     ]);
     assert.equal(result.onlineBackupBehavior.secretInBody, false);
     assert.ok(Math.abs(result.onlineBackupLayout.german.createRight - result.onlineBackupLayout.german.contentRight) <= 1);

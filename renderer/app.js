@@ -65,6 +65,7 @@ let healthCheckRunning = false;
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupLoadGeneration = 0;
+let onlineBackupStatusContextGeneration = 0;
 const managedOnlineBackupOperationQueues = new Map();
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
@@ -2639,11 +2640,23 @@ function showImportQueuePersistenceError(error) {
   showCopyToast(`Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden: ${error.message || error}`, 8000);
 }
 
-function setOnlineBackupStatus(message, state = '') {
+function beginOnlineBackupStatusContext() {
+  return ++onlineBackupStatusContextGeneration;
+}
+
+function beginManagedOnlineBackupOperation() {
+  managedOnlineBackupLoadGeneration++;
+  return beginOnlineBackupStatusContext();
+}
+
+function setOnlineBackupStatus(message, state = '', statusContext = null) {
+  const context = statusContext === null ? beginOnlineBackupStatusContext() : statusContext;
+  if (context !== onlineBackupStatusContextGeneration) return false;
   const status = document.getElementById('onlineBackupStatus');
-  if (!status) return;
+  if (!status) return false;
   status.textContent = String(message || '').replace(/MHU2-[A-Za-z0-9_-]{70}/gu, localizeUiText('Geschützter Schlüssel'));
   status.dataset.state = state;
+  return true;
 }
 
 function syncOnlineBackupRestoreButton(busy = false) {
@@ -2724,23 +2737,26 @@ function renderManagedOnlineBackups() {
   list.replaceChildren(content);
 }
 
-async function loadManagedOnlineBackups() {
+async function loadManagedOnlineBackups({ statusContext = null } = {}) {
   const generation = ++managedOnlineBackupLoadGeneration;
+  const status = document.getElementById('onlineBackupStatus');
+  const loaderStatusContext = statusContext === null ? onlineBackupStatusContextGeneration : statusContext;
+  const mayUpdateStatus = statusContext !== null || !status || (!status.textContent && !status.dataset.state);
   try {
     const result = await window.api.listManagedOnlineBackups();
     if (generation !== managedOnlineBackupLoadGeneration) return false;
     if (!result?.ok || !Array.isArray(result.entries)) {
       invalidateManagedOnlineBackups();
-      setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+      if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
       return false;
     }
     replaceManagedOnlineBackups(result.entries);
-    setOnlineBackupStatus('', '');
+    if (mayUpdateStatus) setOnlineBackupStatus('', '', loaderStatusContext);
     return true;
   } catch {
     if (generation === managedOnlineBackupLoadGeneration) {
       invalidateManagedOnlineBackups();
-      setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+      if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
     }
     return false;
   }
@@ -2751,8 +2767,9 @@ function hasManagedOnlineBackup(id) {
 }
 
 function enqueueManagedOnlineBackupOperation(id, action, operation) {
+  const statusContext = beginManagedOnlineBackupOperation();
   const previous = managedOnlineBackupOperationQueues.get(id)?.promise || Promise.resolve();
-  const promise = previous.catch(() => {}).then(operation);
+  const promise = previous.catch(() => {}).then(() => operation(statusContext));
   const state = { action, promise };
   managedOnlineBackupOperationQueues.set(id, state);
   renderManagedOnlineBackups();
@@ -2766,16 +2783,16 @@ function enqueueManagedOnlineBackupOperation(id, action, operation) {
 async function copyManagedOnlineBackup(entry) {
   const id = entry.id;
   if (!hasManagedOnlineBackup(id) || managedOnlineBackupOperationQueues.has(id)) return;
-  await enqueueManagedOnlineBackupOperation(id, 'copy', async () => {
+  await enqueueManagedOnlineBackupOperation(id, 'copy', async (statusContext) => {
     try {
       const result = await window.api.copyManagedOnlineBackup(id);
       if (!result?.ok) {
-        setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+        setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error', statusContext);
         return;
       }
       showCopyToast('Online-Schlüssel kopiert');
     } catch {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error', statusContext);
     }
   });
 }
@@ -2790,28 +2807,29 @@ async function deleteManagedOnlineBackup(entry) {
   });
   if (!confirmed) return;
   if (!hasManagedOnlineBackup(id)) {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+    const statusContext = beginManagedOnlineBackupOperation();
+    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
     return;
   }
   if (managedOnlineBackupOperationQueues.get(id)?.action === 'delete') {
     setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
     return;
   }
-  await enqueueManagedOnlineBackupOperation(id, 'delete', async () => {
+  await enqueueManagedOnlineBackupOperation(id, 'delete', async (statusContext) => {
     if (!hasManagedOnlineBackup(id)) {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
       return;
     }
     try {
       const result = await window.api.deleteManagedOnlineBackup(id);
       if (!result?.ok || result.removedId !== id) {
-        setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+        setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
         return;
       }
-      if (!await loadManagedOnlineBackups()) return;
-      setOnlineBackupStatus('Schlüssel gelöscht', 'success');
+      if (!await loadManagedOnlineBackups({ statusContext })) return;
+      setOnlineBackupStatus('Schlüssel gelöscht', 'success', statusContext);
     } catch {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
     }
   });
 }
@@ -2824,24 +2842,26 @@ async function doOnlineBackupCreate() {
     openOnlineBackupView();
   } catch {
     openOnlineBackupView();
-    setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error');
+    const statusContext = beginManagedOnlineBackupOperation();
+    setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error', statusContext);
     doOnlineBackupCreate.busy = false;
     return;
   }
+  const statusContext = beginManagedOnlineBackupOperation();
   const createButton = document.getElementById('createOnlineBackupBtn');
   if (createButton) createButton.disabled = true;
-  setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy');
+  setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', statusContext);
   try {
     const result = await window.api.createManagedOnlineBackup();
     if (!result?.ok) {
-      setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error');
+      setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', statusContext);
       return;
     }
-    if (!await loadManagedOnlineBackups()) return;
-    setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success');
+    if (!await loadManagedOnlineBackups({ statusContext })) return;
+    setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success', statusContext);
     showCopyToast('Online-Schlüssel erstellt');
   } catch {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error');
+    setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', statusContext);
   } finally {
     if (createButton?.isConnected) createButton.disabled = false;
     doOnlineBackupCreate.busy = false;
