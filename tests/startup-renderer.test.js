@@ -142,6 +142,52 @@ contextBridge.exposeInMainWorld('api', {
   getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; }
 });
 `, 'utf8');
+  const appDialogBehaviorScript = `(async () => {
+    setupListeners();
+    const settle = promise => Promise.race([
+      promise,
+      new Promise(resolve => setTimeout(() => resolve('pending'), 30))
+    ]);
+    const safePromise = showAppConfirm({ title: 'Safe', message: 'Safe default', confirmText: 'Continue', danger: true });
+    const safeFocus = document.activeElement?.id;
+    document.getElementById('appAlertCancelBtn').click();
+    const safeResult = await safePromise;
+    const removalPromise = showAppConfirm({ title: 'Remove', message: 'Remove now', confirmText: 'Remove', danger: true, defaultAction: 'confirm' });
+    const removalFocus = document.activeElement?.id;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    const removalEnterResult = await settle(removalPromise);
+    if (removalEnterResult === 'pending') document.getElementById('appAlertCancelBtn').click();
+    const cancelPromise = showAppConfirm({ title: 'Remove', message: 'Cancel intentionally', confirmText: 'Remove', danger: true, defaultAction: 'confirm' });
+    document.getElementById('appAlertCancelBtn').focus();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    const cancelFocusedEnter = await settle(cancelPromise);
+    document.getElementById('appAlertCancelBtn').click();
+    const cancelResult = await cancelPromise;
+    const realShowAppConfirm = showAppConfirm;
+    const removalCalls = [];
+    showAppConfirm = options => {
+      removalCalls.push({ title: options.title, defaultAction: options.defaultAction });
+      return Promise.resolve(false);
+    };
+    selectedRecentIds.clear();
+    selectedRecentIds.add(1);
+    sessionFilesData = [{ order: 1, link: 'https://example.invalid/a', filename: 'a.mp4', host: 'byse.sx' }];
+    await deleteSelectedRecentFiles();
+    await clearAllRecentFiles();
+    queueJobs = [{ id: 'dialog-remove', file: 'C:/dialog-remove.mp4', fileName: 'dialog-remove.mp4', hoster: 'byse.sx', status: 'queued' }];
+    selectedJobIds.clear();
+    selectedJobIds.add('dialog-remove');
+    rebuildJobIndex();
+    await handleContextAction('delete-selected');
+    await handleContextAction('delete-all');
+    showAppConfirm = realShowAppConfirm;
+    queueJobs = [];
+    selectedJobIds.clear();
+    selectedRecentIds.clear();
+    sessionFilesData = [];
+    rebuildJobIndex();
+    return { safeFocus, safeResult, removalFocus, removalEnterResult, cancelFocusedEnter, cancelResult, removalCalls };
+  })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
       a: 'AAAAAAAAAAAAAAAAAAAAAA',
@@ -344,6 +390,7 @@ app.whenReady().then(async () => {
   const middleY = Math.floor(size.height / 2);
   await window.loadFile(process.env.MHU_RENDERER_PATH, { query: { language: 'en', version: '2.1.31' } });
   const liveSpeedChart = await window.webContents.executeJavaScript('({ baselinePresent: Boolean(document.querySelector(".upload-speed-baseline")), canvasWidth: document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect().width || 0 })');
+  const appDialogBehavior = await window.webContents.executeJavaScript(${JSON.stringify(appDialogBehaviorScript)});
   const onlineBackupBehavior = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupBehaviorScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   window.setContentSize(760, Math.min(900, display.workAreaSize.height));
@@ -360,6 +407,7 @@ app.whenReady().then(async () => {
     leftEdge: pixelAt(bitmap, size.width, 0, middleY),
     rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY),
     liveSpeedChart,
+    appDialogBehavior,
     onlineBackupBehavior,
     onlineBackupLayout,
     onlineBackupNarrowLayout
@@ -402,6 +450,20 @@ app.whenReady().then(async () => {
     assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
     assert.ok(result.liveSpeedChart.canvasWidth > 0);
     assert.equal(result.liveSpeedChart.baselinePresent, false);
+    assert.deepEqual(result.appDialogBehavior, {
+      safeFocus: 'appAlertCancelBtn',
+      safeResult: false,
+      removalFocus: 'appAlertConfirmBtn',
+      removalEnterResult: true,
+      cancelFocusedEnter: 'pending',
+      cancelResult: false,
+      removalCalls: [
+        { title: 'Ausgewählte Einträge entfernen?', defaultAction: 'confirm' },
+        { title: 'Alle Links entfernen?', defaultAction: 'confirm' },
+        { title: 'Uploads entfernen?', defaultAction: 'confirm' },
+        { title: 'Alle Uploads entfernen?', defaultAction: 'confirm' }
+      ]
+    });
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
     assert.deepEqual(result.onlineBackupBehavior.initialWarning, {
       hidden: false,

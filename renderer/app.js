@@ -2497,7 +2497,7 @@ function hideContextMenu() {
 async function deleteSelectedRecentFiles() {
   if (selectedRecentIds.size === 0) return;
   const count = selectedRecentIds.size;
-  if (!await showAppConfirm({ title: 'Ausgewählte Einträge entfernen?', message: count === 1 ? 'Ein ausgewählter Eintrag wird aus diesem Panel entfernt.' : `${count} ausgewählte Einträge werden aus diesem Panel entfernt.`, confirmText: 'Entfernen', danger: true })) return;
+  if (!await showAppConfirm({ title: 'Ausgewählte Einträge entfernen?', message: count === 1 ? 'Ein ausgewählter Eintrag wird aus diesem Panel entfernt.' : `${count} ausgewählte Einträge werden aus diesem Panel entfernt.`, confirmText: 'Entfernen', danger: true, defaultAction: 'confirm' })) return;
   let removedDone = 0, removedErr = 0;
   sessionFilesData = sessionFilesData.filter(r => {
     if (!selectedRecentIds.has(r.order)) return true;
@@ -2514,7 +2514,7 @@ async function deleteSelectedRecentFiles() {
 
 async function clearAllRecentFiles() {
   if (sessionFilesData.length === 0) return;
-  if (!await showAppConfirm({ title: 'Alle Links entfernen?', message: `Wirklich alle ${sessionFilesData.length} Links aus diesem Panel entfernen?`, confirmText: 'Alle entfernen', danger: true })) return;
+  if (!await showAppConfirm({ title: 'Alle Links entfernen?', message: `Wirklich alle ${sessionFilesData.length} Links aus diesem Panel entfernen?`, confirmText: 'Alle entfernen', danger: true, defaultAction: 'confirm' })) return;
   sessionFilesData = [];
   _sessionFileKeys.clear();
   _sessionDoneCount = 0;
@@ -3215,7 +3215,7 @@ async function handleContextAction(action, targetJobId = null) {
     await copyFailureDetails(targetJobId);
   } else if (action === 'delete-selected') {
     const count = selectedJobIds.size;
-    if (!count || !await showAppConfirm({ title: 'Uploads entfernen?', message: count === 1 ? 'Ein ausgewählter Upload wird aus der Liste entfernt.' : `${count} ausgewählte Uploads werden aus der Liste entfernt.`, confirmText: 'Entfernen', danger: true })) return;
+    if (!count || !await showAppConfirm({ title: 'Uploads entfernen?', message: count === 1 ? 'Ein ausgewählter Upload wird aus der Liste entfernt.' : `${count} ausgewählte Uploads werden aus der Liste entfernt.`, confirmText: 'Entfernen', danger: true, defaultAction: 'confirm' })) return;
     const activeIds = [...selectedJobIds].filter(id => {
       const j = _jobIndexById.get(id);
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
@@ -3241,7 +3241,7 @@ async function handleContextAction(action, targetJobId = null) {
   } else if (action === 'copy-all-links') {
     copyAllLinks();
   } else if (action === 'delete-all') {
-    if (!queueJobs.length || !await showAppConfirm({ title: 'Alle Uploads entfernen?', message: `${queueJobs.length} ${queueJobs.length === 1 ? 'Upload wird' : 'Uploads werden'} aus der Liste entfernt.`, confirmText: 'Alle entfernen', danger: true })) return;
+    if (!queueJobs.length || !await showAppConfirm({ title: 'Alle Uploads entfernen?', message: `${queueJobs.length} ${queueJobs.length === 1 ? 'Upload wird' : 'Uploads werden'} aus der Liste entfernt.`, confirmText: 'Alle entfernen', danger: true, defaultAction: 'confirm' })) return;
     const hasActiveJobs = uploading || queueJobs.some(j => j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
     if (hasActiveJobs) {
       _cancelAutoRetry(true);
@@ -4719,6 +4719,7 @@ function closeAppAlert(result = false) {
   if (!modal) return;
   modal.style.display = 'none';
   modal.setAttribute('aria-hidden', 'true');
+  delete modal.dataset.defaultAction;
   _setAppAlertBackgroundInert(false);
   const resolve = _appAlertResolve;
   _appAlertResolve = null;
@@ -4728,7 +4729,7 @@ function closeAppAlert(result = false) {
   if (resolve) resolve(result);
 }
 
-function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelText = 'Abbrechen', alternateText = '', showCancel = false, danger = false } = {}) {
+function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelText = 'Abbrechen', alternateText = '', showCancel = false, danger = false, defaultAction = 'cancel' } = {}) {
   const modal = document.getElementById('appAlertModal');
   const titleEl = document.getElementById('appAlertTitle');
   const messageEl = document.getElementById('appAlertMessage');
@@ -4748,8 +4749,9 @@ function showAppDialog({ message, title = 'Hinweis', confirmText = 'OK', cancelT
   alternate.hidden = !alternateText;
   modal.style.display = 'flex';
   modal.setAttribute('aria-hidden', 'false');
+  modal.dataset.defaultAction = defaultAction === 'confirm' ? 'confirm' : 'cancel';
   _setAppAlertBackgroundInert(true);
-  (showCancel ? cancel : confirm).focus();
+  (showCancel && modal.dataset.defaultAction !== 'confirm' ? cancel : confirm).focus();
   return new Promise(resolve => { _appAlertResolve = resolve; });
 }
 
@@ -4757,8 +4759,8 @@ function showAppAlert(message, title = 'Hinweis') {
   return showAppDialog({ message, title });
 }
 
-function showAppConfirm({ message, title = 'Bestätigen', confirmText = 'Bestätigen', cancelText = 'Abbrechen', danger = false } = {}) {
-  return showAppDialog({ message, title, confirmText, cancelText, showCancel: true, danger });
+function showAppConfirm({ message, title = 'Bestätigen', confirmText = 'Bestätigen', cancelText = 'Abbrechen', danger = false, defaultAction = 'cancel' } = {}) {
+  return showAppDialog({ message, title, confirmText, cancelText, showCancel: true, danger, defaultAction });
 }
 
 function showAppChoice({ message, title, confirmText, alternateText, cancelText = 'Abbrechen' } = {}) {
@@ -7684,6 +7686,19 @@ function setupListeners() {
         event.preventDefault();
         (event.shiftKey ? last : first).focus();
       }
+      return;
+    }
+    if (event.key === 'Enter') {
+      const confirm = document.getElementById('appAlertConfirmBtn');
+      const safeActions = new Set([
+        document.getElementById('appAlertCancelBtn'),
+        document.getElementById('appAlertAlternateBtn'),
+        document.getElementById('appAlertCloseBtn')
+      ]);
+      if (modal.dataset.defaultAction !== 'confirm' || safeActions.has(document.activeElement) || confirm?.disabled) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      confirm?.click();
       return;
     }
     if (event.key === 'Escape') {
