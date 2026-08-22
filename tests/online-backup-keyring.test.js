@@ -130,6 +130,21 @@ describe('encrypted online backup keyring', () => {
     assert.equal(fs.readFileSync(filePath, 'utf8'), '{invalid-json');
   });
 
+  it('rejects entries with additional properties without legitimizing the unsafe file during mutation', async () => {
+    const { filePath, keyring } = fixture();
+    const key = validKey();
+    const prepared = keyring.prepare(key, '2026-08-22T10:00:00.000Z');
+    const contents = JSON.stringify({
+      version: 1,
+      entries: [{ ...prepared, plaintextKey: key }]
+    });
+    fs.writeFileSync(filePath, contents);
+
+    await assert.rejects(keyring.commit(prepared));
+    assert.equal(fs.readFileSync(filePath, 'utf8'), contents);
+    assert.deepEqual(await keyring.list(), []);
+  });
+
   it('keeps the previous valid file readable and removes the temporary file after rename fails', async () => {
     const firstFixture = fixture();
     const firstKey = validKey();
