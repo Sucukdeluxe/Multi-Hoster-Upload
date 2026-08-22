@@ -95,26 +95,35 @@ describe('encrypted online backup keyring', () => {
     assert.equal(await keyring.getKey(prepared.id), key);
   });
 
-  it('reads v1 as generation zero and migrates the next mutation to v2 generation one', async () => {
-    const { filePath, keyring } = fixture();
-    const older = validKey();
-    const newer = validKey();
-    writeKeyring(filePath, [{
-      id: parseOnlineBackupKey(older).id,
-      encryptedKey: encrypt(older),
+  it('keeps a valid v1 primary authoritative over an older v1 backup and migrates to v2', async () => {
+    const { filePath, backupPath, keyring } = fixture();
+    const backupKey = validKey();
+    const primaryKey = validKey();
+    const addedKey = validKey();
+    writeKeyring(backupPath, [{
+      id: parseOnlineBackupKey(backupKey).id,
+      encryptedKey: encrypt(backupKey),
       createdAt: timestamp
     }]);
+    writeKeyring(filePath, [{
+      id: parseOnlineBackupKey(primaryKey).id,
+      encryptedKey: encrypt(primaryKey),
+      createdAt: '2026-08-22T11:00:00.000Z'
+    }]);
 
-    assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [parseOnlineBackupKey(older).id]);
-    assert.equal(await keyring.commit(keyring.prepare(newer, '2026-08-22T11:00:00.000Z')), true);
+    assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [parseOnlineBackupKey(primaryKey).id]);
+    assert.equal(await keyring.commit(keyring.prepare(addedKey, '2026-08-22T12:00:00.000Z')), true);
 
     const document = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     assert.deepEqual(Object.keys(document).sort(), ['generation', 'keys', 'version']);
     assert.equal(document.version, 2);
     assert.equal(document.generation, 1);
+    assert.equal(fs.readFileSync(filePath, 'utf8').includes(primaryKey), false);
+    assert.equal(fs.readFileSync(filePath, 'utf8').includes(backupKey), false);
+    assert.equal(fs.readFileSync(filePath, 'utf8').includes(addedKey), false);
     assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [
-      parseOnlineBackupKey(newer).id,
-      parseOnlineBackupKey(older).id
+      parseOnlineBackupKey(addedKey).id,
+      parseOnlineBackupKey(primaryKey).id
     ]);
   });
 
@@ -244,6 +253,35 @@ describe('encrypted online backup keyring', () => {
     assert.equal(plan.key, removed);
     assert.equal(await keyring.commitRemove(plan), true);
     assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [parseOnlineBackupKey(retained).id]);
+  });
+
+  it('rebases a stale removal plan onto the current state without dropping newer keys', async () => {
+    const { filePath, keyring } = fixture();
+    const removed = validKey();
+    const added = validKey();
+    await keyring.commit(keyring.prepare(removed, timestamp));
+    const plan = await keyring.prepareRemove(parseOnlineBackupKey(removed).id);
+    await keyring.commit(keyring.prepare(added, '2026-08-22T11:00:00.000Z'));
+
+    assert.equal(await keyring.commitRemove(plan), true);
+
+    const document = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    assert.equal(document.version, 2);
+    assert.equal(document.generation, 3);
+    assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [parseOnlineBackupKey(added).id]);
+    assert.equal(await keyring.getKey(parseOnlineBackupKey(removed).id), null);
+  });
+
+  it('treats a stale removal plan whose target is already absent as idempotent', async () => {
+    const { keyring } = fixture();
+    const removed = validKey();
+    await keyring.commit(keyring.prepare(removed, timestamp));
+    const stalePlan = await keyring.prepareRemove(parseOnlineBackupKey(removed).id);
+    const currentPlan = await keyring.prepareRemove(parseOnlineBackupKey(removed).id);
+    assert.equal(await keyring.commitRemove(currentPlan), true);
+
+    assert.equal(await keyring.commitRemove(stalePlan), false);
+    assert.deepEqual((await keyring.list()).entries, []);
   });
 
   it('blocks removal before remote work when any neighboring entry is corrupt', async () => {
@@ -542,6 +580,74 @@ describe('encrypted online backup keyring', () => {
     assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
   });
 
+  it('recovers a valid v1 backup when the v1 primary is cryptographically unusable', async () => {
+    const first = fixture();
+    const backupKey = validKey();
+    const brokenKey = validKey();
+    writeKeyring(first.backupPath, [{
+      id: parseOnlineBackupKey(backupKey).id,
+      encryptedKey: encrypt(backupKey),
+      createdAt: timestamp
+    }]);
+    writeKeyring(first.filePath, [{
+      id: parseOnlineBackupKey(brokenKey).id,
+      encryptedKey: 'enc:v1:YWJjZA==',
+      createdAt: '2026-08-22T11:00:00.000Z'
+    }]);
+
+    const snapshot = await first.keyring.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [parseOnlineBackupKey(backupKey).id]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+    assert.equal(JSON.stringify(snapshot).includes(backupKey), false);
+    assert.equal(JSON.stringify(snapshot).includes(brokenKey), false);
+  });
+
+  it('loads a valid v1 backup when no primary exists', async () => {
+    const first = fixture();
+    const backupKey = validKey();
+    writeKeyring(first.backupPath, [{
+      id: parseOnlineBackupKey(backupKey).id,
+      encryptedKey: encrypt(backupKey),
+      createdAt: timestamp
+    }]);
+
+    const snapshot = await first.keyring.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [parseOnlineBackupKey(backupKey).id]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+    assert.equal(JSON.stringify(snapshot).includes(backupKey), false);
+  });
+
+  it('uses modification time only to choose among valid v1 recovery candidates', async () => {
+    const first = fixture();
+    const backupKey = validKey();
+    const recoveryKey = validKey();
+    fs.writeFileSync(first.filePath, '{broken-primary');
+    writeKeyring(first.backupPath, [{
+      id: parseOnlineBackupKey(backupKey).id,
+      encryptedKey: encrypt(backupKey),
+      createdAt: timestamp
+    }]);
+    const recoveryTemp = path.join(first.directory, `.online-backup-keyring.json.${process.pid}.${crypto.randomUUID()}.recovery.tmp`);
+    writeKeyring(recoveryTemp, [{
+      id: parseOnlineBackupKey(recoveryKey).id,
+      encryptedKey: encrypt(recoveryKey),
+      createdAt: '2026-08-22T11:00:00.000Z'
+    }]);
+    const older = new Date('2026-08-22T12:00:00.000Z');
+    const newer = new Date('2026-08-22T13:00:00.000Z');
+    fs.utimesSync(first.backupPath, older, older);
+    fs.utimesSync(recoveryTemp, newer, newer);
+
+    const snapshot = await first.keyring.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [parseOnlineBackupKey(recoveryKey).id]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+    assert.equal(JSON.stringify(snapshot).includes(backupKey), false);
+    assert.equal(JSON.stringify(snapshot).includes(recoveryKey), false);
+  });
+
   it('recovers a cryptographically valid backup when the primary only passes structural validation', async () => {
     const first = fixture();
     const key = validKey();
@@ -608,7 +714,7 @@ describe('encrypted online backup keyring', () => {
     assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
   });
 
-  it('blocks conflicting canonical payloads at the same generation', async () => {
+  it('blocks conflicting v2 canonical payloads at the same positive generation', async () => {
     const first = fixture();
     const primaryKey = validKey();
     const backupKey = validKey();
@@ -616,12 +722,12 @@ describe('encrypted online backup keyring', () => {
       id: parseOnlineBackupKey(primaryKey).id,
       encryptedKey: encrypt(primaryKey),
       createdAt: timestamp
-    }]);
+    }], 4);
     writeKeyring(first.backupPath, [{
       id: parseOnlineBackupKey(backupKey).id,
       encryptedKey: encrypt(backupKey),
       createdAt: timestamp
-    }]);
+    }], 4);
 
     await assert.rejects(
       first.keyring.list(),
