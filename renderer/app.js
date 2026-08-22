@@ -64,7 +64,10 @@ let uploading = false;
 let healthCheckRunning = false;
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
-let managedOnlineBackupLoadGeneration = 0;
+let managedOnlineBackupOperationGeneration = 0;
+let managedOnlineBackupNavigationLoadGeneration = 0;
+let managedOnlineBackupAuthoritativeLoadGeneration = 0;
+let managedOnlineBackupActiveOperations = 0;
 let onlineBackupStatusContextGeneration = 0;
 const managedOnlineBackupOperationQueues = new Map();
 
@@ -2645,8 +2648,14 @@ function beginOnlineBackupStatusContext() {
 }
 
 function beginManagedOnlineBackupOperation() {
-  managedOnlineBackupLoadGeneration++;
+  managedOnlineBackupActiveOperations++;
+  managedOnlineBackupOperationGeneration++;
+  managedOnlineBackupNavigationLoadGeneration++;
   return beginOnlineBackupStatusContext();
+}
+
+function endManagedOnlineBackupOperation() {
+  managedOnlineBackupActiveOperations = Math.max(0, managedOnlineBackupActiveOperations - 1);
 }
 
 function setOnlineBackupStatus(message, state = '', statusContext = null) {
@@ -2738,13 +2747,20 @@ function renderManagedOnlineBackups() {
 }
 
 async function loadManagedOnlineBackups({ statusContext = null } = {}) {
-  const generation = ++managedOnlineBackupLoadGeneration;
-  const status = document.getElementById('onlineBackupStatus');
-  const loaderStatusContext = statusContext === null ? onlineBackupStatusContextGeneration : statusContext;
-  const mayUpdateStatus = statusContext !== null || !status || (!status.textContent && !status.dataset.state);
+  const authoritative = statusContext !== null;
+  const operationGeneration = managedOnlineBackupOperationGeneration;
+  const startedDuringOperation = managedOnlineBackupActiveOperations > 0;
+  const generation = authoritative
+    ? ++managedOnlineBackupAuthoritativeLoadGeneration
+    : ++managedOnlineBackupNavigationLoadGeneration;
+  const loaderStatusContext = authoritative || !startedDuringOperation ? statusContext ?? beginOnlineBackupStatusContext() : null;
+  const mayUpdateStatus = loaderStatusContext !== null;
   try {
     const result = await window.api.listManagedOnlineBackups();
-    if (generation !== managedOnlineBackupLoadGeneration) return false;
+    const stale = authoritative
+      ? generation !== managedOnlineBackupAuthoritativeLoadGeneration || operationGeneration !== managedOnlineBackupOperationGeneration
+      : generation !== managedOnlineBackupNavigationLoadGeneration || operationGeneration !== managedOnlineBackupOperationGeneration || startedDuringOperation;
+    if (stale) return false;
     if (!result?.ok || !Array.isArray(result.entries)) {
       invalidateManagedOnlineBackups();
       if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
@@ -2754,7 +2770,10 @@ async function loadManagedOnlineBackups({ statusContext = null } = {}) {
     if (mayUpdateStatus) setOnlineBackupStatus('', '', loaderStatusContext);
     return true;
   } catch {
-    if (generation === managedOnlineBackupLoadGeneration) {
+    const current = authoritative
+      ? generation === managedOnlineBackupAuthoritativeLoadGeneration && operationGeneration === managedOnlineBackupOperationGeneration
+      : generation === managedOnlineBackupNavigationLoadGeneration && operationGeneration === managedOnlineBackupOperationGeneration && !startedDuringOperation;
+    if (current) {
       invalidateManagedOnlineBackups();
       if (mayUpdateStatus) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error', loaderStatusContext);
     }
@@ -2774,6 +2793,7 @@ function enqueueManagedOnlineBackupOperation(id, action, operation) {
   managedOnlineBackupOperationQueues.set(id, state);
   renderManagedOnlineBackups();
   return promise.finally(() => {
+    endManagedOnlineBackupOperation();
     if (managedOnlineBackupOperationQueues.get(id) !== state) return;
     managedOnlineBackupOperationQueues.delete(id);
     renderManagedOnlineBackups();
@@ -2809,6 +2829,7 @@ async function deleteManagedOnlineBackup(entry) {
   if (!hasManagedOnlineBackup(id)) {
     const statusContext = beginManagedOnlineBackupOperation();
     setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error', statusContext);
+    endManagedOnlineBackupOperation();
     return;
   }
   if (managedOnlineBackupOperationQueues.get(id)?.action === 'delete') {
@@ -2844,6 +2865,7 @@ async function doOnlineBackupCreate() {
     openOnlineBackupView();
     const statusContext = beginManagedOnlineBackupOperation();
     setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error', statusContext);
+    endManagedOnlineBackupOperation();
     doOnlineBackupCreate.busy = false;
     return;
   }
@@ -2863,6 +2885,7 @@ async function doOnlineBackupCreate() {
   } catch {
     setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', statusContext);
   } finally {
+    endManagedOnlineBackupOperation();
     if (createButton?.isConnected) createButton.disabled = false;
     doOnlineBackupCreate.busy = false;
   }
