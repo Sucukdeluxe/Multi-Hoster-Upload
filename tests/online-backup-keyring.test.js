@@ -339,6 +339,30 @@ describe('encrypted online backup keyring', () => {
     assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
   });
 
+  it('recovers a cryptographically valid backup when the primary only passes structural validation', async () => {
+    const first = fixture();
+    const key = validKey();
+    await first.keyring.commit(first.keyring.prepare(key, timestamp));
+    writeKeyring(first.filePath, [{
+      id: parseOnlineBackupKey(key).id,
+      encryptedKey: 'enc:v1:YWJjZA',
+      createdAt: timestamp
+    }]);
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const recovered = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope
+    });
+
+    const snapshot = await recovered.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [parseOnlineBackupKey(key).id]);
+    assert.deepEqual(snapshot.issues, ['KEYRING_RECOVERED']);
+    assert.equal(await recovered.getKey(parseOnlineBackupKey(key).id), key);
+  });
+
   it('skips a newer cryptographically invalid recovery temp in favor of the validated backup', async () => {
     const first = fixture();
     const key = validKey();
@@ -419,6 +443,37 @@ describe('encrypted online backup keyring', () => {
     assert.equal(fs.readFileSync(first.filePath, 'utf8'), original);
     assert.equal(fs.readdirSync(first.directory).some(name => name.endsWith('.tmp')), false);
     assert.equal(await first.keyring.getKey(parseOnlineBackupKey(firstKey).id), firstKey);
+  });
+
+  it('commits successfully once the primary is published even when later cleanup fails', async () => {
+    const first = fixture();
+    const firstKey = validKey();
+    const secondKey = validKey();
+    await first.keyring.commit(first.keyring.prepare(firstKey, timestamp));
+    let readdirCalls = 0;
+    const fsImpl = {
+      ...fs.promises,
+      readdir: async (...args) => {
+        readdirCalls++;
+        if (readdirCalls === 2) throw Object.assign(new Error('cleanup failed'), { code: 'EIO' });
+        return fs.promises.readdir(...args);
+      }
+    };
+    const { createOnlineBackupKeyring } = require('../lib/online-backup-keyring');
+    const keyring = createOnlineBackupKeyring({
+      filePath: first.filePath,
+      encryptField: encrypt,
+      decryptField: decrypt,
+      isEncrypted: isCanonicalEnvelope,
+      fsImpl
+    });
+
+    assert.equal(await keyring.commit(keyring.prepare(secondKey, '2026-08-22T11:00:00.000Z')), true);
+    assert.equal(await keyring.getKey(parseOnlineBackupKey(secondKey).id), secondKey);
+    assert.deepEqual((await keyring.list()).entries.map(entry => entry.id), [
+      parseOnlineBackupKey(secondKey).id,
+      parseOnlineBackupKey(firstKey).id
+    ]);
   });
 
   it('types invalid documents and never includes plaintext or ciphertext in errors', async () => {

@@ -67,7 +67,8 @@ const managedOnlineBackupIds = {
   a: 'AAAAAAAAAAAAAAAAAAAAAA',
   b: 'AQEBAQEBAQEBAQEBAQEBAQ',
   c: 'AgICAgICAgICAgICAgICAg',
-  d: 'AwMDAwMDAwMDAwMDAwMDAw'
+  d: 'AwMDAwMDAwMDAwMDAwMDAw',
+  e: 'BAQEBAQEBAQEBAQEBAQEBA'
 };
 const managedOnlineBackupListResponses = [
   { ok: true, warningCode: 'KEYRING_DECRYPT_FAILED', warning: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden', entries: [
@@ -107,8 +108,8 @@ contextBridge.exposeInMainWorld('api', {
     const resolve = pendingManagedOnlineBackupLists.get(index);
     pendingManagedOnlineBackupLists.delete(index);
     resolve({ ok: true, entries: [
+      { id: managedOnlineBackupIds.e, displayKey: 'MHU2-AUTH…9999', createdAt: '2026-08-26T10:00:00.000Z' },
       { id: managedOnlineBackupIds.d, displayKey: 'MHU2-DFGH…2468', createdAt: '2026-08-25T10:00:00.000Z' },
-      { id: managedOnlineBackupIds.c, displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' },
       { id: managedOnlineBackupIds.a, displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' }
     ] });
   },
@@ -146,7 +147,8 @@ contextBridge.exposeInMainWorld('api', {
       a: 'AAAAAAAAAAAAAAAAAAAAAA',
       b: 'AQEBAQEBAQEBAQEBAQEBAQ',
       c: 'AgICAgICAgICAgICAgICAg',
-      d: 'AwMDAwMDAwMDAwMDAwMDAw'
+      d: 'AwMDAwMDAwMDAwMDAwMDAw',
+      e: 'BAQEBAQEBAQEBAQEBAQEBA'
     };
     const fixture = document.createElement('section');
     fixture.innerHTML = '<div id="managedOnlineBackupList"></div><div id="managedOnlineBackupRefreshStatus" hidden><span id="managedOnlineBackupRefreshMessage"></span><button id="reloadManagedOnlineBackupsBtn" type="button">Erneut laden</button></div><div id="onlineBackupStatus"></div><button id="createOnlineBackupBtn"></button><input id="onlineBackupKeyInput"><button id="restoreOnlineBackupBtn"></button>';
@@ -168,6 +170,8 @@ contextBridge.exposeInMainWorld('api', {
     };
     flushPendingSettingsSaves = async () => {};
     openOnlineBackupView = () => {};
+    const toastMessages = [];
+    showCopyToast = message => toastMessages.push(localizeUiText(message));
     await loadManagedOnlineBackups();
     await new Promise(resolve => setTimeout(resolve, 0));
     const initialKeys = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
@@ -198,6 +202,7 @@ contextBridge.exposeInMainWorld('api', {
       focusAction: document.activeElement?.dataset.managedOnlineBackupAction,
       focusId: document.activeElement?.dataset.managedOnlineBackupId
     };
+    const beforeCreateToasts = toastMessages.length;
     await doOnlineBackupCreate();
     await new Promise(resolve => setTimeout(resolve, 0));
     const refreshFailure = {
@@ -207,6 +212,7 @@ contextBridge.exposeInMainWorld('api', {
       warning: document.getElementById('managedOnlineBackupRefreshMessage')?.textContent,
       retryVisible: document.getElementById('reloadManagedOnlineBackupsBtn')?.offsetParent !== null
     };
+    const createSuccessToasts = toastMessages.slice(beforeCreateToasts);
     const beforeRetryCalls = (await calls('list')).length;
     document.getElementById('reloadManagedOnlineBackupsBtn')?.click();
     const retryTriggeredLoad = await waitFor(async () => (await calls('list')).length === beforeRetryCalls + 1);
@@ -251,6 +257,7 @@ contextBridge.exposeInMainWorld('api', {
       ariaDescriptions,
       afterDelete,
       refreshFailure,
+      createSuccessToasts,
       retryTriggeredLoad,
       afterRetry,
       copyFocusRestored,
@@ -418,6 +425,7 @@ app.whenReady().then(async () => {
       warning: 'Stored online backup key could not be decrypted',
       retryVisible: true
     });
+    assert.deepEqual(result.onlineBackupBehavior.createSuccessToasts, []);
     assert.equal(result.onlineBackupBehavior.retryTriggeredLoad, true);
     assert.deepEqual(result.onlineBackupBehavior.afterRetry, {
       keys: ['MHU2-QWER…4321', 'MHU2-ABCD…1234'],
@@ -425,7 +433,7 @@ app.whenReady().then(async () => {
     });
     assert.equal(result.onlineBackupBehavior.copyFocusRestored, true);
     assert.deepEqual(result.onlineBackupBehavior.raceResult, {
-      keys: ['MHU2-DFGH…2468', 'MHU2-QWER…4321', 'MHU2-ABCD…1234'],
+      keys: ['MHU2-AUTH…9999', 'MHU2-DFGH…2468', 'MHU2-ABCD…1234'],
       status: 'New key created.',
       statusState: 'success',
       warningHidden: true
@@ -523,7 +531,13 @@ const serverModulePath = process.env.MHU_DPAPI_SERVER_MODULE;
 app.setPath('userData', userDataPath);
 let server = null;
 let window = null;
-let previousClipboard = '';
+let interceptedClipboard = '';
+let interceptedClipboardWrites = 0;
+const originalClipboardWriteText = clipboard.writeText;
+clipboard.writeText = value => {
+  interceptedClipboard = value;
+  interceptedClipboardWrites++;
+};
 const logs = [];
 const originalConsole = { log: console.log, warn: console.warn, error: console.error };
 for (const method of Object.keys(originalConsole)) console[method] = (...values) => { logs.push(values.map(String).join(' ')); };
@@ -545,7 +559,6 @@ async function closeServer() {
   server = null;
 }
 app.whenReady().then(async () => {
-  previousClipboard = clipboard.readText();
   if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage unavailable');
   const { createBackupServer } = await import(pathToFileURL(serverModulePath).href);
   fs.mkdirSync(serverDataPath, { recursive: true });
@@ -597,7 +610,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('online-backup:copy-managed', async (event, id) => {
     if (!trusted(event)) return { ok: false, error: 'rejected' };
     const result = await manager.copyManaged(requireId(id));
-    clipboardMatched = clipboard.readText() === fullKey;
+    clipboardMatched = interceptedClipboard === fullKey && interceptedClipboardWrites === 1;
     return result;
   });
   ipcMain.handle('online-backup:delete-managed', (event, id) => trusted(event) ? manager.deleteManaged(requireId(id)) : { ok: false, error: 'rejected' });
@@ -635,6 +648,7 @@ app.whenReady().then(async () => {
     rendererSecretAbsent: !ipcJson.includes(fullKey) && !/MHU2-[A-Za-z0-9_-]{70}/.test(ipcJson),
     logSecretAbsent: logs.every(line => !line.includes(fullKey)) && !logs.join(' ').match(/MHU2-[A-Za-z0-9_-]{70}/),
     clipboardMatched,
+    interceptedClipboardWrites,
     serverRecordBeforeDelete,
     serverEmptyAfterDelete: remainingServerRecords.length === 0,
     keyringEmptyAfterDelete: afterDocument.keys.length === 0,
@@ -645,12 +659,7 @@ app.whenReady().then(async () => {
   fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
   process.exitCode = 1;
 }).finally(async () => {
-  clipboard.writeText(previousClipboard);
-  if (fs.existsSync(outputPath)) {
-    const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
-    result.clipboardRestored = clipboard.readText() === previousClipboard;
-    fs.writeFileSync(outputPath, JSON.stringify(result), 'utf8');
-  }
+  clipboard.writeText = originalClipboardWriteText;
   for (const channel of ['online-backup:list-managed', 'online-backup:create-managed', 'online-backup:copy-managed', 'online-backup:delete-managed']) ipcMain.removeHandler(channel);
   if (window && !window.isDestroyed()) window.destroy();
   await closeServer();
@@ -696,7 +705,7 @@ app.whenReady().then(async () => {
       rendererSecretAbsent: true,
       logSecretAbsent: true,
       clipboardMatched: true,
-      clipboardRestored: true,
+      interceptedClipboardWrites: 1,
       serverRecordBeforeDelete: true,
       serverEmptyAfterDelete: true,
       keyringEmptyAfterDelete: true,

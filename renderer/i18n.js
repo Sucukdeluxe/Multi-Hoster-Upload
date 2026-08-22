@@ -462,7 +462,6 @@
     ['Log-Pfad automatisch auf funktionierenden Ordner gesetzt', 'Log path automatically changed to a writable folder'],
     ['Neuer Schlüssel erstellt.', 'New key created.'],
     ['Nicht alle Einstellungen konnten gespeichert werden', 'Not all settings could be saved'],
-    ['Online-Schlüssel erstellt', 'Online key created'],
     ['Online-Schlüssel kopiert', 'Online key copied'],
     ['Online-Sicherung konnte nicht erstellt werden', 'Online backup could not be created'],
     ['Online-Sicherungen konnten nicht geladen werden', 'Online backups could not be loaded'],

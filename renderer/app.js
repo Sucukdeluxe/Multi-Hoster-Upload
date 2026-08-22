@@ -2977,7 +2977,6 @@ async function doOnlineBackupCreate() {
     if (!upsertManagedOnlineBackup(result.entry)) setManagedOnlineBackupRefreshIssue('Online-Sicherungen konnten nicht geladen werden', 'error');
     await loadManagedOnlineBackups({ mutationGeneration: authority.mutationGeneration });
     setOnlineBackupStatus('Neuer Schlüssel erstellt.', 'success', authority.statusContext);
-    showCopyToast('Online-Schlüssel erstellt');
   } catch {
     setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', authority.statusContext);
   } finally {
