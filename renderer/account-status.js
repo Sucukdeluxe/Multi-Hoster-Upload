@@ -30,7 +30,35 @@
     return 'warn';
   }
 
-  const accountStatus = { getAccountGroupStatus, getAccountStatusPresentation };
+  function getAccountPausePresentation(record, now = Date.now()) {
+    if (record?.mode === 'manual') return { mode: 'manual', remainingSeconds: null, expired: false };
+    const pausedUntil = Number(record?.pausedUntil);
+    const remainingSeconds = Number.isFinite(pausedUntil) ? Math.max(0, Math.ceil((pausedUntil - now) / 1000)) : 0;
+    return { mode: 'cooldown', remainingSeconds, expired: remainingSeconds === 0 };
+  }
+
+  function formatAccountPauseRemaining(seconds) {
+    const total = Math.max(0, Math.ceil(Number(seconds) || 0));
+    const minutes = Math.floor(total / 60);
+    return `${minutes}:${String(total % 60).padStart(2, '0')}`;
+  }
+
+  async function subscribeAccountPauseSnapshots(api, apply) {
+    if (typeof api?.onSessionFailedAccountsChanged === 'function') api.onSessionFailedAccountsChanged(apply);
+    if (typeof api?.getSessionFailedAccountStates === 'function') {
+      apply(await api.getSessionFailedAccountStates());
+      return;
+    }
+    if (typeof api?.getSessionFailedAccounts === 'function') apply(await api.getSessionFailedAccounts());
+  }
+
+  const accountStatus = {
+    formatAccountPauseRemaining,
+    getAccountGroupStatus,
+    getAccountPausePresentation,
+    getAccountStatusPresentation,
+    subscribeAccountPauseSnapshots
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = accountStatus;
   if (scope) scope.AccountStatus = accountStatus;
 })(typeof window !== 'undefined' ? window : globalThis);

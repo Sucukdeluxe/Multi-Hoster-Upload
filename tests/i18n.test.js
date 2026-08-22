@@ -53,6 +53,19 @@ test('translates the account check timestamp label', () => {
   assert.equal(translateText('checked', 'de'), 'geprüft');
 });
 
+test('translates account cooldown and manual pause labels', () => {
+  const pairs = [
+    ['Pausiert – noch', 'Paused –'],
+    ['Pausiert – Aktion nötig', 'Paused – action required'],
+    ['Account automatisch wieder aktiv', 'Account automatically active again'],
+    ['Account wieder aktiv – nächste Batch verwendet ihn', 'Account active again – the next batch will use it']
+  ];
+  for (const [german, english] of pairs) {
+    assert.equal(translateText(german, 'en'), english);
+    assert.equal(translateText(english, 'de'), german);
+  }
+});
+
 test('translates the failure detail clipboard action', () => {
   assert.equal(translateText('Fehlerdetails kopieren', 'en'), 'Copy failure details');
   assert.equal(translateText('Failure details copied', 'de'), 'Fehlerdetails kopiert');

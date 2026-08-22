@@ -432,7 +432,7 @@ async function init() {
   importEntryCoordinator.ready();
   restoreQueueColumnWidths();
   loadHistory();
-  _refreshSessionFailedSnapshot();
+  await window.AccountStatus.subscribeAccountPauseSnapshots(window.api, _applySessionFailedSnapshot);
   renderRecentUploadsPanel();
   updateUploadView();
   updateStatusBar();
@@ -556,6 +556,7 @@ async function init() {
   window.api.onAccountSwitched((data) => {
     window.api.debugLog(`account-switched: ${data.hoster} ${data.fromAccountId} -> ${data.toAccountId}`);
   });
+  setInterval(_updateAccountPauseCountdowns, 1000);
 
   // Drop target window: files dropped on the small floating window
   window.api.onDropTargetFiles((paths) => {
@@ -3724,6 +3725,9 @@ function handleBatchDone(summary) {
 }
 
 let _sessionFailedKeys = new Set();
+let _sessionFailedAccountStates = new Map();
+let _sessionFailedRevision = -1;
+let _sessionFailedRefreshPending = false;
 
 const _autoRetryState = { round: 0, timer: null };
 function _cancelAutoRetry(resetRound) {
@@ -3761,10 +3765,69 @@ function _scheduleAutoRetryIfNeeded() {
 async function _refreshSessionFailedSnapshot() {
   if (!window.api || !window.api.getSessionFailedAccounts) return;
   try {
-    const keys = await window.api.getSessionFailedAccounts();
-    _sessionFailedKeys = new Set(Array.isArray(keys) ? keys : []);
-    renderAccounts();
+    if (window.api.getSessionFailedAccountStates) {
+      _applySessionFailedSnapshot(await window.api.getSessionFailedAccountStates());
+    } else {
+      const keys = await window.api.getSessionFailedAccounts();
+      _applySessionFailedSnapshot(Array.isArray(keys) ? keys : []);
+    }
   } catch { /* ignore */ }
+}
+
+function _applySessionFailedSnapshot(snapshot) {
+  const revision = Number(snapshot?.revision);
+  if (Number.isFinite(revision) && revision < _sessionFailedRevision) return;
+  if (Number.isFinite(revision)) _sessionFailedRevision = revision;
+  const source = Array.isArray(snapshot) ? snapshot : snapshot?.accounts;
+  const next = new Map();
+  for (const value of Array.isArray(source) ? source : []) {
+    if (typeof value === 'string') {
+      next.set(value, { key: value, mode: 'manual', pausedUntil: null });
+      continue;
+    }
+    if (!value || typeof value !== 'object' || !value.hoster || !value.accountId) continue;
+    const key = `${value.hoster}:${value.accountId}`;
+    next.set(key, {
+      key,
+      hoster: value.hoster,
+      accountId: value.accountId,
+      mode: value.mode === 'manual' ? 'manual' : 'cooldown',
+      pausedUntil: value.mode === 'manual' ? null : Number(value.pausedUntil),
+      failures: Number(value.failures) || 1
+    });
+  }
+  if (snapshot?.cause === 'expired') {
+    for (const [key, record] of _sessionFailedAccountStates) {
+      if (next.has(key) || record.mode !== 'cooldown') continue;
+      showCopyToast(`${getHosterLabel(record.hoster)}: ${localizeUiText('Account automatisch wieder aktiv')}`);
+    }
+  }
+  _sessionFailedAccountStates = next;
+  _sessionFailedKeys = new Set(next.keys());
+  _sessionFailedRefreshPending = false;
+  renderAccounts();
+}
+
+function _accountPauseText(record, now = Date.now()) {
+  const presentation = window.AccountStatus.getAccountPausePresentation(record, now);
+  if (presentation.mode === 'manual') return localizeUiText('Pausiert – Aktion nötig');
+  return `${localizeUiText('Pausiert – noch')} ${window.AccountStatus.formatAccountPauseRemaining(presentation.remainingSeconds)}`;
+}
+
+function _updateAccountPauseCountdowns() {
+  let expired = false;
+  const now = Date.now();
+  for (const element of document.querySelectorAll('[data-account-pause-key]')) {
+    const record = _sessionFailedAccountStates.get(element.dataset.accountPauseKey);
+    if (!record) continue;
+    const presentation = window.AccountStatus.getAccountPausePresentation(record, now);
+    if (presentation.expired) expired = true;
+    element.textContent = _accountPauseText(record, now);
+  }
+  if (expired && !_sessionFailedRefreshPending) {
+    _sessionFailedRefreshPending = true;
+    _refreshSessionFailedSnapshot().finally(() => { _sessionFailedRefreshPending = false; });
+  }
 }
 
 function _maybeShowBatchSummary(summary) {
@@ -5838,9 +5901,12 @@ function _buildAccountCardHtml(name, account, idx) {
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
 
-  const isSessionPaused = _sessionFailedKeys.has(`${name}:${account.id}`);
+  const sessionPauseKey = `${name}:${account.id}`;
+  const sessionPause = _sessionFailedAccountStates.get(sessionPauseKey)
+    || (_sessionFailedKeys.has(sessionPauseKey) ? { key: sessionPauseKey, mode: 'manual', pausedUntil: null } : null);
+  const isSessionPaused = Boolean(sessionPause);
   const sessionPausedBadge = isSessionPaused
-    ? `<span class="account-session-paused" title="Account wurde diese Session als fehlerhaft markiert. Klick = Wieder als aktiv markieren.">Pausiert (Session) <button class="account-session-reactivate" data-account-reactivate="${account.id}" data-account-reactivate-hoster="${name}" title="Wieder aktivieren">↻</button></span>`
+    ? `<span class="account-session-paused" title="Account wurde diese Session als fehlerhaft markiert. Klick = Wieder als aktiv markieren."><span class="account-session-pause-text" data-account-pause-key="${escapeAttr(sessionPauseKey)}">${escapeHtml(_accountPauseText(sessionPause))}</span> <button class="account-session-reactivate" data-account-reactivate="${account.id}" data-account-reactivate-hoster="${name}" title="Wieder aktivieren">↻</button></span>`
     : '';
   const otpAction = !isDisabled && statusPresentation.requiresOtp
     ? `<div class="account-otp-action">
@@ -6292,10 +6358,10 @@ function bindAccountListeners(container) {
       const hoster = btn.dataset.accountReactivateHoster;
       if (!hoster || !accountId) return;
       e.stopPropagation();
-      window.api.resetSessionFailedAccount({ hoster, accountId }).then(() => {
-        _sessionFailedKeys.delete(`${hoster}:${accountId}`);
-        renderAccounts();
-        showCopyToast(`${getHosterLabel(hoster)} Account wieder aktiv — nächste Batch verwendet ihn`);
+      window.api.resetSessionFailedAccount({ hoster, accountId }).then((result) => {
+        if (!result?.ok) return;
+        _refreshSessionFailedSnapshot();
+        showCopyToast(`${getHosterLabel(hoster)} ${localizeUiText('Account wieder aktiv – nächste Batch verwendet ihn')}`);
       }).catch(() => {});
       return;
     }

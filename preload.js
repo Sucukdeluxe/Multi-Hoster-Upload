@@ -135,8 +135,12 @@ contextBridge.exposeInMainWorld('api', {
   openLogFolder: () => ipcRenderer.invoke('open-log-folder'),
   getJobLog: (jobId) => ipcRenderer.invoke('get-job-log', jobId),
   getSessionFailedAccounts: () => ipcRenderer.invoke('get-session-failed-accounts'),
+  getSessionFailedAccountStates: () => ipcRenderer.invoke('get-session-failed-account-states'),
   resetSessionFailedAccount: (payload) => ipcRenderer.invoke('reset-session-failed-account', payload),
   resetAllSessionFailedAccounts: () => ipcRenderer.invoke('reset-all-session-failed-accounts'),
+  onSessionFailedAccountsChanged: (callback) => {
+    ipcRenderer.on('session-failed-accounts-changed', (_event, data) => callback(data));
+  },
   getLogPaths: () => ipcRenderer.invoke('get-log-paths'),
   testWebhook: (payload) => ipcRenderer.invoke('test-webhook', payload),
   revealLogFile: (target) => ipcRenderer.invoke('reveal-log-file', target),
@@ -174,6 +178,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('folder-monitor:new-files');
     ipcRenderer.removeAllListeners('drop-target:files');
     ipcRenderer.removeAllListeners('account-switched');
+    ipcRenderer.removeAllListeners('session-failed-accounts-changed');
     ipcRenderer.removeAllListeners('remote:client-count');
   }
 });

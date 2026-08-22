@@ -873,6 +873,65 @@ describe('UploadManager', () => {
   });
 
   describe('session-level account memory', () => {
+    it('emits a timed account pause for quota failures and a success reset for the fallback', async () => {
+      mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+        if (apiKey === 'full-key') {
+          const error = new Error('not enough disk space on your account');
+          error.accountError = true;
+          throw error;
+        }
+        if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+        return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+      });
+      const mgr = new UploadManager({ 'byse.sx': { retries: 0, parallelCount: 1 } });
+      const pauses = [];
+      const successes = [];
+      mgr.on('account-paused', event => pauses.push(event));
+      mgr.on('account-succeeded', event => successes.push(event));
+      mgr.on('account-failed', ({ hoster }) => {
+        mgr.switchAccount(hoster, { id: 'fallback', apiKey: 'fallback-key' });
+      });
+
+      await mgr.startBatch([{ file: '/test/cooldown.mp4', hoster: 'byse.sx', accountId: 'full', apiKey: 'full-key' }]);
+
+      assert.deepEqual(pauses, [{ hoster: 'byse.sx', accountId: 'full', mode: 'cooldown' }]);
+      assert.deepEqual(successes, [{ hoster: 'byse.sx', accountId: 'fallback' }]);
+    });
+
+    it('emits a manual account pause for credential failures', async () => {
+      mockUploadFile.mock.mockImplementation(async () => {
+        throw new Error('VOE Login fehlgeschlagen: Falscher Username oder Passwort');
+      });
+      const mgr = new UploadManager({ 'voe.sx': { retries: 0, parallelCount: 1 } });
+      const pauses = [];
+      mgr.on('account-paused', event => pauses.push(event));
+
+      await mgr.startBatch([{ file: '/test/manual.mp4', hoster: 'voe.sx', accountId: 'login', apiKey: 'bad' }]);
+
+      assert.deepEqual(pauses, [{ hoster: 'voe.sx', accountId: 'login', mode: 'manual' }]);
+    });
+
+    it('does not blacklist or emit fallback steering for unknown account failures', async () => {
+      mockUploadFile.mock.mockImplementation(async () => {
+        throw new Error('Unbekannter Parserfehler');
+      });
+      const mgr = new UploadManager({ 'voe.sx': { retries: 0, parallelCount: 1 } });
+      const paused = [];
+      const failed = [];
+      mgr.on('account-paused', event => paused.push(event));
+      mgr.on('account-failed', event => failed.push(event));
+
+      await mgr.startBatch([
+        { file: '/test/unknown-a.mp4', hoster: 'voe.sx', accountId: 'primary', apiKey: 'key' },
+        { file: '/test/unknown-b.mp4', hoster: 'voe.sx', accountId: 'primary', apiKey: 'key' }
+      ]);
+
+      assert.deepEqual(paused, []);
+      assert.deepEqual(failed, []);
+      assert.deepEqual(mgr.getFailedAccountKeys(), []);
+      assert.equal(mockUploadFile.mock.calls.length, 2);
+    });
+
     // Scenario: user has 2 byse accounts. Account 1 is full ("not enough
     // disk space"). First job fails on acc1 → rotation to acc2. Second job
     // must NOT re-probe acc1; pre-job-swap has to kick in.

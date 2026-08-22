@@ -15,7 +15,7 @@ const VidmolyUploader = require('./lib/vidmoly-upload');
 const VoeUploader = require('./lib/voe-upload');
 const DoodstreamUploader = require('./lib/doodstream-upload');
 const { selectUploadAuth } = require('./lib/account-auth');
-const { createAccountPicker } = require('./lib/account-rotation');
+const { createAccountCooldownController, createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
@@ -340,7 +340,28 @@ if (!_hasSingleInstanceLock) {
 // same app session. Without this, clicking "Retry failed" after a batch
 // ended would burn the full retry budget on accounts we already know are
 // dead. Cleared on app restart (which is the user's signal for "try fresh").
-const _sessionFailedAccounts = new Map(); // "hoster:accountId" -> true
+let _sessionAccountPauseRevision = 0;
+function _accountPauseSnapshot(records, cause = 'snapshot') {
+  return {
+    version: 2,
+    revision: _sessionAccountPauseRevision,
+    now: Date.now(),
+    cause,
+    accounts: Array.isArray(records) ? records : []
+  };
+}
+function _publishAccountPauseState(records, cause) {
+  _sessionAccountPauseRevision++;
+  safeSend('session-failed-accounts-changed', _accountPauseSnapshot(records, cause));
+}
+const _accountCooldowns = createAccountCooldownController({
+  onClearAccount: (hoster, accountId) => {
+    if (uploadManager && typeof uploadManager.clearFailedAccount === 'function') {
+      try { uploadManager.clearFailedAccount(hoster, accountId); } catch {}
+    }
+  },
+  onChange: _publishAccountPauseState
+});
 const _sessionAccountOverrides = new Map(); // hoster -> account object
 
 // Per-job log collector: backs the right-click "Log anzeigen" modal so the
@@ -2284,10 +2305,16 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     sourceCleanup.settle(event);
   });
 
+  uploadManager.on('account-paused', ({ hoster, accountId, mode }) => {
+    const record = _accountCooldowns.markFailure({ hoster, accountId, mode });
+    if (record) rotLog(`main: account-paused ${hoster} ${accountId} mode=${record.mode} failures=${record.failures} until=${record.pausedUntil || 'manual'}`);
+  });
+
+  uploadManager.on('account-succeeded', ({ hoster, accountId }) => {
+    if (_accountCooldowns.markSuccess(hoster, accountId)) rotLog(`main: account-pause reset after success ${hoster} ${accountId}`);
+  });
+
   uploadManager.on('account-failed', ({ hoster, accountId }) => {
-    // Persist to session cache so a subsequent batch (after batch-done)
-    // gets primed and won't burn retries on this account again.
-    _sessionFailedAccounts.set(hoster + ':' + accountId, true);
     const cfg = configStore.load();
     const fallback = getNextFallbackAccount(cfg, hoster, accountId);
     if (fallback) {
@@ -2397,9 +2424,11 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       _producerTracker.finish();
       return;
     }
-    debugLog(`setImmediate: calling startBatch now (priming ${_sessionFailedAccounts.size} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
+    _accountCooldowns.releaseExpired();
+    const pausedAccounts = _accountCooldowns.activeKeys();
+    debugLog(`setImmediate: calling startBatch now (priming ${pausedAccounts.length} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
     _thisManager.startBatch(tasks, {
-      primeFailedAccounts: Array.from(_sessionFailedAccounts.keys()),
+      primeFailedAccounts: pausedAccounts,
       primeOverrides: Array.from(_sessionAccountOverrides.entries())
     }).catch((err) => {
       debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
@@ -2503,7 +2532,13 @@ ipcMain.handle('finish-after-active', () => {
 });
 
 ipcMain.handle('get-session-failed-accounts', () => {
-  return Array.from(_sessionFailedAccounts.keys());
+  _accountCooldowns.releaseExpired();
+  return _accountCooldowns.activeKeys();
+});
+
+ipcMain.handle('get-session-failed-account-states', () => {
+  _accountCooldowns.releaseExpired();
+  return _accountPauseSnapshot(_accountCooldowns.list());
 });
 
 ipcMain.handle('reset-session-failed-account', (_event, payload) => {
@@ -2511,20 +2546,13 @@ ipcMain.handle('reset-session-failed-account', (_event, payload) => {
   const { hoster, accountId } = payload;
   if (!hoster || !accountId) return { ok: false };
   const key = `${hoster}:${accountId}`;
-  const removed = _sessionFailedAccounts.delete(key);
-  if (uploadManager && typeof uploadManager.clearFailedAccount === 'function') {
-    try { uploadManager.clearFailedAccount(hoster, accountId); } catch {}
-  }
+  const removed = _accountCooldowns.reset(hoster, accountId);
   rotLog(`session-failed: manual reset ${key} (was set: ${removed})`);
   return { ok: true, removed };
 });
 
 ipcMain.handle('reset-all-session-failed-accounts', () => {
-  const count = _sessionFailedAccounts.size;
-  _sessionFailedAccounts.clear();
-  if (uploadManager && typeof uploadManager.clearAllFailedAccounts === 'function') {
-    try { uploadManager.clearAllFailedAccounts(); } catch {}
-  }
+  const count = _accountCooldowns.clear();
   rotLog(`session-failed: cleared all (${count})`);
   return { ok: true, count };
 });
@@ -2749,7 +2777,7 @@ async function applyImportedSettings(imported) {
     try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
     await configStore.replaceSettings(prepared);
     _rotationCursors = {};
-    _sessionFailedAccounts.clear();
+    _accountCooldowns.clear();
     _sessionAccountOverrides.clear();
     _invalidateLogSettings();
     const config = configStore.load();

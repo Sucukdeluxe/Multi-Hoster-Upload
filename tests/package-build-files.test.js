@@ -209,3 +209,47 @@ test('close readiness is signaled only after the renderer explicitly finishes in
     ['app:close-handshake-ready']
   ]);
 });
+
+test('preload exposes account cooldown snapshots and removes their listener during cleanup', async () => {
+  const listeners = new Map();
+  const invocations = [];
+  const removed = [];
+  let exposedApi = null;
+  const electronMock = {
+    contextBridge: {
+      exposeInMainWorld: (_name, api) => { exposedApi = api; }
+    },
+    ipcRenderer: {
+      invoke: (...args) => { invocations.push(args); return Promise.resolve({ version: 2, accounts: [] }); },
+      on: (channel, listener) => { listeners.set(channel, listener); },
+      send: () => {},
+      removeAllListeners: channel => { removed.push(channel); }
+    },
+    webUtils: {
+      getPathForFile: () => ''
+    }
+  };
+  const originalLoad = Module._load;
+  const preloadPath = require.resolve('../preload');
+  delete require.cache[preloadPath];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'electron') return electronMock;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    require(preloadPath);
+  } finally {
+    Module._load = originalLoad;
+  }
+
+  const snapshot = await exposedApi.getSessionFailedAccountStates();
+  let pushed = null;
+  exposedApi.onSessionFailedAccountsChanged(value => { pushed = value; });
+  listeners.get('session-failed-accounts-changed')({}, { version: 2, accounts: [{ accountId: 'a1' }] });
+  exposedApi.removeAllListeners();
+
+  assert.deepEqual(snapshot, { version: 2, accounts: [] });
+  assert.deepEqual(invocations, [['get-session-failed-account-states']]);
+  assert.deepEqual(pushed, { version: 2, accounts: [{ accountId: 'a1' }] });
+  assert.equal(removed.includes('session-failed-accounts-changed'), true);
+});
