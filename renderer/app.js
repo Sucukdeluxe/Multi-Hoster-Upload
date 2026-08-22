@@ -41,6 +41,7 @@ function refreshLocalizedRuntimeUi() {
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
+  renderManagedOnlineBackups();
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -61,6 +62,9 @@ let config = { hosters: {}, hosterSettings: {}, globalSettings: {} };
 let hosterSettings = {};
 let uploading = false;
 let healthCheckRunning = false;
+let managedOnlineBackups = [];
+let managedOnlineBackupLoadGeneration = 0;
+const managedOnlineBackupPendingActions = new Map();
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
 function _rElLabel(el) {
@@ -2637,15 +2641,140 @@ function showImportQueuePersistenceError(error) {
 function setOnlineBackupStatus(message, state = '') {
   const status = document.getElementById('onlineBackupStatus');
   if (!status) return;
-  status.textContent = message;
+  status.textContent = String(message || '').replace(/MHU2-[A-Za-z0-9_-]{70}/gu, localizeUiText('Geschützter Schlüssel'));
   status.dataset.state = state;
 }
 
-function setOnlineBackupBusy(busy) {
-  const createButton = document.getElementById('createOnlineBackupBtn');
+function syncOnlineBackupRestoreButton(busy = false) {
   const restoreButton = document.getElementById('restoreOnlineBackupBtn');
-  if (createButton) createButton.disabled = busy;
-  if (restoreButton) restoreButton.disabled = busy || !/^MHU2-[A-Za-z0-9_-]{70}$/.test(document.getElementById('onlineBackupKeyInput')?.value.trim() || '');
+  if (!restoreButton) return;
+  restoreButton.dataset.busy = busy ? 'true' : 'false';
+  restoreButton.disabled = busy || !/^MHU2-[A-Za-z0-9_-]{70}$/.test(document.getElementById('onlineBackupKeyInput')?.value.trim() || '');
+}
+
+function normalizeManagedOnlineBackups(entries) {
+  const sanitized = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.id !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(entry.id)) continue;
+    if (typeof entry.displayKey !== 'string' || !entry.displayKey || /MHU2-[A-Za-z0-9_-]{70}/.test(entry.displayKey)) continue;
+    const createdAt = new Date(entry.createdAt);
+    if (Number.isNaN(createdAt.getTime())) continue;
+    sanitized.set(entry.id, { id: entry.id, displayKey: entry.displayKey, createdAt: createdAt.toISOString() });
+  }
+  return [...sanitized.values()].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function replaceManagedOnlineBackups(entries) {
+  managedOnlineBackups = normalizeManagedOnlineBackups(entries);
+  renderManagedOnlineBackups();
+}
+
+function renderManagedOnlineBackups() {
+  const list = document.getElementById('managedOnlineBackupList');
+  if (!list) return;
+  const content = document.createDocumentFragment();
+  if (managedOnlineBackups.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'online-backup-managed-empty';
+    empty.textContent = localizeUiText('Noch keine Schlüssel auf diesem Gerät erstellt.');
+    content.append(empty);
+  } else {
+    for (const entry of managedOnlineBackups) {
+      const row = document.createElement('article');
+      row.className = 'online-backup-managed-row';
+      const key = document.createElement('span');
+      key.className = 'online-backup-managed-key';
+      key.textContent = entry.displayKey;
+      const created = document.createElement('span');
+      created.className = 'online-backup-managed-created';
+      created.textContent = formatDateTime(entry.createdAt).text;
+      const actions = document.createElement('div');
+      actions.className = 'online-backup-managed-actions';
+      const copyButton = document.createElement('button');
+      copyButton.type = 'button';
+      copyButton.className = 'btn btn-secondary online-backup-copy-btn';
+      copyButton.textContent = localizeUiText('Schlüssel kopieren');
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'btn btn-danger online-backup-delete-btn';
+      deleteButton.textContent = localizeUiText('Online-Backup löschen');
+      const pendingAction = managedOnlineBackupPendingActions.get(entry.id);
+      copyButton.disabled = pendingAction === 'copy' || pendingAction === 'delete';
+      deleteButton.disabled = pendingAction === 'delete';
+      copyButton.addEventListener('click', () => copyManagedOnlineBackup(entry, copyButton));
+      deleteButton.addEventListener('click', () => deleteManagedOnlineBackup(entry, row));
+      actions.append(copyButton, deleteButton);
+      row.append(key, created, actions);
+      content.append(row);
+    }
+  }
+  list.replaceChildren(content);
+}
+
+async function loadManagedOnlineBackups() {
+  const generation = ++managedOnlineBackupLoadGeneration;
+  try {
+    const result = await window.api.listManagedOnlineBackups();
+    if (generation !== managedOnlineBackupLoadGeneration) return false;
+    if (!result?.ok || !Array.isArray(result.entries)) {
+      setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+      return false;
+    }
+    replaceManagedOnlineBackups(result.entries);
+    return true;
+  } catch {
+    if (generation === managedOnlineBackupLoadGeneration) setOnlineBackupStatus('Online-Sicherungen konnten nicht geladen werden', 'error');
+    return false;
+  }
+}
+
+async function copyManagedOnlineBackup(entry, button) {
+  if (button.disabled || managedOnlineBackupPendingActions.has(entry.id)) return;
+  managedOnlineBackupPendingActions.set(entry.id, 'copy');
+  button.disabled = true;
+  try {
+    const result = await window.api.copyManagedOnlineBackup(entry.id);
+    if (!result?.ok) {
+      setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+      return;
+    }
+    showCopyToast('Online-Schlüssel kopiert');
+  } catch {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht kopiert werden', 'error');
+  } finally {
+    managedOnlineBackupPendingActions.delete(entry.id);
+    renderManagedOnlineBackups();
+  }
+}
+
+async function deleteManagedOnlineBackup(entry, row) {
+  const confirmed = await showAppConfirm({
+    title: 'Online-Backup löschen',
+    message: 'Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.',
+    confirmText: 'Löschen',
+    danger: true
+  });
+  if (!confirmed || !row.isConnected) return;
+  if (managedOnlineBackupPendingActions.has(entry.id)) return;
+  managedOnlineBackupPendingActions.set(entry.id, 'delete');
+  const controls = [...row.querySelectorAll('button')];
+  controls.forEach(button => { button.disabled = true; });
+  try {
+    const result = await window.api.deleteManagedOnlineBackup(entry.id);
+    if (!result?.ok || result.removedId !== entry.id) {
+      setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+      return;
+    }
+    managedOnlineBackupLoadGeneration++;
+    replaceManagedOnlineBackups(managedOnlineBackups.filter(item => item.id !== result.removedId));
+    setOnlineBackupStatus('Schlüssel gelöscht', 'success');
+  } catch {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht gelöscht werden', 'error');
+  } finally {
+    managedOnlineBackupPendingActions.delete(entry.id);
+    renderManagedOnlineBackups();
+  }
 }
 
 async function doOnlineBackupCreate() {
@@ -2654,27 +2783,30 @@ async function doOnlineBackupCreate() {
   try {
     await flushPendingSettingsSaves();
     openOnlineBackupView();
-  } catch (error) {
+    await loadManagedOnlineBackups();
+  } catch {
     openOnlineBackupView();
-    setOnlineBackupStatus(error.message || String(error), 'error');
+    setOnlineBackupStatus('Nicht alle Einstellungen konnten gespeichert werden', 'error');
     doOnlineBackupCreate.busy = false;
     return;
   }
-  setOnlineBackupBusy(true);
+  const createButton = document.getElementById('createOnlineBackupBtn');
+  if (createButton) createButton.disabled = true;
   setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy');
   try {
-    const result = await window.api.createOnlineBackup();
-    if (!result || !result.ok) throw new Error(result?.error || 'Online-Sicherung konnte nicht erstellt werden');
-    const output = document.getElementById('onlineBackupKeyOutput');
-    const copyButton = document.getElementById('copyOnlineBackupKeyBtn');
-    if (output) output.value = result.key;
-    if (copyButton) copyButton.disabled = false;
+    const result = await window.api.createManagedOnlineBackup();
+    if (!result?.ok || normalizeManagedOnlineBackups([result.entry]).length !== 1) {
+      setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error');
+      return;
+    }
+    managedOnlineBackupLoadGeneration++;
+    replaceManagedOnlineBackups([...managedOnlineBackups, result.entry]);
     setOnlineBackupStatus('Neuer Schlüssel erstellt. Ältere Schlüssel bleiben gültig.', 'success');
     showCopyToast('Online-Schlüssel erstellt');
-  } catch (error) {
-    setOnlineBackupStatus(error.message || String(error), 'error');
+  } catch {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error');
   } finally {
-    setOnlineBackupBusy(false);
+    if (createButton?.isConnected) createButton.disabled = false;
     doOnlineBackupCreate.busy = false;
   }
 }
@@ -2702,7 +2834,7 @@ async function doOnlineBackupRestore() {
     input?.focus();
     return;
   }
-  setOnlineBackupBusy(true);
+  syncOnlineBackupRestoreButton(true);
   setOnlineBackupStatus('Speichere aktuelle Einstellungen…', 'busy');
   try {
     await flushPendingSettingsSaves();
@@ -2722,10 +2854,10 @@ async function doOnlineBackupRestore() {
     if (warnings.length) setOnlineBackupStatus(`Einstellungen übernommen. Bitte prüfen: ${warnings.join(', ')}.`, 'warning');
     else setOnlineBackupStatus('Alle Accounts und Einstellungen wurden übernommen.', 'success');
     if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
-  } catch (error) {
-    setOnlineBackupStatus(error.message || String(error), 'error');
+  } catch {
+    setOnlineBackupStatus('Online-Sicherung konnte nicht importiert werden', 'error');
   } finally {
-    setOnlineBackupBusy(false);
+    syncOnlineBackupRestoreButton(false);
   }
 }
 
@@ -4867,22 +4999,20 @@ function renderSettings() {
           <h3 id="onlineBackupHeading">Verschlüsseltes Online-Backup</h3>
           <p>Die Verschlüsselung findet ausschließlich auf diesem Gerät statt. Der Server speichert nur verschlüsselte Daten.</p>
         </div>
-        <div class="online-backup-action">
-          <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
-          <span class="hint">Jeder Export erzeugt einen neuen Schlüssel. Ältere Schlüssel bleiben gültig.</span>
-        </div>
-        <div class="online-backup-key-row">
-          <label for="onlineBackupKeyOutput">Neuer Schlüssel</label>
-          <input type="text" class="key-input" id="onlineBackupKeyOutput" readonly spellcheck="false" autocomplete="off" placeholder="Nach dem Export erscheint hier der 75-stellige Schlüssel">
-          <button class="btn btn-secondary" id="copyOnlineBackupKeyBtn" disabled>Kopieren</button>
-        </div>
         <div class="online-backup-key-row">
           <label for="onlineBackupKeyInput">Schlüssel importieren</label>
           <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
-          <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Online importieren</button>
+          <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Importieren</button>
         </div>
         <p class="online-backup-warning">Behandle den Schlüssel wie ein Passwort. Wer ihn besitzt, kann die verschlüsselten Einstellungen entschlüsseln.</p>
+        <section class="online-backup-managed" aria-labelledby="managedOnlineBackupHeading">
+          <h4 id="managedOnlineBackupHeading">Auf diesem Gerät erstellt</h4>
+          <div class="online-backup-managed-list" id="managedOnlineBackupList"></div>
+        </section>
         <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
+        <footer class="online-backup-footer">
+          <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
+        </footer>
       </section>
       <div class="settings-section-label">Lokales Datei-Backup</div>
       <div class="settings-row local-backup-password-row">
@@ -4918,6 +5048,7 @@ function renderSettings() {
     _syncSidebarIndicator(activeButton);
     if (focus) activeButton.focus();
     content.scrollTop = 0;
+    if (target === 'backup') loadManagedOnlineBackups();
   };
 
   navigation.addEventListener('click', (event) => {
@@ -5189,15 +5320,10 @@ function renderSettings() {
     if (event.target.checked) document.getElementById('localBackupPasswordInput')?.focus();
   });
   document.getElementById('createOnlineBackupBtn').addEventListener('click', () => doOnlineBackupCreate());
-  document.getElementById('copyOnlineBackupKeyBtn').addEventListener('click', async () => {
-    const key = document.getElementById('onlineBackupKeyOutput').value;
-    if (!key) return;
-    await window.api.copyToClipboard(key);
-    showCopyToast('Online-Schlüssel kopiert');
-  });
+  renderManagedOnlineBackups();
   document.getElementById('onlineBackupKeyInput').addEventListener('input', (event) => {
     const valid = /^MHU2-[A-Za-z0-9_-]{70}$/.test(event.target.value.trim());
-    document.getElementById('restoreOnlineBackupBtn').disabled = !valid;
+    document.getElementById('restoreOnlineBackupBtn').disabled = document.getElementById('restoreOnlineBackupBtn').dataset.busy === 'true' || !valid;
     if (event.target.value && !valid) setOnlineBackupStatus('Der Schlüssel muss exakt 75 Zeichen lang sein.', '');
     else setOnlineBackupStatus('', '');
   });

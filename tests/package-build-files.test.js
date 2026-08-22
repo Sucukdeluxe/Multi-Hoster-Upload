@@ -24,7 +24,12 @@ test('exposes managed online backup operations through narrow IPC boundaries', (
   assert.match(preloadSource, /createManagedOnlineBackup:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('online-backup:create-managed'\)/u);
   assert.match(preloadSource, /copyManagedOnlineBackup:\s*\(id\)\s*=>\s*ipcRenderer\.invoke\('online-backup:copy-managed',\s*id\)/u);
   assert.match(preloadSource, /deleteManagedOnlineBackup:\s*\(id\)\s*=>\s*ipcRenderer\.invoke\('online-backup:delete-managed',\s*id\)/u);
-  assert.match(preloadSource, /createOnlineBackup:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('online-backup:create-managed'\)/u);
+  assert.match(preloadSource, /restoreOnlineBackup:\s*\(key\)\s*=>\s*ipcRenderer\.invoke\('online-backup:restore',\s*key\)/u);
+  assert.deepEqual(
+    [...preloadSource.matchAll(/^\s{2}(\w*OnlineBackups?):/gmu)].map((match) => match[1]),
+    ['listManagedOnlineBackups', 'createManagedOnlineBackup', 'copyManagedOnlineBackup', 'deleteManagedOnlineBackup', 'restoreOnlineBackup']
+  );
+  assert.doesNotMatch(preloadSource, /^\s{2}createOnlineBackup:/mu);
   assert.doesNotMatch(preloadSource, /ipcRenderer\.invoke\('online-backup:create'\)/u);
   assert.match(mainSource, /path\.join\(app\.getPath\('userData'\),\s*'online-backup-keys\.json'\)/u);
   assert.match(mainSource, /Buffer\.from\(id,\s*'base64url'\)/u);

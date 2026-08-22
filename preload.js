@@ -83,7 +83,6 @@ contextBridge.exposeInMainWorld('api', {
   createManagedOnlineBackup: () => ipcRenderer.invoke('online-backup:create-managed'),
   copyManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:copy-managed', id),
   deleteManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:delete-managed', id),
-  createOnlineBackup: () => ipcRenderer.invoke('online-backup:create-managed'),
   restoreOnlineBackup: (key) => ipcRenderer.invoke('online-backup:restore', key),
 
   // Folder Monitor

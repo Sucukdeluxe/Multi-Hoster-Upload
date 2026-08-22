@@ -62,23 +62,116 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
   const userDataPath = path.join(probeRoot, 'user-data');
   fs.writeFileSync(preloadPath, `
 const { contextBridge } = require('electron');
+const managedOnlineBackupProbeCalls = [];
+let pendingManagedOnlineBackupDelete = null;
 contextBridge.exposeInMainWorld('api', {
   onUpdateAvailable() {},
   onUpdateProgress() {},
   onPrepareClose() {},
-  getConfig() { return new Promise(() => {}); }
+  getConfig() { return new Promise(() => {}); },
+  listManagedOnlineBackups() {
+    managedOnlineBackupProbeCalls.push(['list']);
+    return Promise.resolve({ ok: true, entries: [
+      { id: 'AAAAAAAAAAAAAAAAAAAAAA', displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' },
+      { id: 'BBBBBBBBBBBBBBBBBBBBBB', displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' }
+    ] });
+  },
+  createManagedOnlineBackup() {
+    managedOnlineBackupProbeCalls.push(['create']);
+    return Promise.resolve({ ok: true, entry: { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' } });
+  },
+  copyManagedOnlineBackup(id) {
+    managedOnlineBackupProbeCalls.push(['copy', id]);
+    return Promise.resolve({ ok: true });
+  },
+  deleteManagedOnlineBackup(id) {
+    managedOnlineBackupProbeCalls.push(['delete', id]);
+    return new Promise(resolve => { pendingManagedOnlineBackupDelete = { id, resolve }; });
+  },
+  releaseManagedOnlineBackupDelete() {
+    const pending = pendingManagedOnlineBackupDelete;
+    pendingManagedOnlineBackupDelete = null;
+    pending.resolve({ ok: true, removedId: pending.id, notFound: false });
+  },
+  getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; }
 });
 `, 'utf8');
+  const onlineBackupBehaviorScript = `(async () => {
+    const fixture = document.createElement('section');
+    fixture.innerHTML = '<div id="managedOnlineBackupList"></div><div id="onlineBackupStatus"></div><button id="createOnlineBackupBtn"></button><input id="onlineBackupKeyInput"><button id="restoreOnlineBackupBtn"></button>';
+    document.body.append(fixture);
+    let confirmation = null;
+    showAppConfirm = async options => { confirmation = options; return true; };
+    flushPendingSettingsSaves = async () => {};
+    openOnlineBackupView = () => {};
+    await loadManagedOnlineBackups();
+    const initialKeys = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
+    const maliciousEntry = { id: 'DDDDDDDDDDDDDDDDDDDDDD', displayKey: 'prefix MHU2-' + 'X'.repeat(70) + ' suffix', createdAt: '2026-08-24T12:00:00.000Z' };
+    replaceManagedOnlineBackups([...managedOnlineBackups, maliciousEntry]);
+    const secretRejected = !document.body.textContent.includes(maliciousEntry.displayKey) && managedOnlineBackups.every(entry => entry.displayKey !== maliciousEntry.displayKey);
+    document.querySelector('.online-backup-copy-btn').click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    document.querySelector('.online-backup-delete-btn').click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    renderManagedOnlineBackups();
+    const pendingDeleteControlsDisabled = [...document.querySelector('.online-backup-managed-row').querySelectorAll('button')].every(button => button.disabled);
+    window.api.releaseManagedOnlineBackupDelete();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const afterDelete = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
+    await doOnlineBackupCreate();
+    const afterCreate = [...document.querySelectorAll('.online-backup-managed-key')].map(element => element.textContent);
+    return {
+      initialKeys,
+      secretRejected,
+      pendingDeleteControlsDisabled,
+      afterDelete,
+      afterCreate,
+      confirmation,
+      calls: await window.api.getManagedOnlineBackupProbeCalls(),
+      stateFields: Object.keys(managedOnlineBackups[0] || {}).sort(),
+      secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent)
+    };
+  })()`;
   const onlineBackupLayoutScript = `(() => {
-    document.documentElement.lang = 'de';
-    document.body.innerHTML = '<section class="online-backup-panel"><div class="online-backup-key-row"><label>Dein neuer Schlüssel</label><input class="key-input"><button class="btn btn-secondary">Kopieren</button></div><div class="online-backup-key-row"><label>Vorhandenen Schlüssel importieren</label><input class="key-input"><button class="btn btn-secondary">Online importieren</button></div></section>';
-    const rows = [...document.querySelectorAll('.online-backup-key-row')];
-    return rows.map(row => {
-      const label = row.querySelector('label').getBoundingClientRect();
-      const input = row.querySelector('input').getBoundingClientRect();
-      const button = row.querySelector('button').getBoundingClientRect();
-      return { labelWidth: label.width, inputLeft: input.left, buttonRight: button.right };
-    });
+    const measure = language => {
+      const copy = language === 'de' ? 'Schlüssel kopieren' : 'Copy key';
+      const remove = language === 'de' ? 'Online-Backup löschen' : 'Delete online backup';
+      document.documentElement.lang = language;
+      document.body.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><h4>Managed</h4><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22.08.2026 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article><article class="online-backup-managed-row"><span class="online-backup-managed-key">ZYXWVUTS…9876</span><span class="online-backup-managed-created">21.08.2026 11:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
+      const panel = document.querySelector('.online-backup-panel');
+      const panelRect = panel.getBoundingClientRect();
+      const panelStyle = getComputedStyle(panel);
+      const rows = [...document.querySelectorAll('.online-backup-managed-row')].map(row => {
+        const key = row.querySelector('.online-backup-managed-key').getBoundingClientRect();
+        const created = row.querySelector('.online-backup-managed-created').getBoundingClientRect();
+        const actions = row.querySelector('.online-backup-managed-actions').getBoundingClientRect();
+        return { keyLeft: key.left, createdLeft: created.left, actionsRight: actions.right };
+      });
+      return {
+        rows,
+        contentRight: panelRect.right - parseFloat(panelStyle.paddingRight),
+        createRight: document.querySelector('.online-backup-footer button').getBoundingClientRect().right
+      };
+    };
+    return { german: measure('de'), english: measure('en') };
+  })()`;
+  const onlineBackupNarrowLayoutScript = `(() => {
+    document.body.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22/08/2026, 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">Copy key</button><button class="btn btn-danger">Delete online backup</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
+    const row = document.querySelector('.online-backup-managed-row').getBoundingClientRect();
+    const key = document.querySelector('.online-backup-managed-key').getBoundingClientRect();
+    const created = document.querySelector('.online-backup-managed-created').getBoundingClientRect();
+    const actions = document.querySelector('.online-backup-managed-actions').getBoundingClientRect();
+    const rowStyle = getComputedStyle(document.querySelector('.online-backup-managed-row'));
+    const rowContentWidth = row.width - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight) - parseFloat(rowStyle.borderLeftWidth) - parseFloat(rowStyle.borderRightWidth);
+    const footer = document.querySelector('.online-backup-footer').getBoundingClientRect();
+    const create = document.querySelector('.online-backup-footer button').getBoundingClientRect();
+    return {
+      horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+      rowOverflow: document.querySelector('.online-backup-managed-row').scrollWidth > document.querySelector('.online-backup-managed-row').clientWidth + 1,
+      stacked: key.top < created.top && created.top < actions.top,
+      actionsStretched: Math.abs(actions.width - rowContentWidth) <= 1,
+      createStretched: Math.abs(create.width - footer.width) <= 1
+    };
   })()`;
   const probeSource = `
 const { app, BrowserWindow, screen } = require('electron');
@@ -115,7 +208,11 @@ app.whenReady().then(async () => {
   const middleY = Math.floor(size.height / 2);
   await window.loadFile(process.env.MHU_RENDERER_PATH, { query: { language: 'en', version: '2.1.31' } });
   const liveSpeedChart = await window.webContents.executeJavaScript('({ baselinePresent: Boolean(document.querySelector(".upload-speed-baseline")), canvasWidth: document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect().width || 0 })');
+  const onlineBackupBehavior = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupBehaviorScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
+  window.setContentSize(760, Math.min(900, display.workAreaSize.height));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const onlineBackupNarrowLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupNarrowLayoutScript)});
   fs.writeFileSync(outputPath, JSON.stringify({
     size,
     dom,
@@ -127,7 +224,9 @@ app.whenReady().then(async () => {
     leftEdge: pixelAt(bitmap, size.width, 0, middleY),
     rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY),
     liveSpeedChart,
-    onlineBackupLayout
+    onlineBackupBehavior,
+    onlineBackupLayout,
+    onlineBackupNarrowLayout
   }), 'utf8');
   window.destroy();
   app.exit(0);
@@ -167,10 +266,43 @@ app.whenReady().then(async () => {
     assert.ok(result.rightEdge[0] > result.rightEdge[1] && result.rightEdge[2] > result.rightEdge[1]);
     assert.ok(result.liveSpeedChart.canvasWidth > 0);
     assert.equal(result.liveSpeedChart.baselinePresent, false);
-    assert.equal(result.onlineBackupLayout.length, 2);
-    assert.ok(Math.abs(result.onlineBackupLayout[0].labelWidth - result.onlineBackupLayout[1].labelWidth) <= 1);
-    assert.ok(Math.abs(result.onlineBackupLayout[0].inputLeft - result.onlineBackupLayout[1].inputLeft) <= 1);
-    assert.ok(Math.abs(result.onlineBackupLayout[0].buttonRight - result.onlineBackupLayout[1].buttonRight) <= 1);
+    assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
+    assert.equal(result.onlineBackupBehavior.secretRejected, true);
+    assert.equal(result.onlineBackupBehavior.pendingDeleteControlsDisabled, true);
+    assert.deepEqual(result.onlineBackupBehavior.afterDelete, ['MHU2-ABCD…1234']);
+    assert.equal(result.onlineBackupBehavior.afterCreate[0], 'MHU2-QWER…4321');
+    assert.equal(result.onlineBackupBehavior.afterCreate.length, 3);
+    assert.deepEqual(result.onlineBackupBehavior.confirmation, {
+      title: 'Online-Backup löschen',
+      message: 'Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.',
+      confirmText: 'Löschen',
+      danger: true
+    });
+    assert.deepEqual(result.onlineBackupBehavior.calls, [
+      ['list'],
+      ['copy', 'BBBBBBBBBBBBBBBBBBBBBB'],
+      ['delete', 'BBBBBBBBBBBBBBBBBBBBBB'],
+      ['list'],
+      ['create']
+    ]);
+    assert.deepEqual(result.onlineBackupBehavior.stateFields, ['createdAt', 'displayKey', 'id']);
+    assert.equal(result.onlineBackupBehavior.secretInBody, false);
+    assert.ok(Math.abs(result.onlineBackupLayout.german.createRight - result.onlineBackupLayout.german.contentRight) <= 1);
+    assert.ok(Math.abs(result.onlineBackupLayout.english.createRight - result.onlineBackupLayout.english.contentRight) <= 1);
+    for (const layout of [result.onlineBackupLayout.german, result.onlineBackupLayout.english]) {
+      assert.equal(layout.rows.length, 2);
+      assert.ok(Math.abs(layout.rows[0].keyLeft - layout.rows[1].keyLeft) <= 1);
+      assert.ok(Math.abs(layout.rows[0].createdLeft - layout.rows[1].createdLeft) <= 1);
+      assert.ok(Math.abs(layout.rows[0].actionsRight - layout.rows[1].actionsRight) <= 1);
+    }
+    assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].keyLeft - result.onlineBackupLayout.english.rows[0].keyLeft) <= 1);
+    assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].createdLeft - result.onlineBackupLayout.english.rows[0].createdLeft) <= 1);
+    assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].actionsRight - result.onlineBackupLayout.english.rows[0].actionsRight) <= 1);
+    assert.equal(result.onlineBackupNarrowLayout.horizontalOverflow, false);
+    assert.equal(result.onlineBackupNarrowLayout.rowOverflow, false);
+    assert.equal(result.onlineBackupNarrowLayout.stacked, true);
+    assert.equal(result.onlineBackupNarrowLayout.actionsStretched, true);
+    assert.equal(result.onlineBackupNarrowLayout.createStretched, true);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
   }

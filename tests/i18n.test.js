@@ -23,6 +23,23 @@ test('translates compact online backup labels in both directions', () => {
   assert.equal(translateText('Import existing key', 'de'), 'Schlüssel importieren');
 });
 
+test('translates managed online backup controls in both directions', () => {
+  const pairs = [
+    ['Auf diesem Gerät erstellt', 'Created on this device'],
+    ['Noch keine Schlüssel auf diesem Gerät erstellt.', 'No keys have been created on this device yet.'],
+    ['Schlüssel kopieren', 'Copy key'],
+    ['Online-Backup löschen', 'Delete online backup'],
+    ['Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.', 'This encrypted online backup will be permanently deleted from the server.'],
+    ['Schlüssel gelöscht', 'Key deleted'],
+    ['Importieren', 'Import']
+  ];
+
+  for (const [german, english] of pairs) {
+    assert.equal(translateText(german, 'en'), english);
+    assert.equal(translateText(english, 'de'), german);
+  }
+});
+
 test('translates the account check timestamp label', () => {
   assert.equal(translateText('geprüft', 'en'), 'checked');
   assert.equal(translateText('checked', 'de'), 'geprüft');

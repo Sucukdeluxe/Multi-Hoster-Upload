@@ -61,8 +61,41 @@ const initialIpcHandlers = new Map();
 const registerIpcHandler = ipcMain.handle.bind(ipcMain);
 let initialConfigReadDelayed = false;
 let startupLanguagePendingSnapshot = null;
+let managedOnlineBackupEntries = [
+  { id: 'AAAAAAAAAAAAAAAAAAAAAA', displayKey: 'MHU2-ABCD…1234', createdAt: '2026-08-20T08:00:00.000Z' },
+  { id: 'BBBBBBBBBBBBBBBBBBBBBB', displayKey: 'MHU2-ZYXW…9876', createdAt: '2026-08-22T10:00:00.000Z' }
+];
+const managedOnlineBackupCopyIds = [];
+const managedOnlineBackupDeleteIds = [];
+let managedOnlineBackupCreateCalls = 0;
+let managedOnlineBackupDeleteMode = 'failure';
+let releaseManagedOnlineBackupDelete = null;
+const managedOnlineBackupHandlers = {
+  'online-backup:list-managed': async () => ({ ok: true, entries: managedOnlineBackupEntries.map(entry => ({ ...entry })) }),
+  'online-backup:create-managed': async () => {
+    managedOnlineBackupCreateCalls++;
+    const entry = { id: 'CCCCCCCCCCCCCCCCCCCCCC', displayKey: 'MHU2-QWER…4321', createdAt: '2026-08-23T12:00:00.000Z' };
+    managedOnlineBackupEntries = [...managedOnlineBackupEntries, entry];
+    return { ok: true, entry: { ...entry } };
+  },
+  'online-backup:copy-managed': async (_event, id) => {
+    managedOnlineBackupCopyIds.push(id);
+    return { ok: true };
+  },
+  'online-backup:delete-managed': async (_event, id) => {
+    managedOnlineBackupDeleteIds.push(id);
+    if (managedOnlineBackupDeleteMode === 'failure') return { ok: false, error: 'Online-Sicherung konnte nicht gelöscht werden' };
+    return new Promise(resolve => {
+      releaseManagedOnlineBackupDelete = () => {
+        managedOnlineBackupEntries = managedOnlineBackupEntries.filter(entry => entry.id !== id);
+        releaseManagedOnlineBackupDelete = null;
+        resolve({ ok: true, removedId: id, notFound: false });
+      };
+    });
+  }
+};
 ipcMain.handle = (channel, listener) => {
-  const registeredListener = channel === 'get-config'
+  const defaultListener = channel === 'get-config'
     ? async (...args) => {
         const result = await listener(...args);
         if (!initialConfigReadDelayed) {
@@ -86,6 +119,7 @@ ipcMain.handle = (channel, listener) => {
         return result;
       }
     : listener;
+  const registeredListener = managedOnlineBackupHandlers[channel] || defaultListener;
   if (!initialIpcHandlers.has(channel)) initialIpcHandlers.set(channel, registeredListener);
   return registerIpcHandler(channel, registeredListener);
 };
@@ -1371,17 +1405,47 @@ setTimeout(async () => {
     check('Global parallel uploads default 0', parallel === '0');
 
     await wc.executeJavaScript('document.querySelector("[data-settings-page=\\'backup\\']")?.click()');
-    const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "onlineBackupKeyOutput", "copyOnlineBackupKeyBtn", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id)))');
+    const onlineBackupControls = await wc.executeJavaScript('["createOnlineBackupBtn", "managedOnlineBackupHeading", "managedOnlineBackupList", "onlineBackupKeyInput", "restoreOnlineBackupBtn", "onlineBackupStatus"].every(id => Boolean(document.getElementById(id))) && !document.getElementById("onlineBackupKeyOutput") && !document.getElementById("copyOnlineBackupKeyBtn")');
     check('Online backup controls exist', onlineBackupControls);
 
     const onlineBackupKeyContract = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput")?.maxLength + "|" + document.getElementById("onlineBackupKeyInput")?.getAttribute("pattern")');
     check('Online backup input enforces the 75-character MHU key format', onlineBackupKeyContract === '75|MHU2-[A-Za-z0-9_-]{70}');
 
-    const onlineBackupBridge = await wc.executeJavaScript('["listManagedOnlineBackups", "createManagedOnlineBackup", "copyManagedOnlineBackup", "deleteManagedOnlineBackup"].map(name => typeof window.api[name]).join("|")');
-    check('Online backup uses a narrow managed preload bridge', onlineBackupBridge === 'function|function|function|function');
+    const onlineBackupBridge = await wc.executeJavaScript('["listManagedOnlineBackups", "createManagedOnlineBackup", "copyManagedOnlineBackup", "deleteManagedOnlineBackup", "restoreOnlineBackup", "createOnlineBackup"].map(name => typeof window.api[name]).join("|")');
+    check('Online backup uses a narrow managed preload bridge', onlineBackupBridge === 'function|function|function|function|function|undefined');
 
-    const managedOnlineBackupCopyResult = await wc.executeJavaScript('window.api.copyManagedOnlineBackup("AAAAAAAAAAAAAAAAAAAAAA").then(result => JSON.stringify(result))');
-    check('Managed online backup copy never returns a complete key', !managedOnlineBackupCopyResult.includes('MHU2-'));
+    const managedOnlineBackupLoaded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 2'));
+    const managedOnlineBackupInitialState = await wc.executeJavaScript('(() => ({ keys: [...document.querySelectorAll(".online-backup-managed-key")].map(element => element.textContent), secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Managed online backups render newest first without a complete key in the DOM', managedOnlineBackupLoaded === true && managedOnlineBackupInitialState.keys.join('|') === 'MHU2-ZYXW…9876|MHU2-ABCD…1234' && managedOnlineBackupInitialState.secretInBody === false);
+
+    await wc.executeJavaScript('document.querySelector(".online-backup-managed-row .online-backup-copy-btn").click()');
+    await waitUntil(() => managedOnlineBackupCopyIds.length === 1);
+    check('Managed online backup copy passes only the selected sanitized entry ID', managedOnlineBackupCopyIds.length === 1 && managedOnlineBackupCopyIds[0] === 'BBBBBBBBBBBBBBBBBBBBBB');
+
+    await wc.executeJavaScript('document.querySelector(".online-backup-managed-row .online-backup-delete-btn").click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
+    const managedDeleteConfirmation = await wc.executeJavaScript('(() => ({ danger: document.getElementById("appAlertConfirmBtn").classList.contains("btn-danger"), message: document.getElementById("appAlertMessage").textContent }))()');
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
+    await waitUntil(() => managedOnlineBackupDeleteIds.length === 1);
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("onlineBackupStatus")?.textContent === "Online-Sicherung konnte nicht gelöscht werden"'));
+    const managedDeleteFailureState = await wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length');
+    check('Managed online backup deletion uses danger confirmation and preserves rows on failure', managedDeleteConfirmation.danger === true && managedDeleteConfirmation.message === 'Dieses verschlüsselte Online-Backup wird dauerhaft vom Server gelöscht.' && managedDeleteFailureState === 2);
+
+    managedOnlineBackupDeleteMode = 'success';
+    await wc.executeJavaScript('document.querySelector(".online-backup-managed-row .online-backup-delete-btn").click()');
+    await waitUntil(() => wc.executeJavaScript('document.getElementById("appAlertModal").style.display === "flex"'));
+    await wc.executeJavaScript('document.getElementById("appAlertConfirmBtn").click()');
+    await waitUntil(() => typeof releaseManagedOnlineBackupDelete === 'function');
+    const managedDeletePendingState = await wc.executeJavaScript('(() => { const row = document.querySelector(".online-backup-managed-row"); return { count: document.querySelectorAll(".online-backup-managed-row").length, controlsDisabled: [...row.querySelectorAll("button")].every(button => button.disabled) }; })()');
+    releaseManagedOnlineBackupDelete();
+    const managedDeleteSucceeded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 1'));
+    const managedDeleteSuccessState = await wc.executeJavaScript('(() => ({ key: document.querySelector(".online-backup-managed-key")?.textContent, status: document.getElementById("onlineBackupStatus")?.textContent, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Managed online backup row disappears only after successful deletion', managedDeletePendingState.count === 2 && managedDeletePendingState.controlsDisabled === true && managedDeleteSucceeded === true && managedDeleteSuccessState.key === 'MHU2-ABCD…1234' && managedDeleteSuccessState.status === 'Schlüssel gelöscht' && managedDeleteSuccessState.secretInBody === false);
+
+    await wc.executeJavaScript('document.getElementById("createOnlineBackupBtn").click()');
+    const managedCreateSucceeded = await waitUntil(() => wc.executeJavaScript('document.querySelectorAll(".online-backup-managed-row").length === 2'));
+    const managedCreateState = await wc.executeJavaScript('(() => ({ first: document.querySelector(".online-backup-managed-key")?.textContent, secretInBody: /MHU2-[A-Za-z0-9_-]{70}/.test(document.body.textContent) }))()');
+    check('Creating a managed online backup inserts the returned sanitized entry newest first', managedOnlineBackupCreateCalls === 1 && managedCreateSucceeded === true && managedCreateState.first === 'MHU2-QWER…4321' && managedCreateState.secretInBody === false);
 
     const invalidOnlineBackup = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput").value = "MHU2-short"; document.getElementById("onlineBackupKeyInput").dispatchEvent(new Event("input", { bubbles: true })); document.getElementById("restoreOnlineBackupBtn").disabled + "|" + document.getElementById("onlineBackupStatus").textContent');
     check('Invalid online backup keys stay blocked with visible guidance', invalidOnlineBackup === 'true|Der Schlüssel muss exakt 75 Zeichen lang sein.');
@@ -2485,7 +2549,7 @@ setTimeout(async () => {
     check('Minimum Accounts keeps auto-check reachable and content contained', minimumResponsiveContract.autoCheckVisible && minimumResponsiveContract.accountsMainFits);
     check('Minimum Uploads preserves availability and telemetry information', minimumResponsiveContract.telemetryVisible && minimumResponsiveContract.availabilityVisible);
 
-    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "\\\\n\\\\n\\\\n## What\'s new\\\\n\\\\n\\\\n### Menus and navigation\\\\n\\\\n- Added live language switching.\\\\n- Improved settings layout.\\\\n\\\\n\\\\n" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
+    const updateOverlayState = await wc.executeJavaScript('_knownUpdateInfo = { available: true, remoteVersion: "9.9.9" }; _syncHeaderUpdateState(); document.getElementById("headerUpdateBtn").focus(); showUpdateBanner({ remoteVersion: "9.9.9", releaseNotes: "\\\\n\\\\n\\\\n## What\\'s new\\\\n\\\\n\\\\n### Menus and navigation\\\\n\\\\n- Added live language switching.\\\\n- Improved settings layout.\\\\n\\\\n\\\\n" }); (() => { const overlay = document.getElementById("updateBanner"); const dialog = overlay?.querySelector(".update-dialog"); const button = document.getElementById("headerUpdateBtn"); return [overlay?.classList.contains("update-overlay"), overlay?.style.display, dialog?.getAttribute("role"), dialog?.getAttribute("aria-modal"), button?.hidden, getComputedStyle(button).display].join("|"); })()');
     check('Available update opens an accessible update dialog', updateOverlayState === 'true|flex|dialog|true|false|flex');
 
     await new Promise(resolve => setTimeout(resolve, 100));
