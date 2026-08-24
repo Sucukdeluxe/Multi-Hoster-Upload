@@ -1389,8 +1389,8 @@ setTimeout(async () => {
       fs.writeFileSync(process.env.MHU_SETTINGS_SCREENSHOT, screenshot.toPNG());
     }
 
-    const settingsSearchState = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); if (!search) return "missing"; search.value = "fertig"; search.dispatchEvent(new Event("input", { bubbles: true })); const visible = [...document.querySelectorAll(".settings-nav-button")].filter(button => !button.hidden); return [visible.map(button => button.dataset.settingsPage).join(","), document.querySelector(".settings-nav-button.active")?.dataset.settingsPage].join("|"); })()');
-    check('Settings search routes completion terms to Uploads first', settingsSearchState === 'uploads,benachrichtigungen|uploads');
+    const settingsSearchState = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); if (!search) return "missing"; search.value = "erfolgreich löschen"; search.dispatchEvent(new Event("input", { bubbles: true })); const result = document.querySelector(".settings-search-result"); return [document.querySelector(".settings-navigation").hidden, document.getElementById("settingsSearchResults").hidden, result?.textContent.trim(), [...(result?.querySelectorAll("mark") || [])].map(mark => mark.textContent.toLowerCase()).join(",")].join("|"); })()');
+    check('Settings search shows a highlighted breadcrumb for the matching setting', settingsSearchState === 'true|false|Uploads → Quelldateien → Nach erfolgreichem Upload löschen|erfolgreich,löschen');
 
     const settingsSearchRecovery = await wc.executeJavaScript('(() => { const search = document.getElementById("settingsSearchInput"); search.value = "kein-passender-treffer"; search.dispatchEvent(new Event("input", { bubbles: true })); const emptyVisible = !document.getElementById("settingsSearchEmpty").hidden; search.value = ""; search.dispatchEvent(new Event("input", { bubbles: true })); return [emptyVisible, document.querySelector(".settings-subpage.active")?.dataset.subpage, document.getElementById("settingsSearchEmpty").hidden].join("|"); })()');
     check('Clearing an empty settings search restores the current page', settingsSearchRecovery === 'true|uploads|true');
@@ -2054,15 +2054,15 @@ setTimeout(async () => {
       const inspect = value => {
         search.value = value;
         search.dispatchEvent(new Event('input', { bubbles: true }));
-        return [...document.querySelectorAll('.settings-nav-button')].filter(button => !button.hidden).map(button => button.dataset.settingsPage);
+        return [...document.querySelectorAll('.settings-search-result-path')].map(element => element.textContent.trim());
       };
       const notifications = inspect('notifications');
-      const windowSettings = inspect('window');
+      const windowSettings = inspect('always on top');
       search.value = '';
       search.dispatchEvent(new Event('input', { bubbles: true }));
       return { notifications, windowSettings };
     })()\`);
-    check('English settings search finds localized concepts', englishSettingsSearch.notifications.includes('benachrichtigungen') && englishSettingsSearch.windowSettings.includes('allgemein'));
+    check('English settings search finds localized concepts', englishSettingsSearch.notifications.some(path => path.startsWith('Notifications →')) && englishSettingsSearch.windowSettings.some(path => path.startsWith('General →')));
 
     const productNaming = await wc.executeJavaScript(\`(() => ({
       title: document.title,

@@ -1060,6 +1060,65 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   color: var(--text);
 }
 .settings-nav-button[hidden] { display: none; }
+.settings-navigation[hidden],
+.settings-search-results[hidden] { display: none; }
+.settings-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.settings-search-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.settings-search-result-item { display: block; }
+.settings-search-result {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-search-result:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-card-hover);
+  color: var(--text);
+}
+.settings-search-result-path {
+  display: block;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.settings-search-result-separator { color: var(--text-dim); }
+.settings-search-result mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--text);
+  font-weight: 700;
+}
+.settings-search-target-highlight {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-card));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 72%, transparent);
+  transition: background-color .2s ease, box-shadow .2s ease;
+}
 .settings-search-empty { margin: 4px; color: var(--text-dim); font-size: 11px; line-height: 1.45; }
 .settings-content {
   min-width: 0;
@@ -1828,6 +1887,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .settings-search-target-highlight { transition: none; }
   *, *::before, *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;

@@ -53,6 +53,12 @@ test('translates the account check timestamp label', () => {
   assert.equal(translateText('checked', 'de'), 'geprüft');
 });
 
+test('translates settings search result labels in both directions', () => {
+  assert.equal(translateText('Nach erfolgreichem Upload löschen', 'en'), 'Delete after successful upload');
+  assert.equal(translateText('Delete after successful upload', 'de'), 'Nach erfolgreichem Upload löschen');
+  assert.equal(translateText('Suchergebnisse', 'en'), 'Search results');
+});
+
 test('translates account cooldown and manual pause labels', () => {
   const pairs = [
     ['Pausiert – noch', 'Paused –'],

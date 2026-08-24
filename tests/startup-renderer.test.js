@@ -96,6 +96,9 @@ contextBridge.exposeInMainWorld('api', {
   onUpdateProgress() {},
   onPrepareClose() {},
   getConfig() { return new Promise(() => {}); },
+  remoteStatus() { return Promise.resolve({ running: false, port: 0, clientCount: 0 }); },
+  diagnosticsStatus() { return Promise.resolve({ running: false }); },
+  diagnosticsGetSettings() { return Promise.resolve({}); },
   listManagedOnlineBackups() {
     managedOnlineBackupListIndex++;
     managedOnlineBackupProbeCalls.push(['list', managedOnlineBackupListIndex]);
@@ -187,6 +190,76 @@ contextBridge.exposeInMainWorld('api', {
     sessionFilesData = [];
     rebuildJobIndex();
     return { safeFocus, safeResult, removalFocus, removalEnterResult, cancelFocusedEnter, cancelResult, removalCalls };
+  })()`;
+  const settingsSearchBehaviorScript = `(async () => {
+    setUiLanguage('de');
+    document.querySelector('[data-view="settings"]')?.click();
+    renderSettings();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const search = document.getElementById('settingsSearchInput');
+    search.value = 'erfolgreich löschen';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const resultButtons = [...document.querySelectorAll('.settings-search-result')];
+    const targetResult = resultButtons.find(button => button.textContent.includes('Nach erfolgreichem Upload löschen'));
+    const germanState = {
+      navigationHidden: document.querySelector('.settings-navigation')?.hidden,
+      resultsHidden: document.getElementById('settingsSearchResults')?.hidden,
+      count: resultButtons.length,
+      path: targetResult?.querySelector('.settings-search-result-path')?.textContent.trim(),
+      marks: [...(targetResult?.querySelectorAll('mark') || [])].map(mark => mark.textContent.toLowerCase()),
+      liveStatus: document.getElementById('settingsSearchStatus')?.textContent.trim()
+    };
+    const inspectPaths = value => {
+      search.value = value;
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      return [...document.querySelectorAll('.settings-search-result-path')].map(element => element.textContent.trim());
+    };
+    const updatePaths = inspectPaths('update');
+    const exceptionalPaths = [
+      'schlüssel importieren',
+      'neuen schlüssel erzeugen',
+      'online-backups verwalten',
+      'datei exportieren',
+      'datei importieren'
+    ].map(value => inspectPaths(value));
+    const stableSectionPath = inspectPaths('ordnerpfad')[0];
+    const umlautAliasPath = inspectPaths('loeschen').find(path => path.includes('Nach erfolgreichem Upload löschen'));
+    search.value = 'online-backups verwalten';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('.settings-search-result')?.click();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const managedBackupNavigation = {
+      page: document.querySelector('.settings-subpage.active')?.dataset.subpage,
+      focus: document.activeElement?.id,
+      highlighted: document.querySelector('.online-backup-managed')?.classList.contains('settings-search-target-highlight')
+    };
+    search.value = 'erfolgreich löschen';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('.settings-search-result')?.click();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const navigationState = {
+      page: document.querySelector('.settings-subpage.active')?.dataset.subpage,
+      focus: document.activeElement?.id,
+      highlighted: document.querySelector('.source-delete-option')?.classList.contains('settings-search-target-highlight'),
+      searchValue: search.value,
+      navigationHidden: document.querySelector('.settings-navigation')?.hidden,
+      resultsHidden: document.getElementById('settingsSearchResults')?.hidden
+    };
+    setUiLanguage('en');
+    search.value = 'delete source';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const englishPath = [...document.querySelectorAll('.settings-search-result-path')]
+      .map(element => element.textContent.trim())
+      .find(text => text.includes('Delete after successful upload'));
+    search.value = '';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const clearedState = {
+      page: document.querySelector('.settings-subpage.active')?.dataset.subpage,
+      navigationHidden: document.querySelector('.settings-navigation')?.hidden,
+      resultsHidden: document.getElementById('settingsSearchResults')?.hidden,
+      emptyHidden: document.getElementById('settingsSearchEmpty')?.hidden
+    };
+    return { germanState, updatePaths, exceptionalPaths, stableSectionPath, umlautAliasPath, managedBackupNavigation, navigationState, englishPath, clearedState };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -392,6 +465,7 @@ app.whenReady().then(async () => {
   const liveSpeedChart = await window.webContents.executeJavaScript('({ baselinePresent: Boolean(document.querySelector(".upload-speed-baseline")), canvasWidth: document.getElementById("uploadSpeedCanvas")?.getBoundingClientRect().width || 0 })');
   const appDialogBehavior = await window.webContents.executeJavaScript(${JSON.stringify(appDialogBehaviorScript)});
   const onlineBackupBehavior = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupBehaviorScript)});
+  const settingsSearchBehavior = await window.webContents.executeJavaScript(${JSON.stringify(settingsSearchBehaviorScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   window.setContentSize(760, Math.min(900, display.workAreaSize.height));
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -408,6 +482,7 @@ app.whenReady().then(async () => {
     rightEdge: pixelAt(bitmap, size.width, size.width - 1, middleY),
     liveSpeedChart,
     appDialogBehavior,
+    settingsSearchBehavior,
     onlineBackupBehavior,
     onlineBackupLayout,
     onlineBackupNarrowLayout
@@ -422,20 +497,28 @@ app.whenReady().then(async () => {
   fs.writeFileSync(probePath, probeSource, 'utf8');
   try {
     const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
-    execFileSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
-      cwd: projectRoot,
-      env: {
-        ...process.env,
-        SESSIONNAME: 'RDP-Tcp#12',
-        MHU_RDP_COMPOSITOR_OUTPUT: outputPath,
-        MHU_RENDERER_PATH: path.join(projectRoot, 'renderer', 'index.html'),
-        MHU_PRELOAD_PATH: preloadPath
-      },
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 30000,
-      windowsHide: true
-    });
+    try {
+      execFileSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+        cwd: projectRoot,
+        env: {
+          ...process.env,
+          SESSIONNAME: 'RDP-Tcp#12',
+          MHU_RDP_COMPOSITOR_OUTPUT: outputPath,
+          MHU_RENDERER_PATH: path.join(projectRoot, 'renderer', 'index.html'),
+          MHU_PRELOAD_PATH: preloadPath
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30000,
+        windowsHide: true
+      });
+    } catch (error) {
+      if (fs.existsSync(outputPath)) {
+        const failedResult = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+        assert.fail(failedResult.error || error.message);
+      }
+      throw error;
+    }
     const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
     assert.equal(result.error, undefined);
     assert.doesNotMatch(result.rendererCommandLine, /--disable-gpu-compositing/u);
@@ -463,6 +546,46 @@ app.whenReady().then(async () => {
         { title: 'Uploads entfernen?', defaultAction: 'confirm' },
         { title: 'Alle Uploads entfernen?', defaultAction: 'confirm' }
       ]
+    });
+    assert.deepEqual(result.settingsSearchBehavior, {
+      germanState: {
+        navigationHidden: true,
+        resultsHidden: false,
+        count: 1,
+        path: 'Uploads → Quelldateien → Nach erfolgreichem Upload löschen',
+        marks: ['erfolgreich', 'löschen'],
+        liveStatus: 'Suchergebnisse: 1'
+      },
+      updatePaths: ['Allgemein → Programmupdate → Nach Updates suchen'],
+      exceptionalPaths: [
+        ['Backup & Übertragen → Online-Backup → Schlüssel importieren'],
+        ['Backup & Übertragen → Online-Backup → Neuen Schlüssel erzeugen'],
+        ['Backup & Übertragen → Online-Backup → Online-Backups verwalten'],
+        ['Backup & Übertragen → Lokales Datei-Backup → Datei exportieren'],
+        ['Backup & Übertragen → Lokales Datei-Backup → Datei importieren']
+      ],
+      stableSectionPath: 'Automatik → Ordnerüberwachung → Ordnerpfad',
+      umlautAliasPath: 'Uploads → Quelldateien → Nach erfolgreichem Upload löschen',
+      managedBackupNavigation: {
+        page: 'backup',
+        focus: 'managedOnlineBackupHeading',
+        highlighted: true
+      },
+      navigationState: {
+        page: 'uploads',
+        focus: 'deleteSourceAfterSuccessfulUploadInput',
+        highlighted: true,
+        searchValue: '',
+        navigationHidden: false,
+        resultsHidden: true
+      },
+      englishPath: 'Uploads → Source files → Delete after successful upload',
+      clearedState: {
+        page: 'uploads',
+        navigationHidden: false,
+        resultsHidden: true,
+        emptyHidden: true
+      }
     });
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
     assert.deepEqual(result.onlineBackupBehavior.initialWarning, {

@@ -4914,7 +4914,9 @@ function renderSettings() {
         <span class="settings-nav-indicator" aria-hidden="true"></span>
         ${pageDefinitions.map((definition, index) => `<button class="settings-nav-button${index === 0 ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.search}" aria-current="${index === 0 ? 'page' : 'false'}">${definition.label}</button>`).join('')}
       </nav>
+      <div class="settings-search-results" id="settingsSearchResults" role="list" aria-label="Suchergebnisse" hidden></div>
       <p class="settings-search-empty" id="settingsSearchEmpty" hidden>Keine passende Einstellung gefunden.</p>
+      <span class="settings-search-status" id="settingsSearchStatus" role="status" aria-live="polite"></span>
       <div class="settings-sidebar-status">
         <span class="view-sidebar-section-label">Speicherstatus</span>
         <div class="view-sidebar-summary view-sidebar-summary-block save-feedback" id="saveFeedback" role="status" aria-live="polite">Automatisch gespeichert</div>
@@ -4966,7 +4968,7 @@ function renderSettings() {
         </div>
       </div>
       <div class="settings-section-label">Programmupdate</div>
-      <div class="settings-row program-update-row program-update-card">
+      <div class="settings-row program-update-row program-update-card" data-settings-search-entry data-settings-search-label="Nach Updates suchen">
         <div class="program-update-copy">
           <strong class="program-update-title">Nach neuer Version suchen</strong>
           <span class="program-update-description">Verfügbare Updates werden zusammen mit dem Changelog angezeigt.</span>
@@ -5018,7 +5020,7 @@ function renderSettings() {
         <input type="checkbox" class="settings-autosave" id="autoStartRestoredQueueInput" ${globalSettings.autoStartRestoredQueue ? 'checked' : ''}>
       </div>
       <div class="settings-section-label">Quelldateien</div>
-      <div class="settings-option source-delete-option">
+      <div class="settings-option source-delete-option" data-settings-search-label="Nach erfolgreichem Upload löschen">
         <div class="settings-option-copy">
           <label for="deleteSourceAfterSuccessfulUploadInput">Quelldatei nach vollständigem Upload dauerhaft löschen</label>
           <span class="settings-option-description">Löscht die Originaldatei endgültig, sobald alle dafür ausgewählten Hoster erfolgreich abgeschlossen sind. Der Papierkorb wird nicht verwendet.</span>
@@ -5239,14 +5241,14 @@ function renderSettings() {
           <h3 id="onlineBackupHeading">Verschlüsseltes Online-Backup</h3>
           <p>Die Verschlüsselung findet ausschließlich auf diesem Gerät statt. Der Server speichert nur verschlüsselte Daten.</p>
         </div>
-        <div class="online-backup-key-row">
+        <div class="online-backup-key-row" data-settings-search-entry data-settings-search-section="Online-Backup">
           <label for="onlineBackupKeyInput">Schlüssel importieren</label>
           <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
           <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Importieren</button>
         </div>
         <p class="online-backup-warning">Behandle den Schlüssel wie ein Passwort. Wer ihn besitzt, kann die verschlüsselten Einstellungen entschlüsseln.</p>
-        <section class="online-backup-managed" aria-labelledby="managedOnlineBackupHeading">
-          <h4 id="managedOnlineBackupHeading">Auf diesem Gerät erstellt</h4>
+        <section class="online-backup-managed" aria-labelledby="managedOnlineBackupHeading" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Online-Backups verwalten" data-settings-search-control="managedOnlineBackupHeading">
+          <h4 id="managedOnlineBackupHeading" tabindex="-1">Auf diesem Gerät erstellt</h4>
           <div class="online-backup-managed-list" id="managedOnlineBackupList"></div>
           <div class="online-backup-refresh-status" id="managedOnlineBackupRefreshStatus" role="status" hidden>
             <span id="managedOnlineBackupRefreshMessage"></span>
@@ -5254,7 +5256,7 @@ function renderSettings() {
           </div>
         </section>
         <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
-        <footer class="online-backup-footer">
+        <footer class="online-backup-footer" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Neuen Schlüssel erzeugen">
           <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
         </footer>
       </section>
@@ -5271,8 +5273,8 @@ function renderSettings() {
         <input type="password" class="key-input" id="localBackupPasswordConfirmInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort wiederholen">
       </div>
       <div class="backup-file-actions">
-        <button class="btn btn-secondary" id="exportBackupBtn">Datei exportieren</button>
-        <button class="btn btn-secondary" id="importBackupBtn">Datei importieren</button>
+        <button class="btn btn-secondary" id="exportBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei exportieren">Datei exportieren</button>
+        <button class="btn btn-secondary" id="importBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei importieren">Datei importieren</button>
       </div>
   `;
 
@@ -5295,6 +5297,182 @@ function renderSettings() {
     if (target === 'backup') loadManagedOnlineBackups();
   };
 
+  const normalizeSettingsSearchText = (value) => String(value || '')
+    .normalize('NFKD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLocaleLowerCase(getUiLocale())
+    .replace(/ß/gu, 'ss')
+    .replace(/ae/gu, 'a')
+    .replace(/oe/gu, 'o')
+    .replace(/ue/gu, 'u');
+  const stableSettingsSectionLabel = (element) => {
+    const clone = element.cloneNode(true);
+    clone.querySelectorAll('.panel-status').forEach(status => status.remove());
+    return clone.textContent.trim();
+  };
+  const searchEntries = [];
+  pageDefinitions.forEach((definition) => {
+    const page = pages[definition.id];
+    let section = definition.label;
+    let entryIndex = 0;
+    page.querySelectorAll('.settings-section-label, .settings-row, .settings-option, [data-settings-search-entry]').forEach((element) => {
+      if (element.classList.contains('settings-section-label')) {
+        section = stableSettingsSectionLabel(element);
+        return;
+      }
+      const explicitEntry = element.hasAttribute('data-settings-search-entry');
+      if (!explicitEntry && element.closest('.settings-row, .settings-option') !== element) return;
+      const label = element.querySelector('label');
+      const sourceTitle = element.dataset.settingsSearchLabel || label?.textContent.trim() || element.textContent.trim();
+      if (!sourceTitle) return;
+      const sourceDescription = element.querySelector('.settings-option-description, .hint')?.textContent.trim() || '';
+      const sourceSection = element.dataset.settingsSearchSection || section;
+      const englishTitle = window.I18n.translateText(sourceTitle, 'en');
+      const englishDescription = window.I18n.translateText(sourceDescription, 'en');
+      const englishSection = window.I18n.translateText(sourceSection, 'en');
+      const englishPage = window.I18n.translateText(definition.label, 'en');
+      const targetControl = element.dataset.settingsSearchControl
+        ? document.getElementById(element.dataset.settingsSearchControl)
+        : (label?.htmlFor
+          ? document.getElementById(label.htmlFor)
+          : (element.matches('input, select, textarea, button') ? element : element.querySelector('input, select, textarea, button')));
+      if (!element.id) element.id = `settings-search-target-${definition.id}-${entryIndex++}`;
+      searchEntries.push({
+        pageId: definition.id,
+        pageLabel: definition.label,
+        section: sourceSection,
+        title: sourceTitle,
+        targetElement: element,
+        targetControl,
+        searchText: normalizeSettingsSearchText([
+          definition.label,
+          sourceSection,
+          sourceTitle,
+          sourceDescription,
+          englishPage,
+          englishSection,
+          englishTitle,
+          englishDescription
+        ].join(' '))
+      });
+    });
+  });
+
+  const appendSettingsSearchHighlight = (container, text, tokens) => {
+    const source = String(text || '');
+    const normalizedTokens = tokens.map(normalizeSettingsSearchText).filter(Boolean);
+    if (normalizedTokens.length === 0) {
+      container.append(source);
+      return;
+    }
+    let normalizedSource = '';
+    const sourceRanges = [];
+    for (let offset = 0; offset < source.length;) {
+      const character = String.fromCodePoint(source.codePointAt(offset));
+      const end = offset + character.length;
+      const normalizedCharacter = normalizeSettingsSearchText(character);
+      normalizedSource += normalizedCharacter;
+      for (let index = 0; index < normalizedCharacter.length; index++) sourceRanges.push({ start: offset, end });
+      offset = end;
+    }
+    const matches = [];
+    for (const token of normalizedTokens) {
+      let start = 0;
+      while (start < normalizedSource.length) {
+        const index = normalizedSource.indexOf(token, start);
+        if (index < 0) break;
+        const first = sourceRanges[index];
+        const last = sourceRanges[index + token.length - 1];
+        if (first && last) matches.push({ start: first.start, end: last.end });
+        start = index + Math.max(1, token.length);
+      }
+    }
+    matches.sort((left, right) => left.start - right.start || left.end - right.end);
+    const merged = [];
+    for (const match of matches) {
+      const previous = merged.at(-1);
+      if (previous && match.start <= previous.end) previous.end = Math.max(previous.end, match.end);
+      else merged.push({ ...match });
+    }
+    let cursor = 0;
+    for (const match of merged) {
+      if (match.start > cursor) container.append(source.slice(cursor, match.start));
+      if (match.end > match.start) {
+        const mark = document.createElement('mark');
+        mark.textContent = source.slice(match.start, match.end);
+        container.appendChild(mark);
+      }
+      cursor = Math.max(cursor, match.end);
+    }
+    if (cursor < source.length) container.append(source.slice(cursor));
+  };
+
+  const showSettingsNavigation = () => {
+    navigation.hidden = false;
+    layout.querySelector('#settingsSearchResults').hidden = true;
+    layout.querySelector('#settingsSearchEmpty').hidden = true;
+    _syncSidebarIndicator(navigation.querySelector('.settings-nav-button.active'), true);
+  };
+
+  const openSettingsSearchEntry = (entry) => {
+    searchInput.value = '';
+    showSettingsNavigation();
+    activateSettingsPage(entry.pageId);
+    requestAnimationFrame(() => {
+      const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+      entry.targetElement.scrollIntoView({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
+      entry.targetElement.classList.remove('settings-search-target-highlight');
+      entry.targetElement.classList.add('settings-search-target-highlight');
+      entry.targetControl?.focus({ preventScroll: true });
+      setTimeout(() => entry.targetElement.classList.remove('settings-search-target-highlight'), 1800);
+    });
+  };
+
+  const renderSettingsSearchResults = (query) => {
+    const results = layout.querySelector('#settingsSearchResults');
+    const empty = layout.querySelector('#settingsSearchEmpty');
+    const status = layout.querySelector('#settingsSearchStatus');
+    const rawTokens = query.trim().split(/\s+/u).filter(Boolean);
+    const normalizedTokens = rawTokens.map(normalizeSettingsSearchText);
+    if (normalizedTokens.length === 0) {
+      results.replaceChildren();
+      status.textContent = '';
+      showSettingsNavigation();
+      return;
+    }
+    const matches = searchEntries.filter(entry => normalizedTokens.every(token => entry.searchText.includes(token)));
+    navigation.hidden = true;
+    results.hidden = matches.length === 0;
+    empty.hidden = matches.length > 0;
+    status.textContent = `${localizeUiText('Suchergebnisse:')} ${matches.length}`;
+    results.replaceChildren();
+    for (const entry of matches) {
+      const item = document.createElement('div');
+      item.className = 'settings-search-result-item';
+      item.setAttribute('role', 'listitem');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'settings-search-result';
+      const path = document.createElement('span');
+      path.className = 'settings-search-result-path';
+      const segments = [entry.pageLabel, entry.section, entry.title].map(localizeUiText);
+      segments.forEach((segment, index) => {
+        if (index > 0) {
+          const separator = document.createElement('span');
+          separator.className = 'settings-search-result-separator';
+          separator.textContent = ' → ';
+          separator.setAttribute('aria-hidden', 'true');
+          path.appendChild(separator);
+        }
+        appendSettingsSearchHighlight(path, segment, rawTokens);
+      });
+      button.appendChild(path);
+      button.addEventListener('click', () => openSettingsSearchEntry(entry));
+      item.appendChild(button);
+      results.appendChild(item);
+    }
+  };
+
   navigation.addEventListener('click', (event) => {
     const button = event.target.closest('[data-settings-page]');
     if (button) activateSettingsPage(button.dataset.settingsPage);
@@ -5315,28 +5493,8 @@ function renderSettings() {
   });
 
   const searchInput = layout.querySelector('#settingsSearchInput');
-  const searchEmpty = layout.querySelector('#settingsSearchEmpty');
   searchInput.addEventListener('input', () => {
-    const query = searchInput.value.trim().toLocaleLowerCase(getUiLocale());
-    const visibleButtons = [];
-    navigation.querySelectorAll('.settings-nav-button').forEach((button) => {
-      const visible = !query || button.dataset.search.includes(query);
-      button.hidden = !visible;
-      if (visible) visibleButtons.push(button);
-    });
-    searchEmpty.hidden = visibleButtons.length > 0;
-    const activeButton = navigation.querySelector('.settings-nav-button.active');
-    if (visibleButtons.length === 0) {
-      Object.values(pages).forEach((page) => page.classList.remove('active'));
-      const indicator = navigation.querySelector('.settings-nav-indicator');
-      if (indicator) indicator.hidden = true;
-      return;
-    }
-    if (!activeButton || activeButton.hidden || !content.querySelector('.settings-subpage.active')) {
-      activateSettingsPage((activeButton && !activeButton.hidden ? activeButton : visibleButtons[0]).dataset.settingsPage);
-    } else {
-      _syncSidebarIndicator(activeButton, true);
-    }
+    renderSettingsSearchResults(searchInput.value);
   });
 
   _renderLogPathsList(document.getElementById('logPathsList'));
