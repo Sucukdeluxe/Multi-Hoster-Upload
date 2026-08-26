@@ -846,6 +846,49 @@ contextBridge.exposeInMainWorld('api', {
       queueLimited: statusSnapshot.queueLimited,
       frozen: Object.isFrozen(statusSnapshot) && Object.isFrozen(statusSnapshot.telemetry)
     };
+    configureAtomicState(14998);
+    config.globalSettings.folderMonitor.autoStart = true;
+    config.globalSettings.folderMonitor.telemetry = {
+      dateKey: new Date().toLocaleDateString('en-CA'),
+      detected: 0,
+      queued: 0,
+      skipped: 0,
+      deferred: 0
+    };
+    window.api.configureAutomationProbe({ paused: false, runtimeStatus: { running: true, reachable: true, folderPath: 'C:\\watch' } });
+    const zeroAdmissionFile = { path: 'C:\\watch\\four-targets.mkv', name: 'four-targets.mkv', size: 1024 * 1024, mtimeMs: 1 };
+    const zeroAdmissionEvaluation = await evaluateAutomationCandidates([zeroAdmissionFile], { dryRun: false, trigger: 'watcher' });
+    const zeroAdmissionResult = await applyAutomationEvaluation(zeroAdmissionEvaluation);
+    const zeroAdmissionProbe = await window.api.getAutomationProbeState();
+    const limitedSnapshot = createAutomationStatusSnapshot();
+    config.globalSettings.folderMonitor.queueLimitJobs = 0;
+    const unlimitedSnapshot = createAutomationStatusSnapshot();
+    config.globalSettings.folderMonitor.queueLimitJobs = 15000;
+    config.globalSettings.folderMonitor.enabled = false;
+    const disabledSnapshot = createAutomationStatusSnapshot();
+    config.globalSettings.folderMonitor.enabled = true;
+    const zeroAdmission = {
+      evaluatedAdmitted: zeroAdmissionEvaluation.admittedFiles.map(file => file.name),
+      evaluatedDeferred: zeroAdmissionEvaluation.deferredFiles.map(file => file.name),
+      appliedAdmitted: zeroAdmissionResult.admittedFiles.map(file => file.name),
+      appliedDeferred: zeroAdmissionResult.deferredFiles.map(file => file.name),
+      telemetry: {
+        detected: config.globalSettings.folderMonitor.telemetry.detected,
+        queued: config.globalSettings.folderMonitor.telemetry.queued,
+        skipped: config.globalSettings.folderMonitor.telemetry.skipped,
+        deferred: config.globalSettings.folderMonitor.telemetry.deferred
+      },
+      telemetrySaves: zeroAdmissionProbe.mutationCalls.filter(call => call[0] === 'settings').length,
+      mainAdmissions: zeroAdmissionProbe.mutationCalls.filter(call => call[0] === 'start' || call[0] === 'inject').length,
+      status: {
+        state: limitedSnapshot.state,
+        currentJobCount: limitedSnapshot.currentJobCount,
+        availableSlots: limitedSnapshot.availableSlots,
+        queueLimited: limitedSnapshot.queueLimited
+      },
+      unlimited: { availableSlots: unlimitedSnapshot.availableSlots, queueLimited: unlimitedSnapshot.queueLimited },
+      disabled: { state: disabledSnapshot.state, queueLimited: disabledSnapshot.queueLimited }
+    };
     const stressStartedAt = performance.now();
     const stressQueue = Array.from({ length: 14996 }, (_, index) => ({
       id: 'stress-queue-' + index,
@@ -1759,7 +1802,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, manualHostTransactional, atomic, status, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const automationControlCenterScript = `(async () => {
     const waitFor = async predicate => {
@@ -1884,6 +1927,13 @@ contextBridge.exposeInMainWorld('api', {
       { id: 'ui-preview', file: 'C:\\\\ui-preview.mkv', fileName: 'ui-preview.mkv', hoster: 'doodstream.com', status: 'preview', bytesTotal: 1 },
       { id: 'ui-error', file: 'C:\\\\ui-error.mkv', fileName: 'ui-error.mkv', hoster: 'doodstream.com', status: 'error', bytesTotal: 1 }
     ];
+    config.globalSettings.pendingQueue = buildPersistedQueueState();
+    queueJobs = [];
+    selectedFiles = [];
+    selectedUploadHosters = [];
+    rebuildJobIndex();
+    restoreQueueStateFromConfig();
+    const restoredPreviewBeforeResume = JSON.stringify(queueJobs.find(job => job.id === 'ui-preview'));
     uploadSidebarFilter = 'all';
     queueSearchQuery = '';
     queueHosterFilter = '';
@@ -1914,6 +1964,7 @@ contextBridge.exposeInMainWorld('api', {
     pauseButton?.click();
     await new Promise(resolve => setTimeout(resolve, 0));
     const afterResumeProbe = await window.api.getAutomationProbeState();
+    const restoredPreviewAfterResume = queueJobs.find(job => job.id === 'ui-preview');
     const resumedLabel = document.getElementById('automationPauseResumeBtn')?.textContent.trim() || null;
     selectedJobIds.clear();
     selectedJobIds.add('ui-preview');
@@ -1932,6 +1983,11 @@ contextBridge.exposeInMainWorld('api', {
       calls: afterPauseProbe.mutationCalls.filter(call => call[0] === 'resume' || call[0] === 'pause').map(call => call[0]),
       resumedLabel,
       startDisabledAfterResume,
+      restoredPreviewPresent: Boolean(restoredPreviewAfterResume),
+      restoredPreviewStatus: restoredPreviewAfterResume?.status || null,
+      restoredPreviewByteIdentical: JSON.stringify(restoredPreviewAfterResume) === restoredPreviewBeforeResume,
+      resumeStartCalls: afterResumeProbe.mutationCalls.filter(call => call[0] === 'start').length,
+      resumeAddCalls: afterResumeProbe.mutationCalls.filter(call => call[0] === 'inject').length,
       pausedLabel,
       pausedLabelEnglish,
       configPaused: config.globalSettings.folderMonitor.paused
@@ -2527,6 +2583,18 @@ app.whenReady().then(async () => {
       queueLimited: true,
       frozen: true
     });
+    assert.deepEqual(result.automationPipeline.zeroAdmission, {
+      evaluatedAdmitted: [],
+      evaluatedDeferred: ['four-targets.mkv'],
+      appliedAdmitted: [],
+      appliedDeferred: ['four-targets.mkv'],
+      telemetry: { detected: 1, queued: 0, skipped: 0, deferred: 1 },
+      telemetrySaves: 1,
+      mainAdmissions: 0,
+      status: { state: 'queue-limited', currentJobCount: 14998, availableSlots: 2, queueLimited: true },
+      unlimited: { availableSlots: null, queueLimited: false },
+      disabled: { state: 'inactive', queueLimited: false }
+    });
     assert.equal(result.automationPipeline.stress.candidateCount, 15000);
     assert.equal(result.automationPipeline.stress.currentJobCount, 14996);
     assert.equal(result.automationPipeline.stress.plannedJobs, 4);
@@ -2884,6 +2952,11 @@ app.whenReady().then(async () => {
         reuploadSelectedBtn: false,
         retryFailedBtn: false
       },
+      restoredPreviewPresent: true,
+      restoredPreviewStatus: 'preview',
+      restoredPreviewByteIdentical: true,
+      resumeStartCalls: 0,
+      resumeAddCalls: 0,
       pausedLabel: 'Fortsetzen',
       pausedLabelEnglish: 'Resume',
       configPaused: true
