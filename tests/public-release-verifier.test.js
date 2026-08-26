@@ -45,7 +45,7 @@ test('public release verifier accepts only the exact source manifest and target 
   assert.equal(baseline.status, 0, baseline.stderr);
   assert.equal(
     baseline.stdout,
-    `public-release-source-ok files=157 denied-paths=0 internal-terms=0 version=${currentVersion} scripts=8 build-files=7 layout=exact screenshot=deferred\n`
+    `public-release-source-ok files=159 denied-paths=0 internal-terms=0 version=${currentVersion} scripts=8 build-files=7 layout=exact screenshot=deferred\n`
   );
 
   fs.writeFileSync(path.join(stage, 'tests', 'unexpected.json'), '{}');
