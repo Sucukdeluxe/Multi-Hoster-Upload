@@ -1,7 +1,21 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 let folderMonitorCandidateListenerReady = false;
-let folderMonitorReadySent = false;
+let folderMonitorRendererGeneration = null;
+let folderMonitorReadySentGeneration = null;
+
+function signalFolderMonitorReady() {
+  if (!folderMonitorCandidateListenerReady || !Number.isSafeInteger(folderMonitorRendererGeneration) || folderMonitorRendererGeneration <= 0 || folderMonitorReadySentGeneration === folderMonitorRendererGeneration) return false;
+  folderMonitorReadySentGeneration = folderMonitorRendererGeneration;
+  ipcRenderer.send('folder-monitor:renderer-ready', folderMonitorRendererGeneration);
+  return true;
+}
+
+ipcRenderer.on('folder-monitor:renderer-generation', (_event, generation) => {
+  if (!Number.isSafeInteger(generation) || generation <= 0 || (folderMonitorRendererGeneration !== null && generation <= folderMonitorRendererGeneration)) return;
+  folderMonitorRendererGeneration = generation;
+  signalFolderMonitorReady();
+});
 
 contextBridge.exposeInMainWorld('api', {
   // Config
@@ -102,12 +116,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('folder-monitor:new-files', (_event, data) => callback(data));
     folderMonitorCandidateListenerReady = true;
   },
-  signalFolderMonitorReady: () => {
-    if (!folderMonitorCandidateListenerReady || folderMonitorReadySent) return false;
-    folderMonitorReadySent = true;
-    ipcRenderer.send('folder-monitor:renderer-ready');
-    return true;
-  },
+  signalFolderMonitorReady,
   onAutomationStatus: (callback) => {
     ipcRenderer.on('automation:status', (_event, data) => callback(data));
   },
@@ -187,7 +196,9 @@ contextBridge.exposeInMainWorld('api', {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   removeAllListeners: () => {
     folderMonitorCandidateListenerReady = false;
-    folderMonitorReadySent = false;
+    folderMonitorRendererGeneration = null;
+    folderMonitorReadySentGeneration = null;
+    ipcRenderer.removeAllListeners('folder-monitor:renderer-generation');
     ipcRenderer.removeAllListeners('upload-progress');
     ipcRenderer.removeAllListeners('upload-batch-done');
     ipcRenderer.removeAllListeners('upload-stats');

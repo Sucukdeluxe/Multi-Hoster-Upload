@@ -40,6 +40,7 @@ function createAutomationLifecycleHarness(mainSource) {
   assert.notEqual(blockStart, -1, 'automation lifecycle block missing');
   assert.notEqual(blockEnd, -1, 'automation lifecycle block boundary missing');
   const handlers = new Map();
+  const onHandlers = new Map();
   const order = [];
   const sent = [];
   const saves = [];
@@ -113,24 +114,43 @@ function createAutomationLifecycleHarness(mainSource) {
     finishAfterActive: () => order.push('finish'),
     startBatch: () => order.push('startBatch')
   };
+  const webContents = {};
   const context = {
     configStore,
     debugLog: () => {},
     dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
     folderMonitor,
-    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    folderMonitorLifecycleGeneration: 0,
+    folderMonitorRendererGeneration: 1,
+    folderMonitorRendererReady: false,
+    folderMonitorRendererReadyGeneration: null,
+    folderMonitorStartupReconcile: null,
+    folderMonitorStartupReconcilePending: false,
+    folderMonitorStartupReconcileStarted: false,
+    ipcMain: {
+      handle: (channel, handler) => handlers.set(channel, handler),
+      on: (channel, handler) => onHandlers.set(channel, handler)
+    },
+    mainWindow: { isDestroyed: () => false, webContents },
     normalizeAutomationSettings: require('../lib/automation-control').normalizeAutomationSettings,
     path,
+    quitTeardownStarted: false,
     safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
     uploadManager
   };
   vm.runInNewContext(mainSource.slice(blockStart, blockEnd), context);
+  const readyStart = mainSource.indexOf("ipcMain.on('folder-monitor:renderer-ready'");
+  const readyEnd = mainSource.indexOf("\nipcMain.on('app:close-preparation-started'", readyStart);
+  assert.notEqual(readyStart, -1, 'folder monitor renderer ready handler missing');
+  assert.notEqual(readyEnd, -1, 'folder monitor renderer ready handler boundary missing');
+  vm.runInNewContext(mainSource.slice(readyStart, readyEnd), context);
   publishStatus = () => context.publishAutomationStatus();
   return {
     handlers,
     configuredSettings,
     context,
     order,
+    onHandlers,
     pauseDeferred,
     resumeDeferred,
     saves,
@@ -140,6 +160,7 @@ function createAutomationLifecycleHarness(mainSource) {
     },
     startedSettings,
     state: () => structuredClone(state),
+    webContents,
     publishStatus
   };
 }
@@ -357,9 +378,9 @@ test('folder monitor readiness is emitted once and only after the candidate list
       invoke: () => Promise.resolve(),
       on: (channel, listener) => {
         listeners.set(channel, listener);
-        order.push(`listen:${channel}`);
+        order.push(['listen', channel]);
       },
-      send: channel => { order.push(`send:${channel}`); },
+      send: (...args) => { order.push(['send', ...args]); },
       removeAllListeners: () => {}
     },
     webUtils: {
@@ -383,14 +404,85 @@ test('folder monitor readiness is emitted once and only after the candidate list
   let received = null;
   exposedApi.onFolderMonitorNewFiles(files => { received = files; });
   exposedApi.signalFolderMonitorReady();
+  listeners.get('folder-monitor:renderer-generation')({}, 4);
   exposedApi.signalFolderMonitorReady();
+  listeners.get('folder-monitor:renderer-generation')({}, 4);
+  listeners.get('folder-monitor:renderer-generation')({}, 3);
+  listeners.get('folder-monitor:renderer-generation')({}, 5);
   listeners.get('folder-monitor:new-files')({}, [{ path: 'C:\\watch\\ready.mkv' }]);
 
   assert.deepEqual(order, [
-    'listen:folder-monitor:new-files',
-    'send:folder-monitor:renderer-ready'
+    ['listen', 'folder-monitor:renderer-generation'],
+    ['listen', 'folder-monitor:new-files'],
+    ['send', 'folder-monitor:renderer-ready', 4],
+    ['send', 'folder-monitor:renderer-ready', 5]
   ]);
   assert.deepEqual(received, [{ path: 'C:\\watch\\ready.mkv' }]);
+});
+
+test('stopped and resumed monitor generations cannot release a deferred startup reconcile', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+  const settings = {
+    enabled: true,
+    folderPath: 'C:\\watch',
+    paused: false,
+    pausedAt: null,
+    queueLimitJobs: 15000,
+    reconcileIntervalMinutes: 5
+  };
+  harness.setFolderMonitorState({ paused: false, pausedAt: null });
+
+  await harness.context.startFolderMonitor(settings, { deferStartupReconcile: true });
+  const pause = harness.handlers.get('automation:pause-after-active')();
+  await waitForCondition(() => harness.saves.length === 1);
+  harness.saves[0].deferred.resolve();
+  await waitForCondition(() => harness.order.includes('pause'));
+  harness.pauseDeferred.resolve();
+  await pause;
+  harness.handlers.get('folder-monitor:stop')();
+  harness.onHandlers.get('folder-monitor:renderer-ready')({ sender: harness.webContents }, 1);
+
+  harness.resumeDeferred.resolve();
+  const resume = harness.handlers.get('automation:resume')();
+  await waitForCondition(() => harness.saves.length === 2);
+  harness.saves[1].deferred.resolve();
+  await resume;
+  harness.context.folderMonitorRendererGeneration = 2;
+  harness.context.folderMonitorRendererReadyGeneration = null;
+  harness.context.folderMonitorRendererReady = false;
+  harness.onHandlers.get('folder-monitor:renderer-ready')({ sender: harness.webContents }, 1);
+  harness.onHandlers.get('folder-monitor:renderer-ready')({ sender: harness.webContents }, 2);
+
+  assert.deepEqual(harness.order.filter(entry => entry.startsWith('scan:')), ['scan:resume:true']);
+});
+
+test('a nondeferred monitor restart supersedes pending startup work and each generation releases at most once', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const settings = {
+    enabled: true,
+    folderPath: 'C:\\watch',
+    paused: false,
+    pausedAt: null,
+    queueLimitJobs: 15000,
+    reconcileIntervalMinutes: 5
+  };
+  const restarted = createAutomationLifecycleHarness(mainSource);
+  restarted.setFolderMonitorState({ paused: false, pausedAt: null });
+  await restarted.context.startFolderMonitor(settings, { deferStartupReconcile: true });
+  await restarted.context.startFolderMonitor(settings);
+  restarted.onHandlers.get('folder-monitor:renderer-ready')({ sender: restarted.webContents }, 1);
+  restarted.onHandlers.get('folder-monitor:renderer-ready')({ sender: restarted.webContents }, 1);
+  assert.deepEqual(restarted.order.filter(entry => entry.startsWith('scan:')), ['scan:startup:true']);
+
+  const deferred = createAutomationLifecycleHarness(mainSource);
+  deferred.setFolderMonitorState({ paused: false, pausedAt: null });
+  await deferred.context.startFolderMonitor(settings, { deferStartupReconcile: true });
+  deferred.onHandlers.get('folder-monitor:renderer-ready')({ sender: {} }, 1);
+  assert.deepEqual(deferred.order.filter(entry => entry.startsWith('scan:')), []);
+  deferred.onHandlers.get('folder-monitor:renderer-ready')({ sender: deferred.webContents }, 1);
+  deferred.onHandlers.get('folder-monitor:renderer-ready')({ sender: deferred.webContents }, 1);
+  assert.deepEqual(deferred.order.filter(entry => entry.startsWith('scan:')), ['scan:startup:true']);
 });
 
 test('preload exposes account cooldown snapshots and removes their listener during cleanup', async () => {
@@ -531,9 +623,14 @@ test('automation pause save commits before lifecycle effects and save failure is
     debugLog: () => {},
     dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
     folderMonitor,
+    folderMonitorLifecycleGeneration: 0,
+    folderMonitorRendererGeneration: 1,
+    folderMonitorRendererReadyGeneration: null,
+    folderMonitorStartupReconcile: null,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     normalizeAutomationSettings: require('../lib/automation-control').normalizeAutomationSettings,
     path,
+    quitTeardownStarted: false,
     safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
     uploadManager
   });

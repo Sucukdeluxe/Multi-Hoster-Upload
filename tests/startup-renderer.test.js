@@ -3655,6 +3655,11 @@ const watchPath = process.env.MHU_AUTOMATION_WATCH;
 app.setPath('userData', process.env.MHU_AUTOMATION_USER_DATA);
 let configStore;
 let closeFlushRequested = false;
+let folderMonitorLifecycleGeneration = 0;
+let folderMonitorRendererGeneration = 1;
+let folderMonitorRendererReadyGeneration = null;
+let folderMonitorStartupReconcile = null;
+let quitTeardownStarted = false;
 const settingsImportGate = { canStartUpload: () => true };
 const sentEvents = [];
 const intervalCallbacks = new Set();
@@ -3868,6 +3873,234 @@ ${startupAutomation}
   }
 });
 
+function runStartupHandshakeScenario(scenario) {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), `mhu-startup-${scenario}-`));
+  try {
+    const appRoot = path.join(probeRoot, 'app');
+    const userDataPath = path.join(probeRoot, 'user-data');
+    const outputPath = path.join(probeRoot, 'result.json');
+    const watchPath = path.join(probeRoot, 'watch');
+    fs.mkdirSync(appRoot, { recursive: true });
+    fs.mkdirSync(watchPath, { recursive: true });
+    fs.writeFileSync(path.join(watchPath, 'scenario-ready.mkv'), Buffer.alloc(23, 6));
+    for (const relativePath of ['main.js', 'preload.js', 'preload-drop-target.js', 'package.json']) {
+      fs.copyFileSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath));
+    }
+    for (const relativePath of ['lib', 'renderer', 'assets']) {
+      fs.cpSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath), { recursive: true });
+    }
+    if (scenario === 'init-recovery') {
+      const rendererAppPath = path.join(appRoot, 'renderer', 'app.js');
+      const rendererSource = fs.readFileSync(rendererAppPath, 'utf8');
+      fs.writeFileSync(rendererAppPath, rendererSource.replace(
+        'async function init() {',
+        "async function init() {\n  if (sessionStorage.getItem('startup-init-failed') !== 'true') { sessionStorage.setItem('startup-init-failed', 'true'); throw new Error('forced renderer init failure'); }"
+      ));
+    }
+    fs.symlinkSync(path.join(projectRoot, 'node_modules'), path.join(appRoot, 'node_modules'), 'junction');
+    const probePath = path.join(appRoot, 'scenario-probe.cjs');
+    const probeSource = `
+const { app, BrowserWindow, ipcMain } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const ConfigStore = require('./lib/config-store');
+const FolderMonitor = require('./lib/folder-monitor');
+const scenario = process.env.MHU_STARTUP_SCENARIO;
+const outputPath = process.env.MHU_STARTUP_SCENARIO_OUTPUT;
+const userDataPath = process.env.MHU_STARTUP_SCENARIO_USER_DATA;
+const watchPath = process.env.MHU_STARTUP_SCENARIO_WATCH;
+app.setPath('userData', userDataPath);
+BrowserWindow.prototype.show = function () {};
+const rendererGenerations = [];
+const originalLoadFile = BrowserWindow.prototype.loadFile;
+BrowserWindow.prototype.loadFile = function (...args) {
+  const originalSend = this.webContents.send.bind(this.webContents);
+  this.webContents.send = (channel, ...payload) => {
+    if (channel === 'folder-monitor:renderer-generation') rendererGenerations.push(payload[0]);
+    return originalSend(channel, ...payload);
+  };
+  return originalLoadFile.apply(this, args);
+};
+let monitorStartedResolve;
+const monitorStarted = new Promise(resolve => { monitorStartedResolve = resolve; });
+let getConfigStartedResolve;
+const getConfigStarted = new Promise(resolve => { getConfigStartedResolve = resolve; });
+let releaseConfig;
+const configRelease = new Promise(resolve => { releaseConfig = resolve; });
+let startupScanCalls = 0;
+let getConfigCalls = 0;
+const originalStart = FolderMonitor.prototype.start;
+FolderMonitor.prototype.start = function (...args) {
+  const result = originalStart.apply(this, args);
+  monitorStartedResolve();
+  return result;
+};
+const originalScan = FolderMonitor.prototype.scan;
+FolderMonitor.prototype.scan = function (options = {}) {
+  if (options.trigger === 'startup' && options.emitFiles === true) startupScanCalls++;
+  return originalScan.call(this, options);
+};
+const readySignals = { folder: 0, close: 0 };
+let folderReadyHandler = null;
+const originalOn = ipcMain.on.bind(ipcMain);
+ipcMain.on = (channel, handler) => {
+  if (channel === 'folder-monitor:renderer-ready') folderReadyHandler = handler;
+  return originalOn(channel, function (event, ...args) {
+    if (channel === 'folder-monitor:renderer-ready') readySignals.folder++;
+    if (channel === 'app:close-handshake-ready') readySignals.close++;
+    return handler.call(this, event, ...args);
+  });
+};
+const originalHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => originalHandle(channel, async function (event, ...args) {
+  if (channel === 'get-config') {
+    getConfigCalls++;
+    getConfigStartedResolve();
+    if (scenario !== 'init-recovery') await configRelease;
+  }
+  return handler.call(this, event, ...args);
+});
+
+async function waitFor(read, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('startup scenario probe timed out');
+}
+
+(async () => {
+  const store = new ConfigStore(app);
+  const current = store.load();
+  await store.save({
+    globalSettings: {
+      ...current.globalSettings,
+      language: 'en',
+      logVerbose: false,
+      logFilePath: path.join(userDataPath, 'fileuploader.log'),
+      folderMonitor: {
+        ...current.globalSettings.folderMonitor,
+        enabled: true,
+        folderPath: watchPath,
+        recursive: true,
+        extensions: 'mkv',
+        filterMode: 'include',
+        skipDuplicates: true,
+        includeExisting: false,
+        autoStart: false,
+        hosters: ['doodstream.com'],
+        queueLimitJobs: 15000,
+        reconcileIntervalMinutes: 60,
+        paused: false,
+        pausedAt: null
+      }
+    }
+  });
+  require('./main.js');
+  await app.whenReady();
+  const window = await waitFor(async () => BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed()) || null);
+  await monitorStarted;
+  if (scenario !== 'init-recovery') await getConfigStarted;
+  let initFailureVisible = false;
+  if (scenario === 'init-recovery') {
+    initFailureVisible = await waitFor(async () => {
+      try {
+        return await window.webContents.executeJavaScript("sessionStorage.getItem('startup-init-failed') === 'true'");
+      } catch {
+        return false;
+      }
+    });
+    window.webContents.reload();
+    await waitFor(async () => readySignals.folder === 1 && readySignals.close === 1 && startupScanCalls === 1);
+  } else {
+    if (scenario === 'pending-close') window.emit('closed');
+    if (scenario === 'pending-shutdown') app.emit('will-quit');
+    folderReadyHandler({ sender: window.webContents }, rendererGenerations[0]);
+    releaseConfig();
+    await waitFor(async () => readySignals.close === 1);
+  }
+  let rendererState = null;
+  if (scenario === 'init-recovery') {
+    rendererState = await waitFor(async () => {
+      try {
+        const state = await window.webContents.executeJavaScript("(() => { if (typeof queueJobs === 'undefined' || typeof automationEventQueue === 'undefined') return null; return { candidateNames: queueJobs.filter(job => job.fileName === 'scenario-ready.mkv').map(job => job.fileName), draining: Boolean(automationEventDrainPromise), pendingCandidates: automationEventQueue.size }; })()");
+        return state && !state.draining && state.pendingCandidates === 0 ? state : null;
+      } catch {
+        return null;
+      }
+    });
+  }
+  fs.writeFileSync(outputPath, JSON.stringify({
+    hidden: window.isVisible() === false,
+    scenario,
+    initFailureVisible,
+    readySignals,
+    startupScanCalls,
+    getConfigCalls,
+    rendererGenerations,
+    rendererState
+  }), 'utf8');
+  window.destroy();
+  app.exit(0);
+})().catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error), scenario, readySignals, startupScanCalls, getConfigCalls, rendererGenerations }), 'utf8');
+  app.exit(1);
+});
+`;
+    fs.writeFileSync(probePath, probeSource, 'utf8');
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const probeEnvironment = {
+      ...process.env,
+      MHU_PERF: '0',
+      MHU_STARTUP_SCENARIO: scenario,
+      MHU_STARTUP_SCENARIO_OUTPUT: outputPath,
+      MHU_STARTUP_SCENARIO_USER_DATA: userDataPath,
+      MHU_STARTUP_SCENARIO_WATCH: watchPath
+    };
+    delete probeEnvironment.RUN_UI_SMOKE;
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: appRoot,
+      env: probeEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 60000
+    });
+    const probeOutput = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}\n${probeOutput}`);
+    return JSON.parse(probeOutput);
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    assert.equal(fs.existsSync(probeRoot), false);
+  }
+}
+
+test('hidden renderer init failure leaves startup pending for one successful reload generation', { skip: process.platform !== 'win32' }, () => {
+  const outcome = runStartupHandshakeScenario('init-recovery');
+  assert.equal(outcome.error, undefined);
+  assert.equal(outcome.hidden, true);
+  assert.equal(outcome.initFailureVisible, true);
+  assert.deepEqual(outcome.readySignals, { folder: 1, close: 1 });
+  assert.equal(outcome.startupScanCalls, 1);
+  assert.equal(outcome.getConfigCalls, 1);
+  assert.deepEqual(outcome.rendererGenerations, [1, 2]);
+  assert.deepEqual(outcome.rendererState.candidateNames, ['scenario-ready.mkv']);
+});
+
+for (const scenario of ['pending-close', 'pending-shutdown']) {
+  test(`hidden ${scenario} invalidates startup pending before renderer readiness`, { skip: process.platform !== 'win32' }, () => {
+    const outcome = runStartupHandshakeScenario(scenario);
+    assert.equal(outcome.error, undefined);
+    assert.equal(outcome.hidden, true);
+    assert.deepEqual(outcome.readySignals, { folder: 1, close: 1 });
+    assert.equal(outcome.startupScanCalls, 0);
+    assert.equal(outcome.getConfigCalls, 1);
+    assert.deepEqual(outcome.rendererGenerations, [1]);
+  });
+}
+
 test('real startup releases one productive reconcile only after the folder candidate listener is ready', { skip: process.platform !== 'win32' }, () => {
   const projectRoot = path.join(__dirname, '..');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-startup-ready-e2e-'));
@@ -3898,10 +4131,21 @@ const userDataPath = process.env.MHU_STARTUP_READY_USER_DATA;
 const watchPath = process.env.MHU_STARTUP_READY_WATCH;
 app.setPath('userData', userDataPath);
 BrowserWindow.prototype.show = function () {};
+const rendererGenerations = [];
+const originalLoadFile = BrowserWindow.prototype.loadFile;
+BrowserWindow.prototype.loadFile = function (...args) {
+  const originalSend = this.webContents.send.bind(this.webContents);
+  this.webContents.send = (channel, ...payload) => {
+    if (channel === 'folder-monitor:renderer-generation') rendererGenerations.push(payload[0]);
+    return originalSend(channel, ...payload);
+  };
+  return originalLoadFile.apply(this, args);
+};
 let monitorStartedResolve;
 const monitorStarted = new Promise(resolve => { monitorStartedResolve = resolve; });
 let getConfigStartedResolve;
 const getConfigStarted = new Promise(resolve => { getConfigStartedResolve = resolve; });
+let getConfigCalls = 0;
 let releaseConfig;
 const configRelease = new Promise(resolve => { releaseConfig = resolve; });
 let startupScanSettledResolve;
@@ -3927,15 +4171,20 @@ FolderMonitor.prototype.scan = function (options = {}) {
   return result;
 };
 const readySignals = { folder: 0, close: 0 };
+let folderReadyHandler = null;
 const originalOn = ipcMain.on.bind(ipcMain);
-ipcMain.on = (channel, handler) => originalOn(channel, function (event, ...args) {
-  if (channel === 'folder-monitor:renderer-ready') readySignals.folder++;
-  if (channel === 'app:close-handshake-ready') readySignals.close++;
-  return handler.call(this, event, ...args);
-});
+ipcMain.on = (channel, handler) => {
+  if (channel === 'folder-monitor:renderer-ready') folderReadyHandler = handler;
+  return originalOn(channel, function (event, ...args) {
+    if (channel === 'folder-monitor:renderer-ready') readySignals.folder++;
+    if (channel === 'app:close-handshake-ready') readySignals.close++;
+    return handler.call(this, event, ...args);
+  });
+};
 const originalHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => originalHandle(channel, async function (event, ...args) {
   if (channel === 'get-config') {
+    getConfigCalls++;
     getConfigStartedResolve();
     await configRelease;
   }
@@ -3988,7 +4237,15 @@ async function waitFor(read, timeoutMs = 20000) {
     startupScanSettledCalls,
     folderReadySignals: readySignals.folder
   };
-  if (startupScanCalls > 0) await startupScanSettled;
+  const foreign = new BrowserWindow({ show: false });
+  await foreign.loadURL('data:text/html,<html></html>');
+  folderReadyHandler({ sender: foreign.webContents }, rendererGenerations[0]);
+  const afterForeignSignal = startupScanCalls;
+  window.webContents.reload();
+  await waitFor(async () => getConfigCalls === 2);
+  const beforeStaleSignal = startupScanCalls;
+  folderReadyHandler({ sender: window.webContents }, rendererGenerations[0]);
+  const afterStaleSignal = startupScanCalls;
   releaseConfig();
   await waitFor(async () => readySignals.close === 1);
   await waitFor(async () => startupScanCalls === 1);
@@ -4001,18 +4258,26 @@ async function waitFor(read, timeoutMs = 20000) {
       return null;
     }
   });
+  window.webContents.reload();
+  await waitFor(async () => readySignals.folder === 2 && readySignals.close === 2);
   fs.writeFileSync(outputPath, JSON.stringify({
     hidden: window.isVisible() === false,
     beforeReady,
     readySignals,
     startupScanCalls,
     startupScanSettledCalls,
+    getConfigCalls,
+    rendererGenerations,
+    afterForeignSignal,
+    beforeStaleSignal,
+    afterStaleSignal,
     rendererState
   }), 'utf8');
+  foreign.destroy();
   window.destroy();
   app.exit(0);
 })().catch(error => {
-  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error), readySignals, startupScanCalls, startupScanSettledCalls }), 'utf8');
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error), readySignals, startupScanCalls, startupScanSettledCalls, getConfigCalls, rendererGenerations }), 'utf8');
   app.exit(1);
 });
 `;
@@ -4043,6 +4308,11 @@ async function waitFor(read, timeoutMs = 20000) {
       readySignals: outcome.readySignals,
       startupScanCalls: outcome.startupScanCalls,
       startupScanSettledCalls: outcome.startupScanSettledCalls,
+      getConfigCalls: outcome.getConfigCalls,
+      rendererGenerations: outcome.rendererGenerations,
+      afterForeignSignal: outcome.afterForeignSignal,
+      beforeStaleSignal: outcome.beforeStaleSignal,
+      afterStaleSignal: outcome.afterStaleSignal,
       lastScanTrigger: outcome.rendererState.monitor.lastScanTrigger,
       candidateNames: outcome.rendererState.candidateJobs.map(job => job.fileName)
     }, {
@@ -4051,9 +4321,14 @@ async function waitFor(read, timeoutMs = 20000) {
         startupScanSettledCalls: 0,
         folderReadySignals: 0
       },
-      readySignals: { folder: 1, close: 1 },
+      readySignals: { folder: 2, close: 2 },
       startupScanCalls: 1,
       startupScanSettledCalls: 1,
+      getConfigCalls: 3,
+      rendererGenerations: [1, 2, 3],
+      afterForeignSignal: 0,
+      beforeStaleSignal: 0,
+      afterStaleSignal: 0,
       lastScanTrigger: 'startup',
       candidateNames: ['startup-ready.mkv']
     });
