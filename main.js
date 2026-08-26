@@ -30,7 +30,7 @@ const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
 const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
-const { getUploadAuditLogPath, createUploadAuditWriter } = require('./lib/upload-audit');
+const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, getLogOpenDirectory } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
@@ -419,6 +419,21 @@ let _debugLogWriting = false;
 const DEBUG_LOG_MAX_BYTES = 25 * 1024 * 1024;
 const ROT_LOG_MAX_BYTES = 10 * 1024 * 1024;
 const INTERNAL_LOG_MAX_BACKUPS = 2;
+const _resolveInternalLogPath = createInternalLogPathResolver({
+  fs,
+  path,
+  userDataPath: app.getPath('userData')
+});
+const _rotLogWriter = createInternalLogWriter({
+  fs,
+  path,
+  fileName: 'account-rotation.log',
+  resolveInternalLogPath: _resolveInternalLogPath,
+  rotateLogFile: maybeRotateLogFile,
+  maxBytes: ROT_LOG_MAX_BYTES,
+  maxBackups: INTERNAL_LOG_MAX_BACKUPS,
+  reportError: (label, error) => debugLog(`${label} append failed: ${error.message}`)
+});
 
 function _flushDebugLog() {
   if (_debugLogWriting || _debugLogBuffer.length === 0) return;
@@ -538,13 +553,8 @@ function _maybeLogEventLoopDelay(activeJobs) {
   } catch {}
 }
 
-// Dedicated account-rotation log so users can trace fallback decisions
-// without wading through general debug output. Writes to account-rotation.log
-// in the same directory as fileuploader.log (honors user's configured path).
 function getRotLogPath() {
-  const base = getLogFilePath();
-  const dir = path.dirname(base);
-  return path.join(dir, 'account-rotation.log');
+  return _rotLogWriter.getPath();
 }
 const _rotLogBuffer = [];
 let _rotLogFlushTimer = null;
@@ -555,26 +565,15 @@ function _flushRotLog() {
   const chunk = _rotLogBuffer.join('');
   _rotLogBuffer.length = 0;
   _rotLogWriting = true;
-  const tryTargets = [
-    getRotLogPath(),
-    path.join(app.getPath('desktop') || app.getPath('userData'), 'account-rotation.log'),
-    path.join(app.getPath('userData'), 'account-rotation.log')
-  ];
-  const write = (i) => {
-    if (i >= tryTargets.length) { _rotLogWriting = false; return; }
-    try {
-      fs.mkdirSync(path.dirname(tryTargets[i]), { recursive: true });
-    } catch {}
-    // Cap account-rotation.log so a long-running install can't keep
-    // growing it indefinitely (rotation events fire on every account-fail).
-    maybeRotateLogFile(tryTargets[i], ROT_LOG_MAX_BYTES, INTERNAL_LOG_MAX_BACKUPS, debugLog);
-    fs.appendFile(tryTargets[i], chunk, 'utf-8', (err) => {
-      if (err) return write(i + 1);
-      _rotLogWriting = false;
-      if (_rotLogBuffer.length) setImmediate(_flushRotLog);
-    });
-  };
-  write(0);
+  _rotLogWriter.append(chunk, 'rot-log').then(written => {
+    _rotLogWriting = false;
+    if (!written) debugLog('rot-log append failed: no writable target');
+    if (_rotLogBuffer.length) setImmediate(_flushRotLog);
+  }, error => {
+    _rotLogWriting = false;
+    debugLog(`rot-log append failed: ${error.message}`);
+    if (_rotLogBuffer.length) setImmediate(_flushRotLog);
+  });
 }
 
 function getAllLogPaths() {
@@ -586,7 +585,7 @@ function getAllLogPaths() {
   const dir = path.dirname(debugPath);
   return {
     fileuploader: upload,
-    uploadAudit: _uploadAuditWriter.getActivePath() || getUploadAuditLogPath(upload),
+    uploadAudit: _uploadAuditWriter.getPath(),
     debug: debugPath,
     accountRotation: rot,
     doodstreamDebug: path.join(dir, 'doodstream-debug.log'),
@@ -912,10 +911,8 @@ const UPLOAD_LOG_MAX_BACKUPS = 3;
 const _uploadAuditWriter = createUploadAuditWriter({
   fs,
   path,
-  resolveUploadLogTarget: _resolveUploadLogTarget,
+  resolveInternalLogPath: _resolveInternalLogPath,
   rotateLogFile: maybeRotateLogFile,
-  invalidateUploadLogTarget: _invalidateUploadLogTargetCache,
-  persistFallbackLogPath: _persistFallbackLogPath,
   reportError: (label, error) => debugLog(`${label} audit append failed: ${error.message}`)
 });
 
@@ -2666,7 +2663,7 @@ ipcMain.handle('reveal-log-file', async (_event, target) => {
       shell.showItemInFolder(file);
       return { ok: true, path: file };
     }
-    const dir = paths.logDir;
+    const dir = getLogOpenDirectory(file, paths.logDir, path);
     if (dir) {
       fs.mkdirSync(dir, { recursive: true });
       shell.openPath(dir);
