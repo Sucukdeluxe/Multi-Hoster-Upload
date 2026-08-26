@@ -36,3 +36,24 @@ test('folder discovery does not truncate long absolute paths', async () => {
   assert.equal(result[0].path, target);
   assert.ok(result[0].path.length > 260);
 });
+
+test('nonrecursive folder discovery never reads child directories', async () => {
+  const root = 'C:\\watch';
+  const child = path.win32.join(root, 'nested');
+  const reads = [];
+  const result = await walkFolderAsync(root, {
+    recursive: false,
+    fsPromises: {
+      readdir: async (dir) => {
+        reads.push(dir);
+        if (dir === root) return [file('root.mkv'), directory('nested')];
+        if (dir === child) return [file('nested.mkv')];
+        return [];
+      },
+      stat: async () => ({ size: 1 })
+    },
+    pathImpl: path.win32
+  });
+  assert.deepEqual(reads, [root]);
+  assert.deepEqual(result.map((entry) => entry.name), ['root.mkv']);
+});

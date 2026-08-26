@@ -38,6 +38,12 @@ function createManualTimers() {
     },
     async runInterval() {
       for (const callback of [...intervals]) await callback();
+    },
+    async runTimeouts() {
+      for (const callback of [...timeouts]) {
+        timeouts.delete(callback);
+        await callback();
+      }
     }
   };
 }
@@ -216,6 +222,222 @@ test('stop emits an immutable non-running status snapshot', () => {
   assert.equal(Object.isFrozen(statuses.at(-1)), true);
 });
 
+test('pause invalidates a running scan before it can publish late state or files', async () => {
+  let releaseWalk;
+  let markWalkStarted;
+  const walkPending = new Promise((resolve) => { releaseWalk = resolve; });
+  const walkStarted = new Promise((resolve) => { markWalkStarted = resolve; });
+  const timers = createManualTimers();
+  const statuses = [];
+  const newFiles = [];
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {},
+    walkFolder: async () => {
+      markWalkStarted();
+      await walkPending;
+      return [{ path: 'C:\\watch\\late.mkv', name: 'late.mkv', size: 1 }];
+    },
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('status', (status) => statuses.push(status));
+  monitor.on('new-files', (files) => newFiles.push(files));
+  monitor.start({ folderPath: 'C:\\watch', extensions: 'mkv', skipDuplicates: true, reconcileIntervalMinutes: 5 });
+  const scan = monitor.scan({ emitFiles: true, trigger: 'manual' });
+  await walkStarted;
+  await monitor.pause();
+  const statusCountAfterPause = statuses.length;
+  releaseWalk();
+  const result = await scan;
+  assert.equal(result.cancelled, true);
+  assert.equal(statuses.length, statusCountAfterPause);
+  assert.deepEqual(newFiles, []);
+  assert.equal(monitor.status().scanning, false);
+});
+
+test('stop cancels a running scan and its pending follow-up', async () => {
+  let releaseWalk;
+  let markWalkStarted;
+  let walkCalls = 0;
+  const walkPending = new Promise((resolve) => { releaseWalk = resolve; });
+  const walkStarted = new Promise((resolve) => { markWalkStarted = resolve; });
+  const timers = createManualTimers();
+  const statuses = [];
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {},
+    walkFolder: async () => {
+      walkCalls++;
+      if (walkCalls === 1) {
+        markWalkStarted();
+        await walkPending;
+      }
+      return [];
+    },
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('status', (status) => statuses.push(status));
+  monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  const first = monitor.scan({ emitFiles: true, trigger: 'interval' });
+  await walkStarted;
+  const followUp = monitor.scan({ emitFiles: true, trigger: 'manual' });
+  monitor.stop();
+  const statusCountAfterStop = statuses.length;
+  releaseWalk();
+  const results = await Promise.all([first, followUp]);
+  assert.equal(walkCalls, 1);
+  assert.equal(results.every((result) => result.cancelled === true), true);
+  assert.equal(statuses.length, statusCountAfterStop);
+});
+
+test('late watcher add callbacks are ignored after pause', async () => {
+  const timers = createManualTimers();
+  const watchers = [];
+  const newFiles = [];
+  const monitor = new FolderMonitor({
+    watch: () => {
+      const watcher = new EventEmitter();
+      watcher.close = async () => {};
+      watchers.push(watcher);
+      return watcher;
+    },
+    access: async () => {},
+    walkFolder: async () => [],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('new-files', (files) => newFiles.push(files));
+  monitor.start({ folderPath: 'C:\\watch', extensions: 'mkv', reconcileIntervalMinutes: 5 });
+  await monitor.pause();
+  watchers[0].emit('add', 'C:\\watch\\late.mkv');
+  await timers.runTimeouts();
+  assert.deepEqual(newFiles, []);
+});
+
+test('resume preserves session duplicate history', async () => {
+  const timers = createManualTimers();
+  const watchers = [];
+  const newFiles = [];
+  const monitor = new FolderMonitor({
+    watch: () => {
+      const watcher = new EventEmitter();
+      watcher.close = async () => {};
+      watchers.push(watcher);
+      return watcher;
+    },
+    access: async () => {},
+    walkFolder: async () => [{ path: 'C:\\watch\\same.mkv', name: 'same.mkv', size: 1 }],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('new-files', (files) => newFiles.push(files));
+  const settings = { folderPath: 'C:\\watch', extensions: 'mkv', skipDuplicates: true, reconcileIntervalMinutes: 5 };
+  monitor.start(settings);
+  watchers[0].emit('add', 'C:\\watch\\same.mkv');
+  await timers.runTimeouts();
+  await monitor.pause();
+  await monitor.resume(settings);
+  watchers[1].emit('add', 'C:\\watch\\same.mkv');
+  await timers.runTimeouts();
+  assert.deepEqual(newFiles, [['C:\\watch\\same.mkv']]);
+  assert.equal(monitor.status().seenCount, 1);
+});
+
+test('dry scan leaves the public status byte-identical and does not consume reconnect state', async () => {
+  let reachable = false;
+  const timers = createManualTimers();
+  const statuses = [];
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {
+      if (!reachable) throw new Error('offline');
+    },
+    walkFolder: async () => [],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('status', (status) => statuses.push(status));
+  monitor.start({ folderPath: 'Z:\\watch', reconcileIntervalMinutes: 5 });
+  await monitor.scan({ emitFiles: true, trigger: 'interval' });
+  reachable = true;
+  const before = JSON.stringify(monitor.status());
+  const statusCount = statuses.length;
+  const dry = await monitor.scan({ emitFiles: false, trigger: 'test' });
+  assert.equal(dry.reachable, true);
+  assert.equal(JSON.stringify(monitor.status()), before);
+  assert.equal(statuses.length, statusCount);
+  const productive = await monitor.scan({ emitFiles: true, trigger: 'reconnect' });
+  assert.equal(productive.reconnected, true);
+});
+
+test('walk failure clears scan state, sanitizes the error and preserves one follow-up', async () => {
+  let releaseFailure;
+  let walkCalls = 0;
+  const failurePending = new Promise((resolve) => { releaseFailure = resolve; });
+  const timers = createManualTimers();
+  const statuses = [];
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {},
+    walkFolder: async () => {
+      walkCalls++;
+      if (walkCalls === 1) {
+        await failurePending;
+        throw new Error('token=secret-value at C:\\private\\file.mkv');
+      }
+      return [];
+    },
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('status', (status) => statuses.push(status));
+  monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  const first = monitor.scan({ emitFiles: true, trigger: 'interval' });
+  const second = monitor.scan({ emitFiles: true, trigger: 'reconnect' });
+  const third = monitor.scan({ emitFiles: true, trigger: 'manual' });
+  releaseFailure();
+  await Promise.all([first, second, third]);
+  assert.equal(walkCalls, 2);
+  assert.equal(statuses.some((status) => status.error === 'Ordnerscan fehlgeschlagen'), true);
+  assert.equal(statuses.some((status) => status.error.includes('secret-value') || status.error.includes('C:\\private')), false);
+  assert.equal(monitor.status().scanning, false);
+});
+
+test('new-files listener failure terminates the productive scan with a sanitized error', async () => {
+  const { monitor } = createScanHarness({
+    files: [{ path: 'C:\\watch\\a.mkv', name: 'a.mkv', size: 1, mtimeMs: 1 }]
+  });
+  monitor.on('new-files', () => {
+    throw new Error('apiKey=listener-secret');
+  });
+  monitor.start({ folderPath: 'C:\\watch', extensions: 'mkv', reconcileIntervalMinutes: 5 });
+  const result = await monitor.scan({ emitFiles: true, trigger: 'manual' });
+  assert.equal(result.error, 'Ordnerscan fehlgeschlagen');
+  assert.equal(monitor.status().error, 'Ordnerscan fehlgeschlagen');
+  assert.equal(monitor.status().error.includes('listener-secret'), false);
+  assert.equal(monitor.status().scanning, false);
+});
+
+test('interval callback contains unexpected scan rejection', async () => {
+  const timers = createManualTimers();
+  const statuses = [];
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {},
+    walkFolder: async () => [],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('status', (status) => statuses.push(status));
+  monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  monitor.scan = async () => { throw new Error('token=interval-secret'); };
+  await assert.doesNotReject(() => timers.runInterval());
+  assert.equal(statuses.at(-1).error, 'Ordnerscan fehlgeschlagen');
+  assert.equal(statuses.at(-1).error.includes('interval-secret'), false);
+});
+
 test('real temporary folder scan survives disconnect and reconnect', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-folder-'));
   const detached = `${root}-detached`;
@@ -230,10 +452,10 @@ test('real temporary folder scan survives disconnect and reconnect', async () =>
     assert.deepEqual(first.files.map((file) => file.name).sort(), ['a.mkv', 'c.mkv']);
     assert.equal(first.files.every((file) => Number.isFinite(file.mtimeMs)), true);
     fs.renameSync(root, detached);
-    const disconnected = await monitor.scan({ emitFiles: false, trigger: 'interval' });
+    const disconnected = await monitor.scan({ emitFiles: true, trigger: 'interval' });
     assert.equal(disconnected.reachable, false);
     fs.renameSync(detached, root);
-    const reconnected = await monitor.scan({ emitFiles: false, trigger: 'interval' });
+    const reconnected = await monitor.scan({ emitFiles: true, trigger: 'interval' });
     assert.equal(reconnected.reachable, true);
     assert.equal(reconnected.reconnected, true);
     await monitor.pause();
