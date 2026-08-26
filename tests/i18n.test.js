@@ -59,6 +59,66 @@ test('translates settings search result labels in both directions', () => {
   assert.equal(translateText('Suchergebnisse', 'en'), 'Search results');
 });
 
+test('translates every automation control center label in both directions', () => {
+  const pairs = [
+    ['Ordnerüberwachung testen', 'Test folder monitoring'],
+    ['Maximale automatische Queue-Größe', 'Maximum automatic queue size'],
+    ['Abgleichintervall', 'Reconciliation interval'],
+    ['Abschließen und pausieren', 'Finish and pause'],
+    ['Fortsetzen', 'Resume'],
+    ['Queue-Limit erreicht', 'Queue limit reached'],
+    ['Ordner getrennt', 'Folder disconnected'],
+    ['Pausiert', 'Paused'],
+    ['Wegen Queue-Limit zurückgestellt', 'Deferred by queue limit'],
+    ['Überwachung läuft seit', 'Monitoring since'],
+    ['Ordner erreichbar', 'Folder reachable'],
+    ['Letzte erkannte Datei', 'Last detected file'],
+    ['Heute erkannt', 'Detected today'],
+    ['Heute eingereiht', 'Queued today'],
+    ['Heute übersprungen', 'Skipped today'],
+    ['Aktuelle Queue-Auslastung', 'Current queue usage'],
+    ['Letzter Abgleich', 'Last reconciliation'],
+    ['Nächster Abgleich', 'Next reconciliation'],
+    ['Letzter Fehler', 'Last error'],
+    ['Nie', 'Never'],
+    ['Ja', 'Yes'],
+    ['Nein', 'No'],
+    ['Keine Datei erkannt', 'No file detected'],
+    ['Test der Ordnerüberwachung', 'Folder monitoring test'],
+    ['Ordner wird geprüft…', 'Scanning folder…'],
+    ['Der Test verändert weder Queue noch Einstellungen.', 'The test does not change the queue or settings.'],
+    ['Prüft den aktuellen Ordner schreibgeschützt mit denselben Regeln.', 'Checks the current folder read-only with the same rules.'],
+    ['Ordnerüberwachung konnte nicht getestet werden.', 'Folder monitoring could not be tested.'],
+    ['Gefundene Dateien', 'Files found'],
+    ['Passend zum Dateifilter', 'Matching file filter'],
+    ['Bereits verarbeitet', 'Already processed'],
+    ['Fehlend, leer oder nicht lesbar', 'Missing, empty, or unreadable'],
+    ['Durch Größenlimits ausgeschlossen', 'Excluded by size limits'],
+    ['Entstehende Upload-Jobs', 'Resulting upload jobs'],
+    ['Verfügbare Jobs bis zum Queue-Limit', 'Available jobs before queue limit'],
+    ['Aktuell zurückzustellende Dateien', 'Files currently deferred'],
+    ['0 = unbegrenzt', '0 = unlimited'],
+    ['Unbegrenzt', 'Unlimited'],
+    ['1 Minute', '1 minute'],
+    ['5 Minuten', '5 minutes'],
+    ['15 Minuten', '15 minutes'],
+    ['30 Minuten', '30 minutes'],
+    ['60 Minuten', '60 minutes'],
+    ['Automatik konnte nicht pausiert werden.', 'Automation could not be paused.'],
+    ['Automatik konnte nicht fortgesetzt werden.', 'Automation could not be resumed.'],
+    ['Ordnerüberwachung konnte nicht pausiert werden', 'Folder monitoring could not be paused'],
+    ['Ordnerüberwachung fehlgeschlagen', 'Folder monitoring failed'],
+    ['Ordner nicht erreichbar', 'Folder unavailable'],
+    ['Ordnerscan fehlgeschlagen', 'Folder scan failed'],
+    ['Keine Ordnerkonfiguration vorhanden', 'No folder configuration is available']
+  ];
+
+  for (const [german, english] of pairs) {
+    assert.equal(translateText(german, 'en'), english, german);
+    assert.equal(translateText(english, 'de'), german, english);
+  }
+});
+
 test('translates account cooldown and manual pause labels', () => {
   const pairs = [
     ['Pausiert – noch', 'Paused –'],

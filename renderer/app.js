@@ -38,6 +38,8 @@ function refreshLocalizedRuntimeUi() {
   const historyContainer = document.getElementById('historyContainer');
   if (historyContainer && historyRowsData.length) renderHistoryTable(historyContainer);
   updateStatusBar();
+  refreshAutomationControlCenter();
+  refreshAutomationTestOverlay();
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
@@ -64,6 +66,13 @@ let hosterSettings = {};
 let uploading = false;
 let healthCheckRunning = false;
 let automationRuntimeStatus = Object.freeze({});
+let automationRuntimeStatusAvailable = false;
+let automationRuntimeStartedAt = null;
+let automationPauseResumeBusy = false;
+let automationTestGeneration = 0;
+let automationTestReturnFocus = null;
+let automationTestInertState = [];
+let automationTestViewState = Object.freeze({ loading: false, summary: null, error: '' });
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupMutationGeneration = 0;
@@ -472,7 +481,25 @@ function automationSettings() {
 }
 
 function applyAutomationRuntimeStatus(value) {
-  automationRuntimeStatus = freezeAutomationValue({ ...(value || {}) });
+  const next = { ...(value || {}) };
+  const incomingStartedAt = automationTimestamp(next.startedAt);
+  const wasRunning = automationRuntimeStatus.running === true && automationRuntimeStatus.paused !== true;
+  if (next.running === true && next.paused !== true) {
+    automationRuntimeStartedAt = incomingStartedAt || (wasRunning ? automationRuntimeStartedAt : null) || Date.now();
+  } else if (incomingStartedAt) {
+    automationRuntimeStartedAt = incomingStartedAt;
+  }
+  if (automationRuntimeStartedAt) next.startedAt = automationRuntimeStartedAt;
+  if (typeof next.paused === 'boolean' && config.globalSettings) {
+    const folderMonitor = config.globalSettings.folderMonitor || {};
+    config.globalSettings.folderMonitor = {
+      ...folderMonitor,
+      paused: next.paused,
+      pausedAt: next.paused ? (next.pausedAt ?? folderMonitor.pausedAt ?? Date.now()) : null
+    };
+  }
+  automationRuntimeStatus = freezeAutomationValue(next);
+  automationRuntimeStatusAvailable = true;
   return automationRuntimeStatus;
 }
 
@@ -496,6 +523,12 @@ function createAutomationStatusSnapshot() {
   const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
   const availableSlots = normalized.queueLimitJobs === 0 ? null : Math.max(0, normalized.queueLimitJobs - currentJobCount);
   const telemetry = window.AutomationControl.rollDailyTelemetry(folderSettings.telemetry);
+  const error = String(automationRuntimeStatus.error || automationRuntimeStatus.monitorError || telemetry.lastError || '');
+  const startedAt = automationTimestamp(automationRuntimeStatus.startedAt) || automationRuntimeStartedAt;
+  const lastReconcileAt = automationTimestamp(automationRuntimeStatus.lastScanAt);
+  const nextReconcileAt = automationRuntimeStatus.running === true && automationRuntimeStatus.paused !== true && lastReconcileAt
+    ? lastReconcileAt + normalized.reconcileIntervalMinutes * 60000
+    : null;
   const snapshot = {
     ...automationRuntimeStatus,
     enabled: folderSettings.enabled === true,
@@ -506,7 +539,13 @@ function createAutomationStatusSnapshot() {
     currentJobCount,
     availableSlots,
     queueLimited: normalized.queueLimitJobs !== 0 && availableSlots === 0,
-    telemetry
+    telemetry,
+    error,
+    startedAt,
+    lastReconcileAt,
+    nextReconcileAt,
+    lastErrorAt: automationTimestamp(automationRuntimeStatus.lastErrorAt) || automationTimestamp(telemetry.lastErrorAt),
+    statusAvailable: automationRuntimeStatusAvailable
   };
   snapshot.state = window.AutomationControl.deriveAutomationState(snapshot);
   return freezeAutomationValue(snapshot);
@@ -741,7 +780,7 @@ async function applyAutomationEvaluation(evaluation) {
         persistQueueStateSoon(true);
         return freezeAutomationValue({ ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
       }
-      if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+      applyAddJobsFingerprints(addRequest, result?.sourceCleanupFingerprints);
     } catch {
       restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       return freezeAutomationValue({ ok: false, error: 'Jobs konnten nicht hinzugefügt werden.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
@@ -775,7 +814,329 @@ async function applyAutomationEvaluation(evaluation) {
 
 async function runFolderMonitorTestScan() {
   const result = await window.api.folderMonitorTestScan();
+  if (result?.error) throw new Error('Ordnerüberwachung konnte nicht getestet werden.');
   return evaluateAutomationCandidates(result?.files || [], { dryRun: true, trigger: result?.trigger || 'test' });
+}
+
+const automationStatePresentation = Object.freeze({
+  inactive: Object.freeze({ label: 'Inaktiv', className: 'state-inactive' }),
+  active: Object.freeze({ label: 'Aktiv', className: 'state-active' }),
+  paused: Object.freeze({ label: 'Pausiert', className: 'state-paused' }),
+  'queue-limited': Object.freeze({ label: 'Queue-Limit erreicht', className: 'state-queue-limited' }),
+  disconnected: Object.freeze({ label: 'Ordner getrennt', className: 'state-disconnected' }),
+  error: Object.freeze({ label: 'Fehler', className: 'state-error' })
+});
+
+const automationTestMetricDefinitions = Object.freeze([
+  Object.freeze(['found', 'Gefundene Dateien']),
+  Object.freeze(['filterMatched', 'Passend zum Dateifilter']),
+  Object.freeze(['alreadyProcessed', 'Bereits verarbeitet']),
+  Object.freeze(['unavailable', 'Fehlend, leer oder nicht lesbar']),
+  Object.freeze(['sizeLimitedJobs', 'Durch Größenlimits ausgeschlossen']),
+  Object.freeze(['acceptedFiles', 'Akzeptierte Dateien']),
+  Object.freeze(['selectedTargets', 'Ausgewählte Ziele']),
+  Object.freeze(['resultingJobs', 'Entstehende Upload-Jobs']),
+  Object.freeze(['availableSlots', 'Verfügbare Jobs bis zum Queue-Limit']),
+  Object.freeze(['deferredFiles', 'Aktuell zurückzustellende Dateien'])
+]);
+
+function automationTimestamp(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) return numeric;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatAutomationNumber(value) {
+  const numeric = Number(value);
+  return new Intl.NumberFormat(getUiLocale(), { maximumFractionDigits: 0 }).format(Number.isFinite(numeric) ? Math.max(0, numeric) : 0);
+}
+
+function formatAutomationDateTime(value) {
+  const timestamp = automationTimestamp(value);
+  if (!timestamp) return localizeUiText('Nie');
+  return new Intl.DateTimeFormat(getUiLocale(), { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(timestamp));
+}
+
+function setAutomationText(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = value;
+}
+
+function renderAutomationStatusSnapshot(snapshot) {
+  const card = document.getElementById('automationStatusCard');
+  if (!card || !snapshot) return snapshot;
+  const presentation = automationStatePresentation[snapshot.state] || automationStatePresentation.inactive;
+  const badge = document.getElementById('automationStateBadge');
+  if (badge) {
+    badge.className = `automation-state-badge ${presentation.className}`;
+    badge.textContent = localizeUiText(presentation.label);
+  }
+  card.dataset.state = snapshot.state;
+  const queueLimit = snapshot.queueLimitJobs === 0
+    ? localizeUiText('Unbegrenzt')
+    : formatAutomationNumber(snapshot.queueLimitJobs);
+  const queueText = `${formatAutomationNumber(snapshot.currentJobCount)} / ${queueLimit}`;
+  setAutomationText('automationQueueMeter', queueText);
+  const queueBar = document.getElementById('automationQueueMeterBar');
+  if (queueBar) {
+    const percentage = snapshot.queueLimitJobs === 0
+      ? 0
+      : Math.min(100, Math.max(0, snapshot.currentJobCount / Math.max(1, snapshot.queueLimitJobs) * 100));
+    queueBar.style.width = `${percentage}%`;
+  }
+  const queueTrack = document.getElementById('automationQueueMeterTrack');
+  if (queueTrack) {
+    queueTrack.setAttribute('aria-valuenow', String(snapshot.currentJobCount));
+    if (snapshot.queueLimitJobs === 0) queueTrack.removeAttribute('aria-valuemax');
+    else queueTrack.setAttribute('aria-valuemax', String(snapshot.queueLimitJobs));
+    queueTrack.setAttribute('aria-valuetext', queueText);
+  }
+  const telemetry = snapshot.telemetry || {};
+  setAutomationText('automationMonitoringSince', snapshot.running === true ? formatAutomationDateTime(snapshot.startedAt) : localizeUiText('Nie'));
+  setAutomationText('automationFolderReachable', snapshot.reachable === null || snapshot.reachable === undefined ? '—' : localizeUiText(snapshot.reachable ? 'Ja' : 'Nein'));
+  setAutomationText('automationLastDetectedFile', telemetry.lastDetectedName || localizeUiText('Keine Datei erkannt'));
+  setAutomationText('automationDetectedToday', formatAutomationNumber(telemetry.detected));
+  setAutomationText('automationQueuedToday', formatAutomationNumber(telemetry.queued));
+  setAutomationText('automationSkippedToday', formatAutomationNumber(telemetry.skipped));
+  setAutomationText('automationDeferredToday', formatAutomationNumber(telemetry.deferred));
+  setAutomationText('automationLastReconcile', formatAutomationDateTime(snapshot.lastReconcileAt));
+  setAutomationText('automationNextReconcile', formatAutomationDateTime(snapshot.nextReconcileAt));
+  const errorRow = document.getElementById('automationLastErrorRow');
+  const errorText = String(snapshot.error || telemetry.lastError || '');
+  if (errorRow) errorRow.hidden = errorText.length === 0;
+  setAutomationText('automationLastError', errorText);
+  return snapshot;
+}
+
+function ensureAutomationPauseResumeButton() {
+  const existing = document.getElementById('automationPauseResumeBtn') || document.getElementById('finishStopBtn');
+  if (!existing) return null;
+  existing.id = 'automationPauseResumeBtn';
+  existing.classList.add('automation-pause-resume-btn');
+  let label = existing.querySelector('.automation-pause-resume-label');
+  if (!label) {
+    label = document.createElement('span');
+    label.className = 'automation-pause-resume-label';
+    existing.appendChild(label);
+  }
+  return existing;
+}
+
+function syncAutomationPauseResumeButton(snapshot) {
+  const button = ensureAutomationPauseResumeButton();
+  if (!button || !snapshot) return;
+  const label = snapshot.paused === true ? 'Fortsetzen' : 'Abschließen und pausieren';
+  const localized = localizeUiText(label);
+  const text = button.querySelector('.automation-pause-resume-label');
+  if (text) text.textContent = localized;
+  button.title = localized;
+  button.setAttribute('aria-label', localized);
+  button.classList.toggle('automation-resume', snapshot.paused === true);
+  button.disabled = automationPauseResumeBusy;
+}
+
+function syncAutomationContextStartControls(blocked) {
+  document.querySelectorAll('[data-action="start-selected"], [data-action="retry-selected"]').forEach(element => {
+    element.setAttribute('aria-disabled', String(blocked));
+    element.classList.toggle('ctx-item-disabled', blocked);
+  });
+}
+
+function refreshAutomationControlCenter() {
+  const snapshot = createAutomationStatusSnapshot();
+  updateQueueActionButtons(snapshot);
+  return snapshot;
+}
+
+function setAutomationTestBackgroundInert(active) {
+  const overlay = document.getElementById('automationTestOverlay');
+  if (!overlay) return;
+  if (active) {
+    if (automationTestInertState.length > 0) return;
+    automationTestInertState = Array.from(document.body.children)
+      .filter(element => element !== overlay && 'inert' in element)
+      .map(element => ({ element, inert: element.inert }));
+    automationTestInertState.forEach(({ element }) => { element.inert = true; });
+    return;
+  }
+  automationTestInertState.forEach(({ element, inert }) => {
+    if (element.isConnected) element.inert = inert;
+  });
+  automationTestInertState = [];
+}
+
+function ensureAutomationTestOverlay() {
+  let overlay = document.getElementById('automationTestOverlay');
+  if (overlay) return overlay;
+  overlay = document.createElement('div');
+  overlay.id = 'automationTestOverlay';
+  overlay.className = 'modal-overlay automation-test-overlay';
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
+  overlay.setAttribute('aria-busy', 'false');
+  overlay.innerHTML = `
+    <section class="modal-card automation-test-modal" role="dialog" aria-modal="true" aria-labelledby="automationTestTitle" aria-describedby="automationTestDescription" tabindex="-1">
+      <header class="modal-header automation-test-header">
+        <div>
+          <h3 id="automationTestTitle">Test der Ordnerüberwachung</h3>
+          <p id="automationTestDescription">Der Test verändert weder Queue noch Einstellungen.</p>
+        </div>
+      </header>
+      <div class="modal-body automation-test-body">
+        <div class="automation-test-loading" id="automationTestSpinner" hidden>
+          <span class="automation-test-spinner" aria-hidden="true"></span>
+          <span>Ordner wird geprüft…</span>
+        </div>
+        <div class="automation-test-metrics" id="automationTestMetrics">
+          ${automationTestMetricDefinitions.map(([key, label]) => `
+            <div class="automation-test-metric" data-automation-test-metric="${key}">
+              <span class="automation-test-label">${label}</span>
+              <strong class="automation-test-value">0</strong>
+            </div>`).join('')}
+        </div>
+        <p class="automation-test-error" id="automationTestError" role="alert" hidden></p>
+      </div>
+      <footer class="modal-footer automation-test-footer">
+        <button class="btn btn-secondary" id="automationTestCloseBtn" type="button">Schließen</button>
+      </footer>
+    </section>`;
+  document.body.appendChild(overlay);
+  document.getElementById('automationTestCloseBtn')?.addEventListener('click', closeAutomationTestOverlay);
+  overlay.addEventListener('click', event => {
+    if (event.target === overlay) closeAutomationTestOverlay();
+  });
+  document.addEventListener('keydown', handleAutomationTestKeydown, true);
+  return overlay;
+}
+
+function renderAutomationTestViewState(state = automationTestViewState) {
+  const overlay = ensureAutomationTestOverlay();
+  automationTestViewState = freezeAutomationValue({
+    loading: state.loading === true,
+    summary: state.summary || null,
+    error: String(state.error || '')
+  });
+  overlay.setAttribute('aria-busy', automationTestViewState.loading ? 'true' : 'false');
+  const spinner = document.getElementById('automationTestSpinner');
+  const metrics = document.getElementById('automationTestMetrics');
+  const error = document.getElementById('automationTestError');
+  if (spinner) spinner.hidden = !automationTestViewState.loading;
+  if (metrics) metrics.hidden = automationTestViewState.loading;
+  if (error) {
+    error.hidden = automationTestViewState.error.length === 0;
+    error.textContent = automationTestViewState.error ? localizeUiText(automationTestViewState.error) : '';
+  }
+  setAutomationText('automationTestTitle', localizeUiText('Test der Ordnerüberwachung'));
+  setAutomationText('automationTestDescription', localizeUiText('Der Test verändert weder Queue noch Einstellungen.'));
+  setAutomationText('automationTestCloseBtn', localizeUiText('Schließen'));
+  for (const [key, label] of automationTestMetricDefinitions) {
+    const row = document.querySelector(`[data-automation-test-metric="${key}"]`);
+    const labelElement = row?.querySelector('.automation-test-label');
+    const valueElement = row?.querySelector('.automation-test-value');
+    if (labelElement) labelElement.textContent = localizeUiText(label);
+    if (valueElement) {
+      const value = automationTestViewState.summary?.[key];
+      valueElement.textContent = key === 'availableSlots' && value === null
+        ? localizeUiText('Unbegrenzt')
+        : formatAutomationNumber(value);
+    }
+  }
+  const button = document.getElementById('automationTestBtn');
+  if (button) button.disabled = automationTestViewState.loading;
+  return automationTestViewState;
+}
+
+function refreshAutomationTestOverlay() {
+  if (!document.getElementById('automationTestOverlay')) return automationTestViewState;
+  return renderAutomationTestViewState(automationTestViewState);
+}
+
+function openAutomationTestOverlay() {
+  const overlay = ensureAutomationTestOverlay();
+  automationTestReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  overlay.style.display = 'flex';
+  overlay.setAttribute('aria-hidden', 'false');
+  setAutomationTestBackgroundInert(true);
+  document.getElementById('automationTestCloseBtn')?.focus();
+  return overlay;
+}
+
+function closeAutomationTestOverlay() {
+  const overlay = document.getElementById('automationTestOverlay');
+  if (!overlay || overlay.style.display === 'none') return;
+  const canceledLoading = automationTestViewState.loading === true;
+  automationTestGeneration++;
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
+  if (canceledLoading) renderAutomationTestViewState({ loading: false, summary: null, error: '' });
+  setAutomationTestBackgroundInert(false);
+  const returnFocus = automationTestReturnFocus;
+  automationTestReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+}
+
+function handleAutomationTestKeydown(event) {
+  const overlay = document.getElementById('automationTestOverlay');
+  if (!overlay || overlay.style.display !== 'flex') return;
+  const dialog = overlay.querySelector('[role="dialog"]');
+  const closeButton = document.getElementById('automationTestCloseBtn');
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeAutomationTestOverlay();
+    return;
+  }
+  if (event.key === 'Tab') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeButton?.focus();
+    return;
+  }
+  if (dialog && !dialog.contains(event.target)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeButton?.focus();
+  }
+}
+
+async function runAutomationTestOverlay() {
+  openAutomationTestOverlay();
+  const generation = ++automationTestGeneration;
+  renderAutomationTestViewState({ loading: true, summary: null, error: '' });
+  try {
+    const evaluation = await runFolderMonitorTestScan();
+    if (generation !== automationTestGeneration) return;
+    renderAutomationTestViewState({ loading: false, summary: evaluation.summary, error: '' });
+  } catch {
+    if (generation !== automationTestGeneration) return;
+    renderAutomationTestViewState({ loading: false, summary: null, error: 'Ordnerüberwachung konnte nicht getestet werden.' });
+  }
+}
+
+async function toggleAutomationPauseResume() {
+  if (automationPauseResumeBusy) return;
+  const snapshot = createAutomationStatusSnapshot();
+  const resume = snapshot.paused === true;
+  automationPauseResumeBusy = true;
+  updateQueueActionButtons(snapshot);
+  try {
+    const result = resume
+      ? await window.api.automationResume()
+      : await window.api.automationPauseAfterActive();
+    if (result?.error) throw new Error(result.error);
+    applyAutomationRuntimeStatus({ ...result, paused: resume ? false : true });
+    if (!resume && uploading) {
+      lastUploadStats.state = 'stopping';
+      updateStatusBar();
+    }
+  } catch {
+    showCopyToast(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.');
+  } finally {
+    automationPauseResumeBusy = false;
+    refreshAutomationControlCenter();
+  }
 }
 
 window.evaluateAutomationCandidates = evaluateAutomationCandidates;
@@ -900,7 +1261,7 @@ async function init() {
   if (typeof window.api.onAutomationStatus === 'function') {
     window.api.onAutomationStatus(status => {
       applyAutomationRuntimeStatus(status);
-      updateQueueActionButtons();
+      refreshAutomationControlCenter();
     });
   }
 
@@ -1543,7 +1904,7 @@ async function applyHosterSelection() {
             cleanupStates: cleanupPreparation.rollbackStates
           });
           if (!outcome.consistent) regularInjectionFailure = 'Jobs konnten nicht eindeutig bestätigt werden.';
-          else if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+          else applyAddJobsFingerprints(addRequest, result?.sourceCleanupFingerprints);
         }
       } catch {
         regularInjectionFailure = 'Jobs konnten nicht hinzugefügt werden.';
@@ -2038,19 +2399,21 @@ function updateUploadView(options = {}) {
   updateQueueActionButtons();
 }
 
-function updateStartButton() {
+function updateStartButton(snapshot = createAutomationStatusSnapshot()) {
   const btn = document.getElementById('startUploadBtn');
+  if (!btn) return;
   const hosters = getSelectedHosters();
   const hasQueuedJobs = queueJobs.some(isStartableQueueJob);
   const canBuildQueueFromSelection = selectedFiles.length > 0 && hosters.length > 0;
-  btn.disabled = uploading || !(hasQueuedJobs || canBuildQueueFromSelection);
+  const startBlocked = snapshot.paused === true || snapshot.statusAvailable !== true;
+  btn.disabled = startBlocked || uploading || !(hasQueuedJobs || canBuildQueueFromSelection);
 }
 
 const _UPLOAD_SELECTION_STATUSES = new Set(['done', 'error', 'aborted', 'skipped']);
 const _ABORT_SELECTION_STATUSES = new Set(['preview', 'queued', 'getting-server', 'uploading', 'retrying']);
 
-function updateQueueActionButtons() {
-  updateStartButton();
+function updateQueueActionButtons(snapshot = createAutomationStatusSnapshot()) {
+  updateStartButton(snapshot);
   _normalizeQueueSelectionToVisible();
 
   const hasSelection = selectedJobIds.size > 0;
@@ -2072,22 +2435,27 @@ function updateQueueActionButtons() {
   const startSelectedBtn = document.getElementById('startSelectedBtn');
   const reuploadBtn = document.getElementById('reuploadSelectedBtn');
   const abortSelectedBtn = document.getElementById('abortSelectedBtn');
-  const finishStopBtn = document.getElementById('finishStopBtn');
+  ensureAutomationPauseResumeButton();
   const abortAllBtn = document.getElementById('abortAllBtn');
   const moveTopBtn = document.getElementById('moveTopBtn');
   const moveUpBtn = document.getElementById('moveUpBtn');
   const moveDownBtn = document.getElementById('moveDownBtn');
   const moveBottomBtn = document.getElementById('moveBottomBtn');
 
-  if (startSelectedBtn) startSelectedBtn.disabled = uploading || !hasStartableSelection;
-  if (reuploadBtn) reuploadBtn.disabled = !hasUploadSelection;
+  const startBlocked = snapshot.paused === true || snapshot.statusAvailable !== true;
+  if (startSelectedBtn) startSelectedBtn.disabled = startBlocked || uploading || !hasStartableSelection;
+  if (reuploadBtn) reuploadBtn.disabled = startBlocked || !hasUploadSelection;
   if (abortSelectedBtn) abortSelectedBtn.disabled = !hasAbortSelection;
-  if (finishStopBtn) finishStopBtn.disabled = !uploading;
+  syncAutomationPauseResumeButton(snapshot);
   if (abortAllBtn) abortAllBtn.disabled = !uploading;
   if (moveTopBtn) moveTopBtn.disabled = !hasMovableSelection;
   if (moveUpBtn) moveUpBtn.disabled = !hasMovableSelection;
   if (moveDownBtn) moveDownBtn.disabled = !hasMovableSelection;
   if (moveBottomBtn) moveBottomBtn.disabled = !hasMovableSelection;
+  const retryFailedBtn = document.getElementById('retryFailedBtn');
+  if (retryFailedBtn) retryFailedBtn.disabled = startBlocked || !queueJobs.some(job => job.status === 'error');
+  syncAutomationContextStartControls(startBlocked);
+  renderAutomationStatusSnapshot(snapshot);
   syncDataActionState();
 }
 
@@ -3628,6 +3996,10 @@ document.getElementById('contextMenu').addEventListener('click', (e) => {
 
 async function handleContextAction(action, targetJobId = null) {
   _normalizeQueueSelectionToVisible();
+  if (['start-selected', 'retry-selected'].includes(action)) {
+    const snapshot = createAutomationStatusSnapshot();
+    if (snapshot.paused === true || snapshot.statusAvailable !== true) return;
+  }
   if (action === 'start-selected') {
     startSelectedUpload();
   } else if (action === 'copy-links') {
@@ -3824,10 +4196,7 @@ function analyzeAddJobsInput(jobs, relevantJobs = jobs) {
 function prepareAddSourceCleanup(analysis) {
   const rollbackStates = captureSourceCleanupStates();
   if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [], rollbackStates };
-  const cleanupJobs = analysis.confirmableJobs.map(job => ({
-    ...job,
-    sourceCleanupRequiredHosters: []
-  }));
+  const cleanupJobs = analysis.confirmableJobs.map(job => ({ ...job }));
   const cleanupJobsById = new Map(cleanupJobs.map(job => [job.id, job]));
   const prepared = window.SourceCleanupPolicy.prepareGroups(
     cleanupJobs,
@@ -3892,7 +4261,7 @@ function resolveAddJobsOutcome(jobs, result, analysis = null) {
   const added = Number(result?.added);
   const confirmationConsistent = valid && Number.isInteger(added) && added >= 0 && added === remainingJobs.length;
   return {
-    consistent: unconfirmableJobs.length === 0 && confirmationConsistent,
+    consistent: confirmationConsistent,
     added: Number.isInteger(added) && added >= 0 ? added : 0,
     addedJobs: confirmationConsistent ? remainingJobs : [],
     alreadyJobs: [...alreadyIds].map(id => jobsById.get(id)),
@@ -3917,6 +4286,11 @@ function applyAddJobsOutcome(jobs, result, options = {}) {
     job.error = outcome.skippedEntries[index]?.reason || 'Kein gültiger Account';
   }
   return outcome;
+}
+
+function applyAddJobsFingerprints(analysis, fingerprints) {
+  if (!fingerprints || !window.SourceCleanupPolicy) return [];
+  return window.SourceCleanupPolicy.applyFingerprints(analysis?.confirmableJobs || [], fingerprints);
 }
 
 async function startUpload(opts) {
@@ -4086,9 +4460,7 @@ async function startSelectedUpload(explicitJobs) {
         showCopyToast(error);
         return { ok: false, error };
       }
-      if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
-        window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-      }
+      applyAddJobsFingerprints(addRequest, result?.sourceCleanupFingerprints);
       persistQueueStateSoon();
       const added = outcome.added;
       // Use ASCII-only toast text here to avoid encoding artifacts on some systems.
@@ -4802,13 +5174,6 @@ async function abortSelectedJobs() {
   updateQueueActionButtons();
   updateStatusBar();
   persistQueueStateSoon(true);
-}
-
-async function finishUploadsInProgress() {
-  if (!uploading) return;
-  await window.api.finishAfterActive();
-  lastUploadStats.state = 'stopping';
-  updateStatusBar();
 }
 
 async function abortAllUploads() {
@@ -5563,6 +5928,7 @@ function renderSettings() {
   const globalSettings = config.globalSettings || {};
   const configuredAccounts = getAvailableHosters();
   const fm = globalSettings.folderMonitor || {};
+  const normalizedFm = window.AutomationControl.normalizeAutomationSettings(fm);
   const remoteSettings = globalSettings.remote || {};
 
   const pageDefinitions = [
@@ -5715,6 +6081,33 @@ function renderSettings() {
 
   pages.automatik.innerHTML = `
       ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
+      <section class="automation-status-card" id="automationStatusCard" aria-live="polite">
+        <div class="automation-status-header">
+          <span class="automation-state-badge state-inactive" id="automationStateBadge">Inaktiv</span>
+          <div class="automation-queue-summary">
+            <span class="automation-queue-label">Aktuelle Queue-Auslastung</span>
+            <strong class="automation-status-value automation-queue-value" id="automationQueueMeter">0 / 15.000</strong>
+            <div class="automation-queue-track" id="automationQueueMeterTrack" role="progressbar" aria-label="Aktuelle Queue-Auslastung" aria-valuemin="0" aria-valuenow="0" aria-valuemax="15000">
+              <span class="automation-queue-bar" id="automationQueueMeterBar"></span>
+            </div>
+          </div>
+        </div>
+        <div class="automation-status-metrics">
+          <div class="automation-status-metric"><span>Überwachung läuft seit</span><strong class="automation-status-value" id="automationMonitoringSince">Nie</strong></div>
+          <div class="automation-status-metric"><span>Ordner erreichbar</span><strong class="automation-status-value" id="automationFolderReachable">—</strong></div>
+          <div class="automation-status-metric"><span>Letzte erkannte Datei</span><strong class="automation-status-value" id="automationLastDetectedFile">Keine Datei erkannt</strong></div>
+          <div class="automation-status-metric"><span>Heute erkannt</span><strong class="automation-status-value" id="automationDetectedToday">0</strong></div>
+          <div class="automation-status-metric"><span>Heute eingereiht</span><strong class="automation-status-value" id="automationQueuedToday">0</strong></div>
+          <div class="automation-status-metric"><span>Heute übersprungen</span><strong class="automation-status-value" id="automationSkippedToday">0</strong></div>
+          <div class="automation-status-metric"><span>Wegen Queue-Limit zurückgestellt</span><strong class="automation-status-value" id="automationDeferredToday">0</strong></div>
+          <div class="automation-status-metric"><span>Letzter Abgleich</span><strong class="automation-status-value" id="automationLastReconcile">Nie</strong></div>
+          <div class="automation-status-metric"><span>Nächster Abgleich</span><strong class="automation-status-value" id="automationNextReconcile">Nie</strong></div>
+        </div>
+        <div class="automation-status-error" id="automationLastErrorRow" hidden>
+          <span>Letzter Fehler</span>
+          <strong id="automationLastError"></strong>
+        </div>
+      </section>
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
       <div class="settings-row automation-retry-row">
         <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
@@ -5730,11 +6123,29 @@ function renderSettings() {
           <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
         </div>
       </div>
-      <div class="settings-section-label">Ordnerüberwachung <span class="panel-status${fm.enabled && fm.folderPath ? ' active' : ''}" id="folderMonitorStatusBadge">${fm.enabled && fm.folderPath ? 'Aktiv' : 'Inaktiv'}</span></div>
+      <div class="settings-section-label">Ordnerüberwachung</div>
       <div class="settings-row">
         <label>Ordnerpfad</label>
         <input type="text" class="key-input settings-autosave" id="fmFolderPathInput" value="${escapeAttr(fm.folderPath || '')}" placeholder="Ordner wählen..." style="flex:1">
         <button class="btn btn-xs btn-secondary" id="fmChooseFolderBtn">Wählen</button>
+      </div>
+      <div class="settings-row automation-capacity-row">
+        <label for="fmQueueLimitInput">Maximale automatische Queue-Größe</label>
+        <input type="number" class="hs-input settings-autosave" id="fmQueueLimitInput" value="${normalizedFm.queueLimitJobs}" min="0" step="1">
+        <span class="hint">0 = unbegrenzt</span>
+      </div>
+      <div class="settings-row automation-interval-row">
+        <label for="fmReconcileIntervalInput">Abgleichintervall</label>
+        <select class="hs-input settings-autosave" id="fmReconcileIntervalInput">
+          ${[1, 5, 15, 30, 60].map(value => `<option value="${value}" ${normalizedFm.reconcileIntervalMinutes === value ? 'selected' : ''}>${value === 1 ? '1 Minute' : `${value} Minuten`}</option>`).join('')}
+        </select>
+      </div>
+      <div class="settings-row automation-test-action-row">
+        <div class="automation-test-action-copy">
+          <strong>Ordnerüberwachung testen</strong>
+          <span class="hint">Prüft den aktuellen Ordner schreibgeschützt mit denselben Regeln.</span>
+        </div>
+        <button class="btn btn-secondary" id="automationTestBtn" type="button">Ordnerüberwachung testen</button>
       </div>
       <div class="settings-row">
         <label>Dateierweiterungen</label>
@@ -6240,25 +6651,16 @@ function renderSettings() {
     });
   }
 
-  const updateFmBadge = () => {
-    const b = document.getElementById('folderMonitorStatusBadge');
-    if (!b) return;
-    const enabled = document.getElementById('fmEnabledInput')?.checked;
-    const hasPath = (document.getElementById('fmFolderPathInput')?.value || '').trim();
-    if (enabled && hasPath) { b.textContent = 'Aktiv'; b.className = 'panel-status active'; }
-    else { b.textContent = 'Inaktiv'; b.className = 'panel-status'; }
-  };
-  document.getElementById('fmEnabledInput')?.addEventListener('change', updateFmBadge);
-  document.getElementById('fmFolderPathInput')?.addEventListener('input', updateFmBadge);
-
   document.getElementById('fmChooseFolderBtn')?.addEventListener('click', async () => {
     const folder = await window.api.folderMonitorSelectFolder();
     if (folder) {
       document.getElementById('fmFolderPathInput').value = folder;
-      updateFmBadge();
       scheduleSettingsSave();
     }
   });
+  document.getElementById('automationTestBtn')?.addEventListener('click', runAutomationTestOverlay);
+  ensureAutomationTestOverlay();
+  refreshAutomationControlCenter();
 
   document.getElementById('remoteCopyTokenBtn').addEventListener('click', async () => {
     const token = document.getElementById('remoteTokenInput').value;
@@ -6549,6 +6951,11 @@ async function performSaveSettings(options = {}) {
     const n = parseInt(el.value || String(dflt), 10) || dflt;
     return Math.max(lo, Math.min(hi, n));
   };
+  const normalizedAutomationInputs = window.AutomationControl.normalizeAutomationSettings({
+    ...curFm,
+    queueLimitJobs: document.getElementById('fmQueueLimitInput')?.value ?? curFm.queueLimitJobs,
+    reconcileIntervalMinutes: document.getElementById('fmReconcileIntervalInput')?.value ?? curFm.reconcileIntervalMinutes
+  });
 
   const globalSettings = {
     ...cur,
@@ -6591,6 +6998,8 @@ async function performSaveSettings(options = {}) {
       skipDuplicates: elChk('fmSkipDuplicatesInput', curFm.skipDuplicates !== false),
       delaySec: elInt('fmDelaySecInput', curFm.delaySec ?? 3, 3, 1, 300),
       autoStart: elChk('fmAutoStartInput', curFm.autoStart !== false),
+      queueLimitJobs: normalizedAutomationInputs.queueLimitJobs,
+      reconcileIntervalMinutes: normalizedAutomationInputs.reconcileIntervalMinutes,
       hosters: document.querySelector('.fm-hoster-checkbox')
         ? Array.from(document.querySelectorAll('.fm-hoster-checkbox:checked')).map(el => el.dataset.fmHoster)
         : (curFm.hosters || [])
@@ -6658,25 +7067,26 @@ async function performSaveSettings(options = {}) {
 
   // Start/stop folder monitor based on settings
   const fmSettings = globalSettings.folderMonitor;
-  const badge = document.getElementById('folderMonitorStatusBadge');
   if (fmSettings && fmSettings.enabled && fmSettings.folderPath) {
-    try {
-      const folderStart = await window.api.folderMonitorStart(fmSettings);
-      if (folderStart?.includesExisting) {
-        fmSettings.includeExisting = false;
-        globalSettings.folderMonitor.includeExisting = false;
-        config.globalSettings.folderMonitor.includeExisting = false;
-        const includeExistingInput = document.getElementById('fmIncludeExistingInput');
-        if (includeExistingInput) includeExistingInput.checked = false;
+    if (fmSettings.paused !== true) {
+      try {
+        const folderStart = await window.api.folderMonitorStart(fmSettings);
+        if (folderStart?.includesExisting) {
+          fmSettings.includeExisting = false;
+          globalSettings.folderMonitor.includeExisting = false;
+          config.globalSettings.folderMonitor.includeExisting = false;
+          const includeExistingInput = document.getElementById('fmIncludeExistingInput');
+          if (includeExistingInput) includeExistingInput.checked = false;
+        }
+      } catch {
+        applyAutomationRuntimeStatus({ ...automationRuntimeStatus, error: 'Ordnerüberwachung fehlgeschlagen' });
       }
-      if (badge) { badge.textContent = 'Aktiv'; badge.className = 'panel-status active'; }
-    } catch {
-      if (badge) { badge.textContent = 'Fehler'; badge.className = 'panel-status'; }
     }
   } else {
     await window.api.folderMonitorStop();
-    if (badge) { badge.textContent = 'Inaktiv'; badge.className = 'panel-status'; }
   }
+  try { await refreshAutomationRuntimeStatus(); } catch {}
+  refreshAutomationControlCenter();
 
   // Start/stop remote server based on settings
   const remoteSettings = globalSettings.remote;
@@ -8394,6 +8804,7 @@ function prepareForWindowClose(attempt) {
 
 // --- Setup Listeners ---
 function setupListeners() {
+  ensureAutomationPauseResumeButton();
   try { initMenuBar(); } catch (err) { console.error('menu bar init failed', err); }
   document.querySelectorAll('[data-upload-sidebar-target]').forEach(button => {
     button.addEventListener('click', () => setUploadSidebarFilter(button.dataset.uploadSidebarTarget));
@@ -8480,7 +8891,7 @@ function setupListeners() {
   });
   document.getElementById('reuploadSelectedBtn').addEventListener('click', retrySelectedJobs);
   document.getElementById('abortSelectedBtn').addEventListener('click', abortSelectedJobs);
-  document.getElementById('finishStopBtn').addEventListener('click', finishUploadsInProgress);
+  document.getElementById('automationPauseResumeBtn').addEventListener('click', toggleAutomationPauseResume);
   document.getElementById('abortAllBtn').addEventListener('click', abortAllUploads);
   document.getElementById('moveTopBtn').addEventListener('click', () => moveSelectedJobs('top'));
   document.getElementById('moveUpBtn').addEventListener('click', () => moveSelectedJobs('up'));

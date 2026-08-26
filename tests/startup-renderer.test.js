@@ -64,10 +64,13 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
 const { contextBridge } = require('electron');
 const managedOnlineBackupProbeCalls = [];
 const folderMonitorProbeCalls = [];
+const automationStatusListeners = [];
+let pendingAutomationTestScan = null;
 let automationProbe = {
   history: [],
   uploadLog: [],
   paused: false,
+  runtimeStatus: {},
   automationStatusSequence: [],
   historyError: '',
   addResult: null,
@@ -76,6 +79,8 @@ let automationProbe = {
   startResult: null,
   startError: '',
   saveSettingsError: '',
+  testScanError: '',
+  deferTestScan: false,
   dryScan: { files: [], reachable: true, trigger: 'test' },
   readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
   mutationCalls: [],
@@ -163,10 +168,12 @@ contextBridge.exposeInMainWorld('api', {
   },
   getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; },
   configureAutomationProbe(value = {}) {
+    pendingAutomationTestScan = null;
     automationProbe = {
       history: Array.isArray(value.history) ? value.history : [],
       uploadLog: Array.isArray(value.uploadLog) ? value.uploadLog : [],
       paused: value.paused === true,
+      runtimeStatus: value.runtimeStatus && typeof value.runtimeStatus === 'object' ? { ...value.runtimeStatus } : {},
       automationStatusSequence: Array.isArray(value.automationStatusSequence) ? value.automationStatusSequence.map(entry => ({ ...entry })) : [],
       historyError: String(value.historyError || ''),
       addResult: value.addResult || null,
@@ -175,6 +182,8 @@ contextBridge.exposeInMainWorld('api', {
       startResult: value.startResult || null,
       startError: String(value.startError || ''),
       saveSettingsError: String(value.saveSettingsError || ''),
+      testScanError: String(value.testScanError || ''),
+      deferTestScan: value.deferTestScan === true,
       dryScan: value.dryScan || { files: [], reachable: true, trigger: 'test' },
       readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
       mutationCalls: [],
@@ -229,11 +238,40 @@ contextBridge.exposeInMainWorld('api', {
   automationGetStatus() {
     automationProbe.readCalls.status++;
     if (automationProbe.automationStatusSequence.length > 0) return Promise.resolve(automationProbe.automationStatusSequence.shift());
-    return Promise.resolve({ paused: automationProbe.paused });
+    return Promise.resolve({ ...automationProbe.runtimeStatus, paused: automationProbe.paused });
+  },
+  automationPauseAfterActive() {
+    automationProbe.mutationCalls.push(['pause']);
+    automationProbe.paused = true;
+    return Promise.resolve({ ...automationProbe.runtimeStatus, paused: true, pausedAt: 1787712000000 });
+  },
+  automationResume() {
+    automationProbe.mutationCalls.push(['resume']);
+    automationProbe.paused = false;
+    return Promise.resolve({ ...automationProbe.runtimeStatus, paused: false, pausedAt: null });
+  },
+  onAutomationStatus(listener) {
+    automationStatusListeners.push(listener);
+    return () => {
+      const index = automationStatusListeners.indexOf(listener);
+      if (index >= 0) automationStatusListeners.splice(index, 1);
+    };
+  },
+  emitAutomationStatus(status) {
+    automationStatusListeners.forEach(listener => listener({ ...status }));
   },
   folderMonitorTestScan() {
     automationProbe.readCalls.testScan++;
+    if (automationProbe.testScanError) return Promise.reject(new Error(automationProbe.testScanError));
+    if (automationProbe.deferTestScan) {
+      return new Promise(resolve => { pendingAutomationTestScan = resolve; });
+    }
     return Promise.resolve(automationProbe.dryScan);
+  },
+  releaseAutomationTestScan() {
+    const resolve = pendingAutomationTestScan;
+    pendingAutomationTestScan = null;
+    if (resolve) resolve(automationProbe.dryScan);
   },
   folderMonitorReconcile() {
     automationProbe.readCalls.reconcile++;
@@ -1224,7 +1262,7 @@ contextBridge.exposeInMainWorld('api', {
       job.sourceCleanupFingerprint = { index, nested: ['before-' + index] };
       return job;
     };
-    const summarizeCollisionPath = async (jobs, invalidJobs, result, before) => {
+    const summarizeCollisionPath = async (jobs, invalidJobs, validJobs, result, before) => {
       const probe = await window.api.getAutomationProbeState();
       const inject = probe.mutationCalls.find(call => call[0] === 'inject');
       return {
@@ -1233,7 +1271,13 @@ contextBridge.exposeInMainWorld('api', {
         sentJobs: inject?.[3] || [],
         sourceCleanupGroups: inject?.[4] || [],
         statuses: jobs.map(job => job.status),
-        invalidRestored: invalidJobs.map((job, index) => JSON.stringify(job) === before[index])
+        invalidRestored: invalidJobs.map((job, index) => JSON.stringify(job) === before[index]),
+        validJobs: validJobs.map(job => ({
+          id: job.id,
+          status: job.status,
+          requiredHosters: [...(job.sourceCleanupRequiredHosters || [])].sort(),
+          fingerprint: clone(job.sourceCleanupFingerprint)
+        }))
       };
     };
 
@@ -1248,10 +1292,11 @@ contextBridge.exposeInMainWorld('api', {
       { ...makePauseRaceJob('active-duplicate-b.mkv'), id: 'active-duplicate' },
       activeMissingJob,
       { ...makePauseRaceJob('active-shadowed.mkv'), id: 'active-shadowed' },
-      { ...makePauseRaceJob('active-unique.mkv'), id: 'active-unique' }
+      { ...makePauseRaceJob('active-unique.mkv'), id: 'active-unique' },
+      { ...makePauseRaceJob('active-already.mkv'), id: 'active-already' }
     ].map((job, index) => {
       job.file = activeCollisionFile;
-      job.hoster = [hosters[0], hosters[1], hosters[2], hosters[0], hosters[3]][index];
+      job.hoster = [hosters[0], hosters[1], hosters[2], hosters[0], hosters[3], hosters[1]][index];
       return applyCollisionCleanupFixture(job, index);
     });
     const activeShadowSibling = applyCollisionCleanupFixture({
@@ -1261,13 +1306,42 @@ contextBridge.exposeInMainWorld('api', {
       hoster: hosters[1],
       status: 'done'
     }, 5);
-    queueJobs = [...activeCollisionJobs, activeShadowSibling];
+    const activeMainFingerprint = { size: 11, mtimeMs: 22, headHash: 'active-main' };
+    const activeValidToken = 'active-valid-token';
+    activeCollisionJobs[0].sourceCleanupToken = activeValidToken;
+    activeCollisionJobs[4].sourceCleanupToken = activeValidToken;
+    activeCollisionJobs[4].sourceCleanupRequiredHosters = [];
+    activeCollisionJobs[5].sourceCleanupToken = activeValidToken;
+    activeCollisionJobs[5].sourceCleanupRequiredHosters = [];
+    const activeValidSibling = applyCollisionCleanupFixture({
+      ...makePauseRaceJob('active-running-sibling.mkv'),
+      id: 'active-running-sibling',
+      file: activeCollisionFile,
+      hoster: 'clouddrop.cc',
+      status: 'uploading'
+    }, 6);
+    activeValidSibling.sourceCleanupToken = activeValidToken;
+    activeValidSibling.sourceCleanupRequiredHosters = ['removed.example'];
+    queueJobs = [...activeCollisionJobs, activeShadowSibling, activeValidSibling];
     rebuildJobIndex();
     const activeInvalidJobs = [...activeCollisionJobs.slice(0, 4), activeShadowSibling];
     const activeCollisionBefore = activeInvalidJobs.map(job => JSON.stringify(job));
-    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    window.api.configureAutomationProbe({
+      paused: false,
+      addResult: {
+        added: 1,
+        alreadyInBatchJobIds: ['active-already'],
+        sourceCleanupFingerprints: { [activeValidToken]: activeMainFingerprint }
+      }
+    });
     const activeCollisionResult = await startSelectedUpload(activeCollisionJobs);
-    const activeCollision = await summarizeCollisionPath(activeCollisionJobs, activeInvalidJobs, activeCollisionResult, activeCollisionBefore);
+    const activeCollision = await summarizeCollisionPath(
+      activeCollisionJobs,
+      activeInvalidJobs,
+      [activeCollisionJobs[4], activeCollisionJobs[5], activeValidSibling],
+      activeCollisionResult,
+      activeCollisionBefore
+    );
 
     configureAtomicState(0);
     config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
@@ -1298,6 +1372,20 @@ contextBridge.exposeInMainWorld('api', {
       manualCollisionJobs[2].id = 'manual-shadowed';
       manualCollisionJobs[3].id = 'manual-unique';
       manualCollisionJobs.forEach(applyCollisionCleanupFixture);
+      const manualValidToken = 'manual-valid-token';
+      manualCollisionJobs[0].sourceCleanupToken = manualValidToken;
+      manualCollisionJobs[3].sourceCleanupToken = manualValidToken;
+      manualCollisionJobs[3].sourceCleanupRequiredHosters = [];
+      const manualAlready = applyCollisionCleanupFixture({
+        ...makePauseRaceJob('manual-already.mkv'),
+        id: 'manual-already',
+        file: manualCollisionFile.path,
+        hoster: 'clouddrop.cc',
+        status: 'preview'
+      }, 6);
+      manualAlready.sourceCleanupToken = manualValidToken;
+      manualAlready.sourceCleanupRequiredHosters = [];
+      manualCollisionJobs.push(manualAlready);
       const manualShadowSibling = applyCollisionCleanupFixture({
         ...makePauseRaceJob('manual-shadow-sibling.mkv'),
         id: 'manual-shadowed',
@@ -1312,19 +1400,43 @@ contextBridge.exposeInMainWorld('api', {
         status: 'done'
       }, 5);
       delete manualMissingSibling.id;
-      queueJobs.push(manualShadowSibling, manualMissingSibling);
+      const manualValidSibling = applyCollisionCleanupFixture({
+        ...makePauseRaceJob('manual-running-sibling.mkv'),
+        id: 'manual-running-sibling',
+        file: manualCollisionFile.path,
+        hoster: 'voe.sx',
+        status: 'uploading'
+      }, 7);
+      manualValidSibling.sourceCleanupToken = manualValidToken;
+      manualValidSibling.sourceCleanupRequiredHosters = ['removed.example'];
+      queueJobs.push(manualAlready, manualShadowSibling, manualMissingSibling, manualValidSibling);
       manualInvalidJobs = [...manualCollisionJobs.slice(0, 3), manualShadowSibling, manualMissingSibling];
       manualCollisionBefore = manualInvalidJobs.map(job => JSON.stringify(job));
+      manualCollisionJobs.validJobs = [manualCollisionJobs[3], manualAlready, manualValidSibling];
       rebuildJobIndex();
     };
-    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    const manualMainFingerprint = { size: 33, mtimeMs: 44, headHash: 'manual-main' };
+    window.api.configureAutomationProbe({
+      paused: false,
+      addResult: {
+        added: 1,
+        alreadyInBatchJobIds: ['manual-already'],
+        sourceCleanupFingerprints: { 'manual-valid-token': manualMainFingerprint }
+      }
+    });
     const manualCollisionResult = await applyHosterSelection();
     buildQueuePreview = originalBuildQueuePreviewForCollision;
-    const manualCollision = await summarizeCollisionPath(manualCollisionJobs, manualInvalidJobs, manualCollisionResult, manualCollisionBefore);
+    const manualCollision = await summarizeCollisionPath(
+      manualCollisionJobs,
+      manualInvalidJobs,
+      manualCollisionJobs.validJobs || [],
+      manualCollisionResult,
+      manualCollisionBefore
+    );
 
     configureAtomicState(0);
     config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
-    config.globalSettings.folderMonitor.hosters = hosters.slice();
+    config.globalSettings.folderMonitor.hosters = HOSTERS.slice();
     config.globalSettings.folderMonitor.autoStart = true;
     selectedFiles = [];
     uploading = true;
@@ -1345,7 +1457,16 @@ contextBridge.exposeInMainWorld('api', {
     delete automationMissingSibling.id;
     automationShadowSibling.sourceCleanupToken = 'automation-collision-token';
     automationMissingSibling.sourceCleanupToken = 'automation-collision-token';
-    queueJobs.push(automationShadowSibling, automationMissingSibling);
+    const automationValidSibling = applyCollisionCleanupFixture({
+      ...makePauseRaceJob('automation-running-sibling.mkv'),
+      id: 'automation-running-sibling',
+      file: 'C:\\collision\\automation-running-existing.mkv',
+      hoster: 'voe.sx',
+      status: 'uploading'
+    }, 6);
+    automationValidSibling.sourceCleanupToken = 'automation-collision-token';
+    automationValidSibling.sourceCleanupRequiredHosters = ['removed.example'];
+    queueJobs.push(automationShadowSibling, automationMissingSibling, automationValidSibling);
     rebuildJobIndex();
     const automationExternalBefore = [automationShadowSibling, automationMissingSibling].map(job => JSON.stringify(job));
     const originalCreateAutomationPreviewJobForCollision = createAutomationPreviewJob;
@@ -1356,23 +1477,39 @@ contextBridge.exposeInMainWorld('api', {
       const index = automationCollisionJobs.length;
       if (index < 2) job.id = 'automation-duplicate';
       else if (index === 2) job.id = 'automation-shadowed';
-      else job.id = 'automation-unique';
+      else if (index === 3) job.id = 'automation-unique';
+      else job.id = 'automation-already';
       applyCollisionCleanupFixture(job, index);
       job.sourceCleanupToken = 'automation-collision-token';
+      if (index >= 3) job.sourceCleanupRequiredHosters = [];
       automationCollisionJobs.push(job);
       if (index < 3) automationCollisionBefore.push(JSON.stringify(job));
       return job;
     };
-    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    const automationMainFingerprint = { size: 55, mtimeMs: 66, headHash: 'automation-main' };
+    window.api.configureAutomationProbe({
+      paused: false,
+      addResult: {
+        added: 1,
+        alreadyInBatchJobIds: ['automation-already'],
+        sourceCleanupFingerprints: { 'automation-collision-token': automationMainFingerprint }
+      }
+    });
     const automationCollisionEvaluation = await evaluateAutomationCandidates([automationCollisionFile], { dryRun: false, trigger: 'watcher' });
     const automationCollisionResult = await applyAutomationEvaluation(automationCollisionEvaluation);
     createAutomationPreviewJob = originalCreateAutomationPreviewJobForCollision;
     const automationInvalidJobs = [...automationCollisionJobs.slice(0, 3), automationShadowSibling, automationMissingSibling];
-    const automationCollision = await summarizeCollisionPath(automationCollisionJobs, automationInvalidJobs, {
-      ok: automationCollisionResult.ok,
-      error: automationCollisionResult.error,
-      admitted: automationCollisionResult.admittedFiles.map(file => file.name)
-    }, [...automationCollisionBefore, ...automationExternalBefore]);
+    const automationCollision = await summarizeCollisionPath(
+      automationCollisionJobs,
+      automationInvalidJobs,
+      [automationCollisionJobs[3], automationCollisionJobs[4], automationValidSibling],
+      {
+        ok: automationCollisionResult.ok,
+        error: automationCollisionResult.error || null,
+        admitted: automationCollisionResult.admittedFiles.map(file => file.name)
+      },
+      [...automationCollisionBefore, ...automationExternalBefore]
+    );
     uploading = false;
     const collisionAdmission = { active: activeCollision, manual: manualCollision, automation: automationCollision };
 
@@ -1570,6 +1707,293 @@ contextBridge.exposeInMainWorld('api', {
     };
     return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
+  const automationControlCenterScript = `(async () => {
+    const waitFor = async predicate => {
+      for (let attempt = 0; attempt < 80; attempt++) {
+        if (await predicate()) return true;
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      return false;
+    };
+    const fixedNow = 1787712600000;
+    const runtimeStatus = {
+      running: true,
+      reachable: true,
+      scanning: false,
+      folderPath: 'C:\\\\watch',
+      lastScanAt: fixedNow - 60000,
+      startedAt: fixedNow - 3600000,
+      error: ''
+    };
+    setUiLanguage('de');
+    config = {
+      hosters: Object.fromEntries(HOSTERS.map(hoster => [hoster, []])),
+      hosterSettings: {},
+      globalSettings: {
+        language: 'de',
+        folderMonitor: {
+          enabled: true,
+          folderPath: 'C:\\\\watch',
+          hosters: ['doodstream.com'],
+          autoStart: false,
+          reconcileIntervalMinutes: 5,
+          paused: false,
+          pausedAt: null,
+          telemetry: {
+            dateKey: new Date().toLocaleDateString('en-CA'),
+            detected: 23,
+            queued: 17,
+            skipped: 5,
+            deferred: 2,
+            lastDetectedName: 'episode-08.mkv',
+            lastDetectedAt: fixedNow - 120000,
+            lastError: '',
+            lastErrorAt: null
+          }
+        }
+      }
+    };
+    hosterSettings = {};
+    selectedFiles = [];
+    selectedUploadHosters = ['doodstream.com'];
+    queueJobs = Array.from({ length: 8420 }, (_, index) => ({
+      id: 'ui-capacity-' + index,
+      file: 'C:\\\\queue\\\\' + index + '.mkv',
+      fileName: index + '.mkv',
+      hoster: 'doodstream.com',
+      status: 'queued',
+      bytesTotal: 1
+    }));
+    rebuildJobIndex();
+    applyAutomationRuntimeStatus(runtimeStatus);
+    renderSettings();
+    document.querySelector('[data-settings-page="automatik"]')?.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const automationPage = document.querySelector('[data-subpage="automatik"]');
+    const pageHeader = automationPage?.querySelector('.settings-page-header');
+    const queueLimitInput = document.getElementById('fmQueueLimitInput');
+    const intervalInput = document.getElementById('fmReconcileIntervalInput');
+    const initial = {
+      cardImmediatelyAfterHeader: pageHeader?.nextElementSibling?.id === 'automationStatusCard',
+      stateBadge: {
+        text: document.getElementById('automationStateBadge')?.textContent.trim() || null,
+        classes: [...(document.getElementById('automationStateBadge')?.classList || [])]
+      },
+      queueMeter: document.getElementById('automationQueueMeter')?.textContent.trim() || null,
+      lastErrorHidden: document.getElementById('automationLastErrorRow')?.hidden ?? null,
+      queueLimitDefault: queueLimitInput?.value || null,
+      queueLimitMin: queueLimitInput?.min || null,
+      intervalDefault: intervalInput?.value || null,
+      intervalOptions: [...(intervalInput?.options || [])].map(option => option.value),
+      snapshotFrozen: Object.isFrozen(createAutomationStatusSnapshot()) && Object.isFrozen(createAutomationStatusSnapshot().telemetry)
+    };
+    if (queueLimitInput) {
+      queueLimitInput.value = '0';
+      queueLimitInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    initial.queueLimitAcceptsZero = queueLimitInput?.value === '0' && queueLimitInput.checkValidity();
+    const stateDefinitions = [
+      ['inactive', 'Inaktiv', 'state-inactive'],
+      ['active', 'Aktiv', 'state-active'],
+      ['paused', 'Pausiert', 'state-paused'],
+      ['queue-limited', 'Queue-Limit erreicht', 'state-queue-limited'],
+      ['disconnected', 'Ordner getrennt', 'state-disconnected'],
+      ['error', 'Fehler', 'state-error']
+    ];
+    const states = [];
+    if (typeof renderAutomationStatusSnapshot === 'function') {
+      const baseSnapshot = createAutomationStatusSnapshot();
+      for (const [state, label, className] of stateDefinitions) {
+        renderAutomationStatusSnapshot(Object.freeze({ ...baseSnapshot, state, error: state === 'error' ? 'Fehler beim Scan' : '' }));
+        const badge = document.getElementById('automationStateBadge');
+        states.push({ state, expectedLabel: label, text: badge?.textContent.trim(), classApplied: badge?.classList.contains(className) });
+      }
+      renderAutomationStatusSnapshot(baseSnapshot);
+    }
+    const originalSnapshotFactory = createAutomationStatusSnapshot;
+    let snapshotCalls = 0;
+    const pausedSnapshot = Object.freeze({
+      ...originalSnapshotFactory(),
+      paused: true,
+      state: 'paused',
+      telemetry: Object.freeze({ ...originalSnapshotFactory().telemetry })
+    });
+    if (typeof refreshAutomationControlCenter === 'function') {
+      createAutomationStatusSnapshot = () => {
+        snapshotCalls++;
+        return pausedSnapshot;
+      };
+      refreshAutomationControlCenter();
+      createAutomationStatusSnapshot = originalSnapshotFactory;
+    }
+    queueJobs = [
+      { id: 'ui-preview', file: 'C:\\\\ui-preview.mkv', fileName: 'ui-preview.mkv', hoster: 'doodstream.com', status: 'preview', bytesTotal: 1 },
+      { id: 'ui-error', file: 'C:\\\\ui-error.mkv', fileName: 'ui-error.mkv', hoster: 'doodstream.com', status: 'error', bytesTotal: 1 }
+    ];
+    uploadSidebarFilter = 'all';
+    queueSearchQuery = '';
+    queueHosterFilter = '';
+    queueStatusFilter = '';
+    _queueFilterCache = { filter: '', source: null, result: [] };
+    selectedJobIds.clear();
+    selectedJobIds.add('ui-preview');
+    selectedJobIds.add('ui-error');
+    rebuildJobIndex();
+    updateUploadView({ rebuildPreview: false });
+    config.globalSettings.folderMonitor.paused = true;
+    applyAutomationRuntimeStatus({ ...runtimeStatus, paused: true, pausedAt: fixedNow });
+    updateQueueActionButtons();
+    document.querySelector('[data-view="upload"]')?.click();
+    const pauseButton = document.getElementById('automationPauseResumeBtn');
+    const pausedControls = {
+      snapshotCalls,
+      pauseButtonDisabled: pauseButton?.disabled ?? null,
+      pauseButtonText: pauseButton?.textContent.trim() || null,
+      pauseButtonLabel: pauseButton?.getAttribute('aria-label') || null,
+      pauseButtonGreen: pauseButton?.classList.contains('automation-resume') ?? null,
+      pauseButtonFits: pauseButton ? pauseButton.scrollWidth <= pauseButton.clientWidth + 1 && pauseButton.getBoundingClientRect().width > 34 : null,
+      startDisabled: Object.fromEntries(['startUploadBtn', 'startSelectedBtn', 'reuploadSelectedBtn', 'retryFailedBtn'].map(id => [id, document.getElementById(id)?.disabled ?? null])),
+      contextStartDisabled: document.querySelector('[data-action="start-selected"]')?.getAttribute('aria-disabled') || null,
+      contextRetryDisabled: document.querySelector('[data-action="retry-selected"]')?.getAttribute('aria-disabled') || null
+    };
+    window.api.configureAutomationProbe({ paused: true, runtimeStatus });
+    pauseButton?.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const afterResumeProbe = await window.api.getAutomationProbeState();
+    const resumedLabel = document.getElementById('automationPauseResumeBtn')?.textContent.trim() || null;
+    selectedJobIds.clear();
+    selectedJobIds.add('ui-preview');
+    selectedJobIds.add('ui-error');
+    updateQueueActionButtons();
+    const startDisabledAfterResume = Object.fromEntries(['startUploadBtn', 'startSelectedBtn', 'reuploadSelectedBtn', 'retryFailedBtn'].map(id => [id, document.getElementById(id)?.disabled ?? null]));
+    document.getElementById('automationPauseResumeBtn')?.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const afterPauseProbe = await window.api.getAutomationProbeState();
+    const pausedLabel = document.getElementById('automationPauseResumeBtn')?.textContent.trim() || null;
+    setUiLanguage('en');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const pausedLabelEnglish = document.getElementById('automationPauseResumeBtn')?.textContent.trim() || null;
+    setUiLanguage('de');
+    const pauseResumeActions = {
+      calls: afterPauseProbe.mutationCalls.filter(call => call[0] === 'resume' || call[0] === 'pause').map(call => call[0]),
+      resumedLabel,
+      startDisabledAfterResume,
+      pausedLabel,
+      pausedLabelEnglish,
+      configPaused: config.globalSettings.folderMonitor.paused
+    };
+    document.querySelector('[data-view="settings"]')?.click();
+    document.querySelector('[data-settings-page="automatik"]')?.click();
+    config.globalSettings.folderMonitor.paused = false;
+    applyAutomationRuntimeStatus(runtimeStatus);
+    queueJobs = Array.from({ length: 8420 }, (_, index) => ({
+      id: 'ui-test-' + index,
+      file: 'C:\\\\queue-test\\\\' + index + '.mkv',
+      fileName: index + '.mkv',
+      hoster: 'doodstream.com',
+      status: 'queued',
+      bytesTotal: 1
+    }));
+    rebuildJobIndex();
+    if (typeof refreshAutomationControlCenter === 'function') refreshAutomationControlCenter();
+    const dryFiles = [
+      { path: 'C:\\\\watch\\\\accepted.mkv', name: 'accepted.mkv', size: 1, mtimeMs: 1, filterMatched: true },
+      { path: 'C:\\\\watch\\\\filtered.txt', name: 'filtered.txt', size: 1, mtimeMs: 2, filterMatched: false },
+      { path: 'C:\\\\watch\\\\unavailable.mkv', name: 'unavailable.mkv', size: 1, mtimeMs: 3, filterMatched: true, unavailable: true },
+      { path: 'C:\\\\watch\\\\processed.mkv', name: 'processed.mkv', size: 1, mtimeMs: 4, filterMatched: true }
+    ];
+    window.api.configureAutomationProbe({
+      paused: false,
+      runtimeStatus,
+      deferTestScan: true,
+      dryScan: { files: dryFiles, reachable: true, trigger: 'test' },
+      history: [{ id: 'ui-history', files: [{ path: dryFiles[3].path, name: dryFiles[3].name, results: [{ hoster: 'doodstream.com', status: 'done' }] }] }]
+    });
+    const beforeTestProbe = await window.api.getAutomationProbeState();
+    const testButton = document.getElementById('automationTestBtn');
+    testButton?.focus();
+    testButton?.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const overlay = document.getElementById('automationTestOverlay');
+    const loading = {
+      visible: overlay?.style.display === 'flex' && overlay?.getAttribute('aria-hidden') === 'false',
+      busy: overlay?.getAttribute('aria-busy') || null,
+      spinnerVisible: document.getElementById('automationTestSpinner')?.hidden === false,
+      focusInside: Boolean(overlay?.contains(document.activeElement)),
+      backgroundInert: Array.from(document.body.children).filter(element => element !== overlay && 'inert' in element).every(element => element.inert)
+    };
+    window.api.releaseAutomationTestScan();
+    await waitFor(() => overlay?.getAttribute('aria-busy') === 'false');
+    const metricValues = Object.fromEntries([...document.querySelectorAll('[data-automation-test-metric]')].map(row => [
+      row.dataset.automationTestMetric,
+      row.querySelector('.automation-test-value')?.textContent.trim() || ''
+    ]));
+    const germanMetricLabels = [...document.querySelectorAll('[data-automation-test-metric] .automation-test-label')].map(element => element.textContent.trim());
+    const afterTestProbe = await window.api.getAutomationProbeState();
+    const completed = {
+      metricValues,
+      metricCount: Object.keys(metricValues).length,
+      germanMetricLabels,
+      errorHidden: document.getElementById('automationTestError')?.hidden ?? null,
+      actionIds: [...(overlay?.querySelectorAll('button') || [])].map(button => button.id),
+      mutationFree: JSON.stringify(afterTestProbe.mutationCalls) === JSON.stringify(beforeTestProbe.mutationCalls)
+    };
+    setUiLanguage('en');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const english = {
+      queueMeter: document.getElementById('automationQueueMeter')?.textContent.trim() || null,
+      availableSlots: document.querySelector('[data-automation-test-metric="availableSlots"] .automation-test-value')?.textContent.trim() || null,
+      metricLabels: [...document.querySelectorAll('[data-automation-test-metric] .automation-test-label')].map(element => element.textContent.trim())
+    };
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    const closed = {
+      hidden: overlay?.style.display === 'none' && overlay?.getAttribute('aria-hidden') === 'true',
+      focusReturned: document.activeElement?.id === 'automationTestBtn',
+      backgroundRestored: Array.from(document.body.children).filter(element => element !== overlay && 'inert' in element).every(element => !element.inert)
+    };
+    setUiLanguage('de');
+    window.api.configureAutomationProbe({ paused: false, runtimeStatus, testScanError: 'token=secret-value' });
+    document.getElementById('automationTestBtn')?.click();
+    await waitFor(() => document.getElementById('automationTestOverlay')?.getAttribute('aria-busy') === 'false');
+    const errorText = document.getElementById('automationTestError')?.textContent.trim() || '';
+    const errorState = {
+      visible: document.getElementById('automationTestError')?.hidden === false,
+      text: errorText,
+      secretExposed: /secret-value|token=/i.test(errorText)
+    };
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    window.api.configureAutomationProbe({
+      paused: false,
+      runtimeStatus,
+      deferTestScan: true,
+      dryScan: { files: dryFiles, reachable: true, trigger: 'test' }
+    });
+    document.getElementById('automationTestBtn')?.click();
+    await waitFor(() => document.getElementById('automationTestOverlay')?.getAttribute('aria-busy') === 'true');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    const enabledAfterCancel = document.getElementById('automationTestBtn')?.disabled === false;
+    window.api.releaseAutomationTestScan();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const cancelLoading = {
+      hidden: document.getElementById('automationTestOverlay')?.style.display === 'none',
+      enabledAfterCancel,
+      lateResultStayedClosed: document.getElementById('automationTestOverlay')?.style.display === 'none'
+    };
+    return { initial, states, pausedControls, pauseResumeActions, loading, completed, english, closed, errorState, cancelLoading };
+  })()`;
+  const automationControlCenterLayoutScript = `(() => {
+    const card = document.getElementById('automationStatusCard');
+    const metrics = document.querySelector('.automation-status-metrics');
+    const metricValue = document.querySelector('.automation-status-value');
+    return {
+      viewportWidth: document.documentElement.clientWidth,
+      documentOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+      cardOverflow: card ? card.scrollWidth > card.clientWidth + 1 : null,
+      metricsOverflow: metrics ? metrics.scrollWidth > metrics.clientWidth + 1 : null,
+      gridTemplateColumns: metrics ? getComputedStyle(metrics).gridTemplateColumns : null,
+      tabularNumbers: metricValue ? getComputedStyle(metricValue).fontVariantNumeric.includes('tabular-nums') : null
+    };
+  })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
       a: 'AAAAAAAAAAAAAAAAAAAAAA',
@@ -1701,41 +2125,52 @@ contextBridge.exposeInMainWorld('api', {
       const copy = language === 'de' ? 'Schlüssel kopieren' : 'Copy key';
       const remove = language === 'de' ? 'Online-Backup löschen' : 'Delete online backup';
       document.documentElement.lang = language;
-      document.body.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><h4>Managed</h4><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22.08.2026 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article><article class="online-backup-managed-row"><span class="online-backup-managed-key">ZYXWVUTS…9876</span><span class="online-backup-managed-created">21.08.2026 11:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
-      const panel = document.querySelector('.online-backup-panel');
+      const fixture = document.createElement('div');
+      fixture.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><h4>Managed</h4><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22.08.2026 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article><article class="online-backup-managed-row"><span class="online-backup-managed-key">ZYXWVUTS…9876</span><span class="online-backup-managed-created">21.08.2026 11:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">' + copy + '</button><button class="btn btn-danger">' + remove + '</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
+      document.body.appendChild(fixture);
+      const panel = fixture.querySelector('.online-backup-panel');
       const panelRect = panel.getBoundingClientRect();
       const panelStyle = getComputedStyle(panel);
-      const rows = [...document.querySelectorAll('.online-backup-managed-row')].map(row => {
+      const rows = [...fixture.querySelectorAll('.online-backup-managed-row')].map(row => {
         const key = row.querySelector('.online-backup-managed-key').getBoundingClientRect();
         const created = row.querySelector('.online-backup-managed-created').getBoundingClientRect();
         const actions = row.querySelector('.online-backup-managed-actions').getBoundingClientRect();
         return { keyLeft: key.left, createdLeft: created.left, actionsRight: actions.right };
       });
-      return {
+      const result = {
         rows,
         contentRight: panelRect.right - parseFloat(panelStyle.paddingRight),
-        createRight: document.querySelector('.online-backup-footer button').getBoundingClientRect().right
+        createRight: fixture.querySelector('.online-backup-footer button').getBoundingClientRect().right
       };
+      fixture.remove();
+      return result;
     };
     return { german: measure('de'), english: measure('en') };
   })()`;
   const onlineBackupNarrowLayoutScript = `(() => {
-    document.body.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22/08/2026, 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">Copy key</button><button class="btn btn-danger">Delete online backup</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
-    const row = document.querySelector('.online-backup-managed-row').getBoundingClientRect();
-    const key = document.querySelector('.online-backup-managed-key').getBoundingClientRect();
-    const created = document.querySelector('.online-backup-managed-created').getBoundingClientRect();
-    const actions = document.querySelector('.online-backup-managed-actions').getBoundingClientRect();
-    const rowStyle = getComputedStyle(document.querySelector('.online-backup-managed-row'));
+    const fixture = document.createElement('div');
+    fixture.innerHTML = '<section class="online-backup-panel"><section class="online-backup-managed"><div class="online-backup-managed-list"><article class="online-backup-managed-row"><span class="online-backup-managed-key">ABCDEFGH…1234</span><span class="online-backup-managed-created">22/08/2026, 12:00</span><div class="online-backup-managed-actions"><button class="btn btn-secondary">Copy key</button><button class="btn btn-danger">Delete online backup</button></div></article></div></section><footer class="online-backup-footer"><button class="btn btn-primary">Generate new key</button></footer></section>';
+    document.body.appendChild(fixture);
+    const rowElement = fixture.querySelector('.online-backup-managed-row');
+    const row = rowElement.getBoundingClientRect();
+    const key = fixture.querySelector('.online-backup-managed-key').getBoundingClientRect();
+    const created = fixture.querySelector('.online-backup-managed-created').getBoundingClientRect();
+    const actions = fixture.querySelector('.online-backup-managed-actions').getBoundingClientRect();
+    const rowStyle = getComputedStyle(rowElement);
     const rowContentWidth = row.width - parseFloat(rowStyle.paddingLeft) - parseFloat(rowStyle.paddingRight) - parseFloat(rowStyle.borderLeftWidth) - parseFloat(rowStyle.borderRightWidth);
-    const footer = document.querySelector('.online-backup-footer').getBoundingClientRect();
-    const create = document.querySelector('.online-backup-footer button').getBoundingClientRect();
-    return {
+    const footer = fixture.querySelector('.online-backup-footer').getBoundingClientRect();
+    const create = fixture.querySelector('.online-backup-footer button').getBoundingClientRect();
+    const result = {
+      innerWidth,
+      narrowMedia: matchMedia('(max-width: 820px)').matches,
       horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-      rowOverflow: document.querySelector('.online-backup-managed-row').scrollWidth > document.querySelector('.online-backup-managed-row').clientWidth + 1,
+      rowOverflow: rowElement.scrollWidth > rowElement.clientWidth + 1,
       stacked: key.top < created.top && created.top < actions.top,
       actionsStretched: Math.abs(actions.width - rowContentWidth) <= 1,
       createStretched: Math.abs(create.width - footer.width) <= 1
     };
+    fixture.remove();
+    return result;
   })()`;
   const probeSource = `
 const { app, BrowserWindow, screen } = require('electron');
@@ -1745,6 +2180,15 @@ const outputPath = process.env.MHU_RDP_COMPOSITOR_OUTPUT;
 function pixelAt(bitmap, width, x, y) {
   const offset = (y * width + x) * 4;
   return [bitmap[offset + 2], bitmap[offset + 1], bitmap[offset], bitmap[offset + 3]];
+}
+async function waitForContentWidth(browserWindow, target) {
+  let width = 0;
+  for (let attempt = 0; attempt < 80; attempt++) {
+    width = await browserWindow.webContents.executeJavaScript('innerWidth');
+    if (Math.abs(width - target) <= 1) return width;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return width;
 }
 app.whenReady().then(async () => {
   const display = screen.getPrimaryDisplay();
@@ -1777,9 +2221,12 @@ app.whenReady().then(async () => {
   const settingsSearchBehavior = await window.webContents.executeJavaScript(${JSON.stringify(settingsSearchBehaviorScript)});
   const folderMonitorBehavior = await window.webContents.executeJavaScript(${JSON.stringify(folderMonitorBehaviorScript)});
   const automationPipeline = await window.webContents.executeJavaScript(${JSON.stringify(automationPipelineScript)});
+  const automationControlCenter = await window.webContents.executeJavaScript(${JSON.stringify(automationControlCenterScript)});
+  const automationControlCenterWideLayout = await window.webContents.executeJavaScript(${JSON.stringify(automationControlCenterLayoutScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   window.setContentSize(760, Math.min(900, display.workAreaSize.height));
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await waitForContentWidth(window, 760);
+  const automationControlCenterNarrowLayout = await window.webContents.executeJavaScript(${JSON.stringify(automationControlCenterLayoutScript)});
   const onlineBackupNarrowLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupNarrowLayoutScript)});
   fs.writeFileSync(outputPath, JSON.stringify({
     size,
@@ -1796,6 +2243,9 @@ app.whenReady().then(async () => {
     settingsSearchBehavior,
     folderMonitorBehavior,
     automationPipeline,
+    automationControlCenter,
+    automationControlCenterWideLayout,
+    automationControlCenterNarrowLayout,
     onlineBackupBehavior,
     onlineBackupLayout,
     onlineBackupNarrowLayout
@@ -2149,7 +2599,7 @@ app.whenReady().then(async () => {
     });
     assert.deepEqual(result.automationPipeline.collisionResolver, {
       clean: {
-        consistent: false,
+        consistent: true,
         added: ['resolver-unique.mkv'],
         already: [],
         skipped: [],
@@ -2165,28 +2615,61 @@ app.whenReady().then(async () => {
     });
     assert.deepEqual(result.automationPipeline.collisionAdmission, {
       active: {
-        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
-        sentIds: ['active-unique'],
-        sentJobs: [{ id: 'active-unique', requiredHosters: ['byse.sx'] }],
-        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['active-unique'] }],
-        statuses: ['preview', 'preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true, true, true]
+        result: { ok: true, added: 1 },
+        sentIds: ['active-unique', 'active-already'],
+        sentJobs: [
+          { id: 'active-unique', requiredHosters: ['removed.example', 'byse.sx', 'voe.sx', 'clouddrop.cc'] },
+          { id: 'active-already', requiredHosters: ['removed.example', 'byse.sx', 'voe.sx', 'clouddrop.cc'] }
+        ],
+        sourceCleanupGroups: [{
+          requiredHosters: ['removed.example', 'byse.sx', 'voe.sx', 'clouddrop.cc'],
+          jobIds: ['active-unique', 'active-already', 'active-running-sibling']
+        }],
+        statuses: ['preview', 'preview', 'preview', 'preview', 'queued', 'queued'],
+        invalidRestored: [true, true, true, true, true],
+        validJobs: [
+          { id: 'active-unique', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 11, mtimeMs: 22, headHash: 'active-main' } },
+          { id: 'active-already', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 11, mtimeMs: 22, headHash: 'active-main' } },
+          { id: 'active-running-sibling', status: 'uploading', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 11, mtimeMs: 22, headHash: 'active-main' } }
+        ]
       },
       manual: {
-        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
-        sentIds: ['manual-unique'],
-        sentJobs: [{ id: 'manual-unique', requiredHosters: ['byse.sx'] }],
-        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['manual-unique'] }],
-        statuses: ['preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true, true, true]
+        result: true,
+        sentIds: ['manual-unique', 'manual-already'],
+        sentJobs: [
+          { id: 'manual-unique', requiredHosters: ['removed.example', 'byse.sx', 'clouddrop.cc', 'voe.sx'] },
+          { id: 'manual-already', requiredHosters: ['removed.example', 'byse.sx', 'clouddrop.cc', 'voe.sx'] }
+        ],
+        sourceCleanupGroups: [{
+          requiredHosters: ['removed.example', 'byse.sx', 'clouddrop.cc', 'voe.sx'],
+          jobIds: ['manual-unique', 'manual-already', 'manual-running-sibling']
+        }],
+        statuses: ['preview', 'preview', 'preview', 'queued', 'queued'],
+        invalidRestored: [true, true, true, true, true],
+        validJobs: [
+          { id: 'manual-unique', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 33, mtimeMs: 44, headHash: 'manual-main' } },
+          { id: 'manual-already', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 33, mtimeMs: 44, headHash: 'manual-main' } },
+          { id: 'manual-running-sibling', status: 'uploading', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 33, mtimeMs: 44, headHash: 'manual-main' } }
+        ]
       },
       automation: {
-        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.', admitted: [] },
-        sentIds: ['automation-unique'],
-        sentJobs: [{ id: 'automation-unique', requiredHosters: ['byse.sx'] }],
-        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['automation-unique'] }],
-        statuses: ['preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true, true, true]
+        result: { ok: true, error: null, admitted: ['automation.mkv'] },
+        sentIds: ['automation-unique', 'automation-already'],
+        sentJobs: [
+          { id: 'automation-unique', requiredHosters: ['removed.example', 'voe.sx', 'byse.sx', 'clouddrop.cc'] },
+          { id: 'automation-already', requiredHosters: ['removed.example', 'voe.sx', 'byse.sx', 'clouddrop.cc'] }
+        ],
+        sourceCleanupGroups: [{
+          requiredHosters: ['removed.example', 'voe.sx', 'byse.sx', 'clouddrop.cc'],
+          jobIds: ['automation-running-sibling', 'automation-unique', 'automation-already']
+        }],
+        statuses: ['preview', 'preview', 'preview', 'queued', 'queued'],
+        invalidRestored: [true, true, true, true, true],
+        validJobs: [
+          { id: 'automation-unique', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 55, mtimeMs: 66, headHash: 'automation-main' } },
+          { id: 'automation-already', status: 'queued', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 55, mtimeMs: 66, headHash: 'automation-main' } },
+          { id: 'automation-running-sibling', status: 'uploading', requiredHosters: ['byse.sx', 'clouddrop.cc', 'removed.example', 'voe.sx'], fingerprint: { size: 55, mtimeMs: 66, headHash: 'automation-main' } }
+        ]
       }
     });
     assert.deepEqual(result.automationPipeline.pauseBetweenApplyAndStart, {
@@ -2285,6 +2768,132 @@ app.whenReady().then(async () => {
       startCalls: 0,
       injectCalls: 0
     });
+    assert.equal(result.automationControlCenter.initial.cardImmediatelyAfterHeader, true);
+    assert.equal(result.automationControlCenter.initial.stateBadge.text, 'Aktiv');
+    assert.equal(result.automationControlCenter.initial.stateBadge.classes.includes('state-active'), true);
+    assert.equal(result.automationControlCenter.initial.queueMeter, '8.420 / 15.000');
+    assert.equal(result.automationControlCenter.initial.lastErrorHidden, true);
+    assert.equal(result.automationControlCenter.initial.queueLimitDefault, '15000');
+    assert.equal(result.automationControlCenter.initial.queueLimitMin, '0');
+    assert.equal(result.automationControlCenter.initial.queueLimitAcceptsZero, true);
+    assert.equal(result.automationControlCenter.initial.intervalDefault, '5');
+    assert.deepEqual(result.automationControlCenter.initial.intervalOptions, ['1', '5', '15', '30', '60']);
+    assert.equal(result.automationControlCenter.initial.snapshotFrozen, true);
+    assert.deepEqual(result.automationControlCenter.states, [
+      { state: 'inactive', expectedLabel: 'Inaktiv', text: 'Inaktiv', classApplied: true },
+      { state: 'active', expectedLabel: 'Aktiv', text: 'Aktiv', classApplied: true },
+      { state: 'paused', expectedLabel: 'Pausiert', text: 'Pausiert', classApplied: true },
+      { state: 'queue-limited', expectedLabel: 'Queue-Limit erreicht', text: 'Queue-Limit erreicht', classApplied: true },
+      { state: 'disconnected', expectedLabel: 'Ordner getrennt', text: 'Ordner getrennt', classApplied: true },
+      { state: 'error', expectedLabel: 'Fehler', text: 'Fehler', classApplied: true }
+    ]);
+    assert.deepEqual(result.automationControlCenter.pausedControls, {
+      snapshotCalls: 1,
+      pauseButtonDisabled: false,
+      pauseButtonText: 'Fortsetzen',
+      pauseButtonLabel: 'Fortsetzen',
+      pauseButtonGreen: true,
+      pauseButtonFits: true,
+      startDisabled: {
+        startUploadBtn: true,
+        startSelectedBtn: true,
+        reuploadSelectedBtn: true,
+        retryFailedBtn: true
+      },
+      contextStartDisabled: 'true',
+      contextRetryDisabled: 'true'
+    });
+    assert.deepEqual(result.automationControlCenter.pauseResumeActions, {
+      calls: ['resume', 'pause'],
+      resumedLabel: 'Abschließen und pausieren',
+      startDisabledAfterResume: {
+        startUploadBtn: false,
+        startSelectedBtn: false,
+        reuploadSelectedBtn: false,
+        retryFailedBtn: false
+      },
+      pausedLabel: 'Fortsetzen',
+      pausedLabelEnglish: 'Resume',
+      configPaused: true
+    });
+    assert.deepEqual(result.automationControlCenter.loading, {
+      visible: true,
+      busy: 'true',
+      spinnerVisible: true,
+      focusInside: true,
+      backgroundInert: true
+    });
+    assert.deepEqual(result.automationControlCenter.completed, {
+      metricValues: {
+        found: '4',
+        filterMatched: '3',
+        alreadyProcessed: '1',
+        unavailable: '1',
+        sizeLimitedJobs: '0',
+        acceptedFiles: '1',
+        selectedTargets: '1',
+        resultingJobs: '1',
+        availableSlots: '6.580',
+        deferredFiles: '0'
+      },
+      metricCount: 10,
+      germanMetricLabels: [
+        'Gefundene Dateien',
+        'Passend zum Dateifilter',
+        'Bereits verarbeitet',
+        'Fehlend, leer oder nicht lesbar',
+        'Durch Größenlimits ausgeschlossen',
+        'Akzeptierte Dateien',
+        'Ausgewählte Ziele',
+        'Entstehende Upload-Jobs',
+        'Verfügbare Jobs bis zum Queue-Limit',
+        'Aktuell zurückzustellende Dateien'
+      ],
+      errorHidden: true,
+      actionIds: ['automationTestCloseBtn'],
+      mutationFree: true
+    });
+    assert.deepEqual(result.automationControlCenter.english, {
+      queueMeter: '8,420 / 15,000',
+      availableSlots: '6,580',
+      metricLabels: [
+        'Files found',
+        'Matching file filter',
+        'Already processed',
+        'Missing, empty, or unreadable',
+        'Excluded by size limits',
+        'Accepted files',
+        'Selected destinations',
+        'Resulting upload jobs',
+        'Available jobs before queue limit',
+        'Files currently deferred'
+      ]
+    });
+    assert.deepEqual(result.automationControlCenter.closed, {
+      hidden: true,
+      focusReturned: true,
+      backgroundRestored: true
+    });
+    assert.deepEqual(result.automationControlCenter.errorState, {
+      visible: true,
+      text: 'Ordnerüberwachung konnte nicht getestet werden.',
+      secretExposed: false
+    });
+    assert.deepEqual(result.automationControlCenter.cancelLoading, {
+      hidden: true,
+      enabledAfterCancel: true,
+      lateResultStayedClosed: true
+    });
+    assert.equal(result.automationControlCenterWideLayout.documentOverflow, false);
+    assert.equal(result.automationControlCenterWideLayout.cardOverflow, false);
+    assert.equal(result.automationControlCenterWideLayout.metricsOverflow, false);
+    assert.equal(result.automationControlCenterWideLayout.tabularNumbers, true);
+    assert.ok(result.automationControlCenterWideLayout.gridTemplateColumns);
+    assert.equal(result.automationControlCenterNarrowLayout.viewportWidth, 760);
+    assert.equal(result.automationControlCenterNarrowLayout.documentOverflow, false);
+    assert.equal(result.automationControlCenterNarrowLayout.cardOverflow, false);
+    assert.equal(result.automationControlCenterNarrowLayout.metricsOverflow, false);
+    assert.equal(result.automationControlCenterNarrowLayout.tabularNumbers, true);
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
     assert.deepEqual(result.onlineBackupBehavior.initialWarning, {
       hidden: false,
@@ -2357,6 +2966,8 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].keyLeft - result.onlineBackupLayout.english.rows[0].keyLeft) <= 1);
     assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].createdLeft - result.onlineBackupLayout.english.rows[0].createdLeft) <= 1);
     assert.ok(Math.abs(result.onlineBackupLayout.german.rows[0].actionsRight - result.onlineBackupLayout.english.rows[0].actionsRight) <= 1);
+    assert.equal(result.onlineBackupNarrowLayout.innerWidth, 760);
+    assert.equal(result.onlineBackupNarrowLayout.narrowMedia, true);
     assert.equal(result.onlineBackupNarrowLayout.horizontalOverflow, false);
     assert.equal(result.onlineBackupNarrowLayout.rowOverflow, false);
     assert.equal(result.onlineBackupNarrowLayout.stacked, true);
