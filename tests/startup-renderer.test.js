@@ -71,6 +71,7 @@ let automationProbe = {
   automationStatusSequence: [],
   historyError: '',
   addResult: null,
+  addMode: '',
   addError: '',
   startResult: null,
   startError: '',
@@ -169,6 +170,7 @@ contextBridge.exposeInMainWorld('api', {
       automationStatusSequence: Array.isArray(value.automationStatusSequence) ? value.automationStatusSequence.map(entry => ({ ...entry })) : [],
       historyError: String(value.historyError || ''),
       addResult: value.addResult || null,
+      addMode: String(value.addMode || ''),
       addError: String(value.addError || ''),
       startResult: value.startResult || null,
       startError: String(value.startError || ''),
@@ -253,6 +255,13 @@ contextBridge.exposeInMainWorld('api', {
     folderMonitorProbeCalls.push(['inject', payload?.jobs?.length || 0]);
     automationProbe.mutationCalls.push(['inject', payload?.jobs?.length || 0]);
     if (automationProbe.addError) return Promise.reject(new Error(automationProbe.addError));
+    if (automationProbe.addMode === 'partial-consistent' && payload?.jobs?.length >= 4) {
+      return Promise.resolve({
+        added: payload.jobs.length - 2,
+        alreadyInBatchJobIds: [payload.jobs[1].id],
+        skippedJobs: [{ jobId: payload.jobs[2].id, reason: 'Kein gültiger Account' }]
+      });
+    }
     return Promise.resolve(automationProbe.addResult || { added: payload?.jobs?.length || 0 });
   },
   startUpload(payload) {
@@ -969,6 +978,206 @@ contextBridge.exposeInMainWorld('api', {
       exception: await runCleanupRollbackCase('exception', { addError: 'token=secret-value' }),
       unconfirmed: await runCleanupRollbackCase('unconfirmed', { addResult: { added: 0 } })
     };
+    const cleanupPresenceState = job => Object.fromEntries([
+      'sourceCleanupToken',
+      'sourceCleanupRequiredHosters',
+      'sourceCleanupCompletedHosters',
+      'sourceCleanupFingerprint'
+    ].map(field => [field, {
+      present: Object.prototype.hasOwnProperty.call(job, field),
+      value: Object.prototype.hasOwnProperty.call(job, field) ? clone(job[field]) : null
+    }]));
+    const setupCrossPathCleanup = name => {
+      configureAtomicState(0);
+      config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+      selectedUploadHosters = ['doodstream.com'];
+      const token = 'cross-token-' + name;
+      const target = {
+        ...makePauseRaceJob(name + '.mkv'),
+        id: 'cross-target-' + name,
+        file: 'C:\\\\cleanup-target\\\\' + name + '.mkv',
+        sourceCleanupToken: token,
+        sourceCleanupRequiredHosters: ['doodstream.com']
+      };
+      const sibling = {
+        ...makePauseRaceJob(name + '-done.mkv'),
+        id: 'cross-sibling-' + name,
+        file: 'D:\\\\cleanup-sibling\\\\' + name + '.mkv',
+        hoster: 'voe.sx',
+        status: 'done',
+        sourceCleanupToken: token
+      };
+      const unrelated = {
+        ...makePauseRaceJob(name + '-unrelated.mkv'),
+        id: 'cross-unrelated-' + name,
+        file: 'E:\\\\cleanup-unrelated\\\\' + name + '.mkv',
+        hoster: 'vidmoly.me',
+        status: 'done'
+      };
+      queueJobs = [target, sibling, unrelated];
+      rebuildJobIndex();
+      return { target, sibling, unrelated, token };
+    };
+    const crossPathResult = (fixture, before, result) => ({
+      byteIdentical: JSON.stringify(fixture.map(cleanupPresenceState)) === before,
+      statuses: fixture.map(job => job.status),
+      result
+    });
+    const originalAlertForCrossPath = showAppAlert;
+    showAppAlert = async () => {};
+    let fixture = setupCrossPathCleanup('start-upload');
+    let fixtureJobs = [fixture.target, fixture.sibling, fixture.unrelated];
+    let fixtureBefore = JSON.stringify(fixtureJobs.map(cleanupPresenceState));
+    window.api.configureAutomationProbe({ paused: false, startResult: { error: 'Automatik ist pausiert' } });
+    const startUploadCleanup = crossPathResult(fixtureJobs, fixtureBefore, await startUpload());
+    fixture = setupCrossPathCleanup('inactive-selected');
+    fixtureJobs = [fixture.target, fixture.sibling, fixture.unrelated];
+    fixtureBefore = JSON.stringify(fixtureJobs.map(cleanupPresenceState));
+    uploading = false;
+    window.api.configureAutomationProbe({ paused: false, startResult: { started: false } });
+    const inactiveSelectedCleanup = crossPathResult(fixtureJobs, fixtureBefore, await startSelectedUpload([fixture.target]));
+    fixture = setupCrossPathCleanup('active-selected');
+    fixtureJobs = [fixture.target, fixture.sibling, fixture.unrelated];
+    fixtureBefore = JSON.stringify(fixtureJobs.map(cleanupPresenceState));
+    uploading = true;
+    window.api.configureAutomationProbe({ paused: false, addResult: { error: 'Automatik ist pausiert', added: 0 } });
+    const activeSelectedCleanup = crossPathResult(fixtureJobs, fixtureBefore, await startSelectedUpload([fixture.target]));
+    fixture = setupCrossPathCleanup('manual-modal');
+    fixture.target.automationAdmission = true;
+    fixtureJobs = [fixture.target, fixture.sibling, fixture.unrelated];
+    fixtureBefore = JSON.stringify(fixtureJobs.map(cleanupPresenceState));
+    uploading = true;
+    _pendingFiles = [{ path: fixture.target.file, name: fixture.target.fileName, size: 1 }];
+    _pendingImportInspection = { candidateCount: 1, duplicateCount: 0, unavailableCount: 0, accepted: _pendingFiles.slice() };
+    _pendingImportInspections = 0;
+    _pendingFolderMonitorAutoStart.clear();
+    const crossManualInput = document.createElement('input');
+    crossManualInput.type = 'checkbox';
+    crossManualInput.dataset.hosterModal = 'doodstream.com';
+    crossManualInput.checked = true;
+    document.getElementById('hosterModalList').replaceChildren(crossManualInput);
+    window.api.configureAutomationProbe({ paused: false, addResult: { error: 'Automatik ist pausiert', added: 0 } });
+    const manualModalCleanup = crossPathResult(fixtureJobs, fixtureBefore, await applyHosterSelection());
+    fixture = setupCrossPathCleanup('automation');
+    queueJobs = [fixture.sibling, fixture.unrelated];
+    rebuildJobIndex();
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.autoStart = true;
+    uploading = true;
+    const originalCreateAutomationPreviewJob = createAutomationPreviewJob;
+    createAutomationPreviewJob = (file, hoster) => ({
+      ...originalCreateAutomationPreviewJob(file, hoster),
+      sourceCleanupToken: fixture.token
+    });
+    const automationFile = { path: fixture.target.file, name: fixture.target.fileName, size: 1, mtimeMs: 1 };
+    window.api.configureAutomationProbe({ paused: false, addResult: { error: 'Automatik ist pausiert', added: 0 } });
+    const automationEvaluation = await evaluateAutomationCandidates([automationFile], { dryRun: false, trigger: 'watcher' });
+    const automationBeforeJobs = [fixture.sibling, fixture.unrelated];
+    const automationBefore = JSON.stringify(automationBeforeJobs.map(cleanupPresenceState));
+    const automationResult = await applyAutomationEvaluation(automationEvaluation);
+    const automationTarget = queueJobs.find(job => job.file === automationFile.path);
+    createAutomationPreviewJob = originalCreateAutomationPreviewJob;
+    showAppAlert = originalAlertForCrossPath;
+    uploading = false;
+    const crossPathCleanupRollback = {
+      startUpload: startUploadCleanup,
+      inactiveSelected: inactiveSelectedCleanup,
+      activeSelected: activeSelectedCleanup,
+      manualModal: manualModalCleanup,
+      automation: {
+        byteIdentical: JSON.stringify(automationBeforeJobs.map(cleanupPresenceState)) === automationBefore,
+        targetCleanup: cleanupPresenceState(automationTarget),
+        statuses: [automationTarget.status, fixture.sibling.status, fixture.unrelated.status],
+        result: { ok: automationResult.ok, error: automationResult.error }
+      }
+    };
+    const createPartialJobs = prefix => hosters.map((hoster, index) => ({
+      ...makePauseRaceJob(prefix + '-' + index + '.mkv'),
+      id: prefix + '-' + index,
+      file: 'C:\\\\partial\\\\' + prefix + '-' + index + '.mkv',
+      hoster
+    }));
+    const runPartialSelected = async consistent => {
+      configureAtomicState(0);
+      config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+      const jobs = createPartialJobs(consistent ? 'consistent' : 'inconsistent');
+      queueJobs = jobs;
+      uploading = true;
+      rebuildJobIndex();
+      const before = jobs.map(job => JSON.stringify(cleanupPresenceState(job)));
+      window.api.configureAutomationProbe({
+        paused: false,
+        addResult: {
+          added: consistent ? 2 : 1,
+          alreadyInBatchJobIds: [jobs[1].id],
+          skippedJobs: [{ jobId: jobs[2].id, reason: 'Kein gültiger Account' }]
+        }
+      });
+      const result = await startSelectedUpload(jobs);
+      const after = jobs.map(job => JSON.stringify(cleanupPresenceState(job)));
+      uploading = false;
+      return {
+        result,
+        statuses: jobs.map(job => job.status),
+        unconfirmedRestored: [0, 3].map(index => after[index] === before[index]),
+        confirmedPrepared: [1, 2].map(index => after[index] !== before[index])
+      };
+    };
+    const partialSelectedConsistent = await runPartialSelected(true);
+    const partialSelectedInconsistent = await runPartialSelected(false);
+    configureAtomicState(0);
+    config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+    config.globalSettings.folderMonitor.hosters = hosters.slice();
+    config.globalSettings.folderMonitor.autoStart = true;
+    selectedFiles = [];
+    uploading = true;
+    window.api.configureAutomationProbe({ paused: false, addMode: 'partial-consistent' });
+    const partialAutomationFile = { path: 'C:\\\\partial\\\\automation.mkv', name: 'automation.mkv', size: 1, mtimeMs: 1 };
+    const partialAutomationEvaluation = await evaluateAutomationCandidates([partialAutomationFile], { dryRun: false, trigger: 'watcher' });
+    const partialAutomationResult = await applyAutomationEvaluation(partialAutomationEvaluation);
+    const partialAutomationStatuses = Object.fromEntries(queueJobs
+      .filter(job => job.file === partialAutomationFile.path)
+      .map(job => [job.hoster, job.status]));
+    uploading = false;
+    configureAtomicState(0);
+    config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+    selectedFiles = [];
+    uploading = true;
+    const partialManualFile = { path: 'C:\\\\partial\\\\manual.mkv', name: 'manual.mkv', size: 1 };
+    _pendingFiles = [partialManualFile];
+    _pendingImportInspection = { candidateCount: 1, duplicateCount: 0, unavailableCount: 0, accepted: [partialManualFile] };
+    _pendingImportInspections = 0;
+    _pendingFolderMonitorAutoStart.clear();
+    const partialManualInputs = hosters.map(hoster => {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.hosterModal = hoster;
+      input.checked = true;
+      return input;
+    });
+    document.getElementById('hosterModalList').replaceChildren(...partialManualInputs);
+    window.api.configureAutomationProbe({ paused: false, addMode: 'partial-consistent' });
+    const partialManualResult = await applyHosterSelection();
+    const partialManualStatuses = Object.fromEntries(queueJobs
+      .filter(job => job.file === partialManualFile.path)
+      .map(job => [job.hoster, job.status]));
+    uploading = false;
+    const partialAddOutcomes = {
+      selectedConsistent: partialSelectedConsistent,
+      selectedInconsistent: partialSelectedInconsistent,
+      automation: {
+        result: {
+          ok: partialAutomationResult.ok,
+          error: partialAutomationResult.error || null,
+          admitted: partialAutomationResult.admittedFiles.map(file => file.name)
+        },
+        statuses: partialAutomationStatuses
+      },
+      manual: {
+        result: partialManualResult,
+        statuses: partialManualStatuses
+      }
+    };
 
     configureAtomicState(0);
     selectedFiles = [];
@@ -1162,7 +1371,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -1673,7 +1882,72 @@ app.whenReady().then(async () => {
         cleanupByteIdentical: true,
         targetStatus: 'preview',
         siblingStatus: 'done',
-        result: { ok: false, error: 'Jobs wurden nicht vollständig hinzugefügt.' }
+        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' }
+      }
+    });
+    assert.deepEqual(result.automationPipeline.crossPathCleanupRollback, {
+      startUpload: {
+        byteIdentical: true,
+        statuses: ['preview', 'done', 'done'],
+        result: { ok: false, error: 'Automatik ist pausiert' }
+      },
+      inactiveSelected: {
+        byteIdentical: true,
+        statuses: ['preview', 'done', 'done'],
+        result: { ok: false, error: 'Upload wurde nicht bestätigt.' }
+      },
+      activeSelected: {
+        byteIdentical: true,
+        statuses: ['preview', 'done', 'done'],
+        result: { ok: false, error: 'Automatik ist pausiert' }
+      },
+      manualModal: {
+        byteIdentical: true,
+        statuses: ['preview', 'done', 'done'],
+        result: { ok: false, error: 'Automatik ist pausiert' }
+      },
+      automation: {
+        byteIdentical: true,
+        targetCleanup: {
+          sourceCleanupToken: { present: true, value: 'cross-token-automation' },
+          sourceCleanupRequiredHosters: { present: false, value: null },
+          sourceCleanupCompletedHosters: { present: false, value: null },
+          sourceCleanupFingerprint: { present: false, value: null }
+        },
+        statuses: ['preview', 'done', 'done'],
+        result: { ok: false, error: 'Automatik ist pausiert' }
+      }
+    });
+    assert.deepEqual(result.automationPipeline.partialAddOutcomes, {
+      selectedConsistent: {
+        result: { ok: true, added: 2 },
+        statuses: ['queued', 'queued', 'skipped', 'queued'],
+        unconfirmedRestored: [false, false],
+        confirmedPrepared: [true, true]
+      },
+      selectedInconsistent: {
+        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
+        statuses: ['preview', 'queued', 'skipped', 'preview'],
+        unconfirmedRestored: [true, true],
+        confirmedPrepared: [true, true]
+      },
+      automation: {
+        result: { ok: true, error: null, admitted: ['automation.mkv'] },
+        statuses: {
+          'doodstream.com': 'queued',
+          'voe.sx': 'queued',
+          'vidmoly.me': 'skipped',
+          'byse.sx': 'queued'
+        }
+      },
+      manual: {
+        result: true,
+        statuses: {
+          'doodstream.com': 'queued',
+          'voe.sx': 'queued',
+          'vidmoly.me': 'skipped',
+          'byse.sx': 'queued'
+        }
       }
     });
     assert.deepEqual(result.automationPipeline.pauseBetweenApplyAndStart, {
@@ -1735,7 +2009,7 @@ app.whenReady().then(async () => {
       },
       unconfirmedInjection: {
         ok: false,
-        error: 'Jobs wurden nicht vollständig hinzugefügt.',
+        error: 'Jobs konnten nicht eindeutig bestätigt werden.',
         warning: null,
         admitted: [],
         status: 'preview',

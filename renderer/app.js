@@ -734,12 +734,12 @@ async function applyAutomationEvaluation(evaluation) {
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
         return freezeAutomationValue({ ok: false, error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(error), dryRun: false });
       }
-      if ((Number(result?.added) || 0) !== newJobs.length) {
-        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
-        return freezeAutomationValue({ ok: false, error: 'Jobs wurden nicht vollständig hinzugefügt.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
+      const outcome = applyAddJobsOutcome(newJobs, result, { cleanupStates: cleanupPreparation.rollbackStates });
+      if (!outcome.consistent) {
+        renderQueueTable();
+        persistQueueStateSoon(true);
+        return freezeAutomationValue({ ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
       }
-      newJobs.forEach(job => { job.status = 'queued'; });
-      _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     } catch {
       restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
@@ -1537,17 +1537,16 @@ async function applyHosterSelection() {
         });
         if (result?.error) {
           regularInjectionFailure = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
-        } else if ((Number(result?.added) || 0) !== newJobs.length) {
-          regularInjectionFailure = 'Jobs wurden nicht vollständig hinzugefügt.';
+          restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         } else {
-          newJobs.forEach(job => { job.status = 'queued'; });
-          _markSkippedJobs(result);
-          if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+          const outcome = applyAddJobsOutcome(newJobs, result, { cleanupStates: cleanupPreparation.rollbackStates });
+          if (!outcome.consistent) regularInjectionFailure = 'Jobs konnten nicht eindeutig bestätigt werden.';
+          else if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
         }
       } catch {
         regularInjectionFailure = 'Jobs konnten nicht hinzugefügt werden.';
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       }
-      if (regularInjectionFailure) restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       renderQueueTable();
       persistQueueStateSoon(true);
     }
@@ -3733,18 +3732,17 @@ function cloneSourceCleanupValue(value) {
   return structuredClone(value);
 }
 
-function captureSourceCleanupStates(jobs) {
-  const paths = new Set((Array.isArray(jobs) ? jobs : []).map(job => normalizeAutomationPath(job?.file)).filter(Boolean));
-  return queueJobs
-    .filter(job => paths.has(normalizeAutomationPath(job?.file)))
-    .map(job => [job, Object.fromEntries(sourceCleanupFields.map(field => [field, {
+function captureSourceCleanupStates() {
+  return queueJobs.map(job => [job, Object.fromEntries(sourceCleanupFields.map(field => [field, {
       present: Object.prototype.hasOwnProperty.call(job, field),
       value: cloneSourceCleanupValue(job[field])
     }]))]);
 }
 
-function restoreSourceCleanupStates(states) {
+function restoreSourceCleanupStates(states, jobs = null) {
+  const selected = Array.isArray(jobs) ? new Set(jobs) : null;
   for (const [job, fields] of states || []) {
+    if (selected && !selected.has(job)) continue;
     for (const field of sourceCleanupFields) {
       if (!fields[field].present) delete job[field];
       else job[field] = cloneSourceCleanupValue(fields[field].value);
@@ -3753,7 +3751,7 @@ function restoreSourceCleanupStates(states) {
 }
 
 function prepareSourceCleanup(jobs) {
-  const rollbackStates = captureSourceCleanupStates(jobs);
+  const rollbackStates = captureSourceCleanupStates();
   if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [], rollbackStates };
   return { ...window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32'), rollbackStates };
 }
@@ -3775,8 +3773,10 @@ function captureUploadJobStates(jobs) {
   return jobs.map(job => [job, { ...job }]);
 }
 
-function restoreUploadJobStates(states) {
+function restoreUploadJobStates(states, jobs = null) {
+  const selected = Array.isArray(jobs) ? new Set(jobs) : null;
   for (const [job, state] of states) {
+    if (selected && !selected.has(job)) continue;
     for (const key of Object.keys(job)) {
       if (!Object.prototype.hasOwnProperty.call(state, key)) delete job[key];
     }
@@ -3787,6 +3787,60 @@ function restoreUploadJobStates(states) {
 function sanitizeUploadControlError(error, fallback) {
   const message = String(error?.message || error || '');
   return /pausiert/i.test(message) ? 'Automatik ist pausiert' : fallback;
+}
+
+function resolveAddJobsOutcome(jobs, result) {
+  const inputJobs = Array.isArray(jobs) ? jobs : [];
+  const jobsById = new Map(inputJobs.filter(job => job?.id).map(job => [job.id, job]));
+  const skippedEntries = [];
+  const skippedIds = new Set();
+  const alreadyIds = new Set();
+  let valid = jobsById.size === inputJobs.length;
+  for (const entry of Array.isArray(result?.skippedJobs) ? result.skippedJobs : []) {
+    const id = entry?.jobId;
+    if (!jobsById.has(id) || skippedIds.has(id)) {
+      valid = false;
+      continue;
+    }
+    skippedIds.add(id);
+    skippedEntries.push(entry);
+  }
+  for (const id of Array.isArray(result?.alreadyInBatchJobIds) ? result.alreadyInBatchJobIds : []) {
+    if (!jobsById.has(id) || alreadyIds.has(id) || skippedIds.has(id)) {
+      valid = false;
+      continue;
+    }
+    alreadyIds.add(id);
+  }
+  const remainingJobs = inputJobs.filter(job => !skippedIds.has(job.id) && !alreadyIds.has(job.id));
+  const added = Number(result?.added);
+  const consistent = valid && Number.isInteger(added) && added >= 0 && added === remainingJobs.length;
+  return {
+    consistent,
+    added: Number.isInteger(added) && added >= 0 ? added : 0,
+    addedJobs: consistent ? remainingJobs : [],
+    alreadyJobs: [...alreadyIds].map(id => jobsById.get(id)),
+    skippedEntries,
+    skippedJobs: skippedEntries.map(entry => jobsById.get(entry.jobId)),
+    unconfirmedJobs: consistent ? [] : remainingJobs
+  };
+}
+
+function applyAddJobsOutcome(jobs, result, options = {}) {
+  const outcome = resolveAddJobsOutcome(jobs, result);
+  const confirmedJobs = new Set([...outcome.addedJobs, ...outcome.alreadyJobs, ...outcome.skippedJobs]);
+  const cleanupRollbackJobs = outcome.consistent
+    ? []
+    : (options.cleanupStates || []).map(([job]) => job).filter(job => !confirmedJobs.has(job));
+  restoreSourceCleanupStates(options.cleanupStates, cleanupRollbackJobs);
+  restoreUploadJobStates(options.uploadStates || [], outcome.unconfirmedJobs);
+  for (const job of [...outcome.addedJobs, ...outcome.alreadyJobs]) job.status = 'queued';
+  for (let index = 0; index < outcome.skippedJobs.length; index++) {
+    const job = outcome.skippedJobs[index];
+    job.status = 'skipped';
+    job.error = outcome.skippedEntries[index]?.reason || 'Kein gültiger Account';
+  }
+  return outcome;
 }
 
 async function startUpload(opts) {
@@ -3946,20 +4000,22 @@ async function startSelectedUpload(explicitJobs) {
         showCopyToast(error);
         return { ok: false, error };
       }
-      if ((Number(result?.added) || 0) !== addable.length) {
-        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
-        restoreUploadJobStates(originalStates);
-        renderQueueTable();
-        const error = 'Jobs wurden nicht vollständig hinzugefügt.';
+      const outcome = applyAddJobsOutcome(addable, result, {
+        cleanupStates: cleanupPreparation.rollbackStates,
+        uploadStates: originalStates
+      });
+      renderQueueTable();
+      if (!outcome.consistent) {
+        persistQueueStateSoon();
+        const error = 'Jobs konnten nicht eindeutig bestätigt werden.';
         showCopyToast(error);
         return { ok: false, error };
       }
-      _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
         window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
       }
       persistQueueStateSoon();
-      const added = Number(result && result.added) || 0;
+      const added = outcome.added;
       // Use ASCII-only toast text here to avoid encoding artifacts on some systems.
       const skipped = Array.isArray(result && result.skippedJobs) ? result.skippedJobs.length : 0;
       const alreadyInBatch = Array.isArray(result && result.alreadyInBatchJobIds)
@@ -4013,6 +4069,17 @@ async function startSelectedUpload(explicitJobs) {
       restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       restoreUploadJobStates(originalStates);
       const error = sanitizeUploadControlError(result.error, 'Upload konnte nicht gestartet werden.');
+      uploading = false;
+      renderQueueTable();
+      updateQueueActionButtons();
+      updateStatusBar();
+      await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+      return { ok: false, error };
+    }
+    if (result?.started !== true) {
+      restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
+      restoreUploadJobStates(originalStates);
+      const error = 'Upload wurde nicht bestätigt.';
       uploading = false;
       renderQueueTable();
       updateQueueActionButtons();
