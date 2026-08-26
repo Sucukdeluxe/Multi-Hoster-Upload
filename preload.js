@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+let folderMonitorCandidateListenerReady = false;
+let folderMonitorReadySent = false;
+
 contextBridge.exposeInMainWorld('api', {
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
@@ -97,6 +100,13 @@ contextBridge.exposeInMainWorld('api', {
   automationResume: () => ipcRenderer.invoke('automation:resume'),
   onFolderMonitorNewFiles: (callback) => {
     ipcRenderer.on('folder-monitor:new-files', (_event, data) => callback(data));
+    folderMonitorCandidateListenerReady = true;
+  },
+  signalFolderMonitorReady: () => {
+    if (!folderMonitorCandidateListenerReady || folderMonitorReadySent) return false;
+    folderMonitorReadySent = true;
+    ipcRenderer.send('folder-monitor:renderer-ready');
+    return true;
   },
   onAutomationStatus: (callback) => {
     ipcRenderer.on('automation:status', (_event, data) => callback(data));
@@ -176,6 +186,8 @@ contextBridge.exposeInMainWorld('api', {
   // File path from drag & drop (Electron 33+ compatible)
   getPathForFile: (file) => webUtils.getPathForFile(file),
   removeAllListeners: () => {
+    folderMonitorCandidateListenerReady = false;
+    folderMonitorReadySent = false;
     ipcRenderer.removeAllListeners('upload-progress');
     ipcRenderer.removeAllListeners('upload-batch-done');
     ipcRenderer.removeAllListeners('upload-stats');

@@ -2008,6 +2008,26 @@ contextBridge.exposeInMainWorld('api', {
       max: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuemax'),
       text: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuetext')
     };
+    const finiteQueueJobs = queueJobs;
+    queueJobs = Array.from({ length: 15001 }, (_, index) => ({
+      id: 'manual-over-limit-' + index,
+      file: 'C:\\\\manual\\\\' + index + '.mkv',
+      fileName: index + '.mkv',
+      hoster: 'doodstream.com',
+      status: 'preview',
+      bytesTotal: 1
+    }));
+    rebuildJobIndex();
+    renderAutomationStatusSnapshot(originalSnapshotFactory());
+    const overLimitQueueAria = {
+      meter: document.getElementById('automationQueueMeter')?.textContent.trim() || null,
+      now: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuenow'),
+      max: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuemax'),
+      text: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuetext')
+    };
+    queueJobs = finiteQueueJobs;
+    rebuildJobIndex();
+    renderAutomationStatusSnapshot(finiteQueueSnapshot);
     setUiLanguage('en');
     renderAutomationStatusSnapshot(Object.freeze({ ...finiteQueueSnapshot, state: 'error', error: 'Ordnerscan fehlgeschlagen' }));
     const localizedStatusError = document.getElementById('automationLastError')?.textContent.trim() || '';
@@ -2194,7 +2214,7 @@ contextBridge.exposeInMainWorld('api', {
       enabledAfterCancel,
       lateResultStayedClosed: document.getElementById('automationTestOverlay')?.style.display === 'none'
     };
-    return { initial, noRendererTimeEstimate, states, unlimitedQueueAria, finiteQueueAria, localizedStatusError, pausedControls, pauseResumeActions, loading, completed, english, closed, errorState, cancelLoading };
+    return { initial, noRendererTimeEstimate, states, unlimitedQueueAria, finiteQueueAria, overLimitQueueAria, localizedStatusError, pausedControls, pauseResumeActions, loading, completed, english, closed, errorState, cancelLoading };
   })()`;
   const automationControlCenterLayoutScript = `(() => {
     const card = document.getElementById('automationStatusCard');
@@ -3082,6 +3102,7 @@ app.whenReady().then(async () => {
     ]);
     assert.deepEqual(result.automationControlCenter.unlimitedQueueAria, { now: null, max: null, text: '8.420 / Unbegrenzt' });
     assert.deepEqual(result.automationControlCenter.finiteQueueAria, { now: '8420', max: '15000', text: '8.420 / 15.000' });
+    assert.deepEqual(result.automationControlCenter.overLimitQueueAria, { meter: '15.001 / 15.000', now: '15000', max: '15000', text: '15.001 / 15.000' });
     assert.equal(result.automationControlCenter.localizedStatusError, 'Folder scan failed');
     assert.deepEqual(result.automationControlCenter.pausedControls, {
       snapshotCalls: 1,
@@ -3844,6 +3865,201 @@ ${startupAutomation}
     assert.equal(outcome.result.final.monitor.running, false);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
+});
+
+test('real startup releases one productive reconcile only after the folder candidate listener is ready', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-startup-ready-e2e-'));
+  try {
+    const appRoot = path.join(probeRoot, 'app');
+    const userDataPath = path.join(probeRoot, 'user-data');
+    const outputPath = path.join(probeRoot, 'result.json');
+    const watchPath = path.join(probeRoot, 'watch');
+    fs.mkdirSync(appRoot, { recursive: true });
+    fs.mkdirSync(watchPath, { recursive: true });
+    fs.writeFileSync(path.join(watchPath, 'startup-ready.mkv'), Buffer.alloc(19, 5));
+    for (const relativePath of ['main.js', 'preload.js', 'preload-drop-target.js', 'package.json']) {
+      fs.copyFileSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath));
+    }
+    for (const relativePath of ['lib', 'renderer', 'assets']) {
+      fs.cpSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath), { recursive: true });
+    }
+    fs.symlinkSync(path.join(projectRoot, 'node_modules'), path.join(appRoot, 'node_modules'), 'junction');
+    const probePath = path.join(appRoot, 'startup-ready-probe.cjs');
+    const probeSource = `
+const { app, BrowserWindow, ipcMain } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const ConfigStore = require('./lib/config-store');
+const FolderMonitor = require('./lib/folder-monitor');
+const outputPath = process.env.MHU_STARTUP_READY_OUTPUT;
+const userDataPath = process.env.MHU_STARTUP_READY_USER_DATA;
+const watchPath = process.env.MHU_STARTUP_READY_WATCH;
+app.setPath('userData', userDataPath);
+BrowserWindow.prototype.show = function () {};
+let monitorStartedResolve;
+const monitorStarted = new Promise(resolve => { monitorStartedResolve = resolve; });
+let getConfigStartedResolve;
+const getConfigStarted = new Promise(resolve => { getConfigStartedResolve = resolve; });
+let releaseConfig;
+const configRelease = new Promise(resolve => { releaseConfig = resolve; });
+let startupScanSettledResolve;
+const startupScanSettled = new Promise(resolve => { startupScanSettledResolve = resolve; });
+let startupScanCalls = 0;
+let startupScanSettledCalls = 0;
+const originalStart = FolderMonitor.prototype.start;
+FolderMonitor.prototype.start = function (...args) {
+  const result = originalStart.apply(this, args);
+  monitorStartedResolve();
+  return result;
+};
+const originalScan = FolderMonitor.prototype.scan;
+FolderMonitor.prototype.scan = function (options = {}) {
+  const result = originalScan.call(this, options);
+  if (options.trigger === 'startup' && options.emitFiles === true) {
+    startupScanCalls++;
+    Promise.resolve(result).finally(() => {
+      startupScanSettledCalls++;
+      startupScanSettledResolve();
+    });
+  }
+  return result;
+};
+const readySignals = { folder: 0, close: 0 };
+const originalOn = ipcMain.on.bind(ipcMain);
+ipcMain.on = (channel, handler) => originalOn(channel, function (event, ...args) {
+  if (channel === 'folder-monitor:renderer-ready') readySignals.folder++;
+  if (channel === 'app:close-handshake-ready') readySignals.close++;
+  return handler.call(this, event, ...args);
+});
+const originalHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => originalHandle(channel, async function (event, ...args) {
+  if (channel === 'get-config') {
+    getConfigStartedResolve();
+    await configRelease;
+  }
+  return handler.call(this, event, ...args);
+});
+
+async function waitFor(read, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('startup ready probe timed out');
+}
+
+(async () => {
+  const store = new ConfigStore(app);
+  const current = store.load();
+  await store.save({
+    globalSettings: {
+      ...current.globalSettings,
+      language: 'en',
+      logVerbose: false,
+      logFilePath: path.join(userDataPath, 'fileuploader.log'),
+      folderMonitor: {
+        ...current.globalSettings.folderMonitor,
+        enabled: true,
+        folderPath: watchPath,
+        recursive: true,
+        extensions: 'mkv',
+        filterMode: 'include',
+        skipDuplicates: true,
+        includeExisting: false,
+        autoStart: false,
+        hosters: ['doodstream.com'],
+        queueLimitJobs: 15000,
+        reconcileIntervalMinutes: 60,
+        paused: false,
+        pausedAt: null
+      }
+    }
+  });
+  require('./main.js');
+  await app.whenReady();
+  const window = await waitFor(async () => BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed()) || null);
+  await Promise.all([monitorStarted, getConfigStarted]);
+  const beforeReady = {
+    startupScanCalls,
+    startupScanSettledCalls,
+    folderReadySignals: readySignals.folder
+  };
+  if (startupScanCalls > 0) await startupScanSettled;
+  releaseConfig();
+  await waitFor(async () => readySignals.close === 1);
+  await waitFor(async () => startupScanCalls === 1);
+  await startupScanSettled;
+  const rendererState = await waitFor(async () => {
+    try {
+      const state = await window.webContents.executeJavaScript("(async () => { if (typeof queueJobs === 'undefined' || typeof automationEventQueue === 'undefined') return null; const monitor = await window.api.folderMonitorStatus(); return { candidateJobs: queueJobs.filter(job => job.fileName === 'startup-ready.mkv'), draining: Boolean(automationEventDrainPromise), pendingCandidates: automationEventQueue.size, monitor }; })()");
+      return state && !state.draining && state.pendingCandidates === 0 ? state : null;
+    } catch {
+      return null;
+    }
+  });
+  fs.writeFileSync(outputPath, JSON.stringify({
+    hidden: window.isVisible() === false,
+    beforeReady,
+    readySignals,
+    startupScanCalls,
+    startupScanSettledCalls,
+    rendererState
+  }), 'utf8');
+  window.destroy();
+  app.exit(0);
+})().catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error), readySignals, startupScanCalls, startupScanSettledCalls }), 'utf8');
+  app.exit(1);
+});
+`;
+    fs.writeFileSync(probePath, probeSource, 'utf8');
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const probeEnvironment = {
+      ...process.env,
+      MHU_PERF: '0',
+      MHU_STARTUP_READY_OUTPUT: outputPath,
+      MHU_STARTUP_READY_USER_DATA: userDataPath,
+      MHU_STARTUP_READY_WATCH: watchPath
+    };
+    delete probeEnvironment.RUN_UI_SMOKE;
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: appRoot,
+      env: probeEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 60000
+    });
+    const probeOutput = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}\n${probeOutput}`);
+    const outcome = JSON.parse(probeOutput);
+    assert.equal(outcome.error, undefined);
+    assert.equal(outcome.hidden, true);
+    assert.deepEqual({
+      beforeReady: outcome.beforeReady,
+      readySignals: outcome.readySignals,
+      startupScanCalls: outcome.startupScanCalls,
+      startupScanSettledCalls: outcome.startupScanSettledCalls,
+      lastScanTrigger: outcome.rendererState.monitor.lastScanTrigger,
+      candidateNames: outcome.rendererState.candidateJobs.map(job => job.fileName)
+    }, {
+      beforeReady: {
+        startupScanCalls: 0,
+        startupScanSettledCalls: 0,
+        folderReadySignals: 0
+      },
+      readySignals: { folder: 1, close: 1 },
+      startupScanCalls: 1,
+      startupScanSettledCalls: 1,
+      lastScanTrigger: 'startup',
+      candidateNames: ['startup-ready.mkv']
+    });
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    assert.equal(fs.existsSync(probeRoot), false);
   }
 });
 

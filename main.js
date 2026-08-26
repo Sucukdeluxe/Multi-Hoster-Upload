@@ -112,6 +112,9 @@ let closePreparationAttempt = 0;
 let closeQuiesceOwnerAttempt = null;
 let lastRestoredCloseAttempt = null;
 let closeFolderMonitorWasRunning = false;
+let folderMonitorRendererReady = false;
+let folderMonitorStartupReconcilePending = false;
+let folderMonitorStartupReconcileStarted = false;
 let preparedUpdate = null;
 let updatePreparationPromise = null;
 let updateQuitPending = false;
@@ -1518,6 +1521,9 @@ function createWindow() {
   closeFlushApproved = false;
   closeFlushRequested = false;
   closeHandshakeReady = false;
+  folderMonitorRendererReady = false;
+  folderMonitorStartupReconcilePending = false;
+  folderMonitorStartupReconcileStarted = false;
   closeQuiesceOwnerAttempt = null;
   lastRestoredCloseAttempt = null;
   configStore.setWritesQuiesced(false);
@@ -1529,16 +1535,23 @@ function createWindow() {
     requestClosePreparation();
   });
 
+  mainWindow.on('closed', () => {
+    folderMonitorRendererReady = false;
+    folderMonitorStartupReconcilePending = false;
+  });
+
   mainWindow.webContents.setBackgroundThrottling(false);
 
   mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
     if (isInPlace || !isMainFrame) return;
     closeHandshakeReady = false;
+    folderMonitorRendererReady = false;
     updateAnnouncementState.reset();
     restoreClosePreparation(closePreparationAttempt);
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    folderMonitorRendererReady = false;
     _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1685,7 +1698,7 @@ app.whenReady().then(async () => {
     const launchConfig = configStore.load();
     const fm = launchConfig.globalSettings && launchConfig.globalSettings.folderMonitor;
     if (fm && fm.enabled && fm.folderPath) {
-      await startFolderMonitor(fm);
+      await startFolderMonitor(fm, { deferStartupReconcile: true });
     }
   } catch (err) {
     debugLog(`folder-monitor auto-start failed: ${err.message}`);
@@ -1740,6 +1753,8 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (quitTeardownStarted) return;
   quitTeardownStarted = true;
+  folderMonitorRendererReady = false;
+  folderMonitorStartupReconcilePending = false;
   if (updateCheckInterval) clearInterval(updateCheckInterval);
   updateCheckInterval = null;
   if (preparedUpdate && updateQuitPending && closeFlushApproved && !preparedUpdateLaunchStarted) {
@@ -3103,6 +3118,13 @@ ipcMain.on('app:close-handshake-ready', (event) => {
   }
 });
 
+ipcMain.on('folder-monitor:renderer-ready', (event) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
+    folderMonitorRendererReady = true;
+    releaseFolderMonitorStartupReconcile();
+  }
+});
+
 ipcMain.on('app:close-preparation-started', (event, attempt) => {
   if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && isClosePreparationActive(attempt)) {
     armCloseFlushTimer(attempt, 3000);
@@ -3312,7 +3334,28 @@ function bindFolderMonitorEvents(settings) {
   });
 }
 
-async function startFolderMonitor(settings) {
+function releaseFolderMonitorStartupReconcile() {
+  if (!folderMonitorRendererReady || !folderMonitorStartupReconcilePending || folderMonitorStartupReconcileStarted || quitTeardownStarted || !folderMonitor.running) return false;
+  folderMonitorStartupReconcilePending = false;
+  folderMonitorStartupReconcileStarted = true;
+  try {
+    void folderMonitor.scan({ emitFiles: true, trigger: 'startup' }).catch(error => {
+      debugLog(`folder-monitor startup scan failed: ${error.message}`);
+    });
+  } catch (error) {
+    debugLog(`folder-monitor startup scan failed: ${error.message}`);
+  }
+  return true;
+}
+
+function deferFolderMonitorStartupReconcile() {
+  if (folderMonitorStartupReconcilePending || folderMonitorStartupReconcileStarted) return false;
+  folderMonitorStartupReconcilePending = true;
+  releaseFolderMonitorStartupReconcile();
+  return true;
+}
+
+async function startFolderMonitor(settings, options = {}) {
   try {
     const persisted = configStore.load().globalSettings?.folderMonitor || {};
     const normalized = normalizeAutomationSettings(settings);
@@ -3330,7 +3373,8 @@ async function startFolderMonitor(settings) {
       return { includesExisting: false, paused: true };
     }
     const result = folderMonitor.start(effectiveSettings);
-    await folderMonitor.scan({ emitFiles: true, trigger: 'startup' });
+    if (options.deferStartupReconcile === true) deferFolderMonitorStartupReconcile();
+    else await folderMonitor.scan({ emitFiles: true, trigger: 'startup' });
     debugLog(`folder-monitor started: ${settings.folderPath}`);
     return result;
   } catch (err) {

@@ -345,6 +345,54 @@ test('close readiness is signaled only after the renderer explicitly finishes in
   ]);
 });
 
+test('folder monitor readiness is emitted once and only after the candidate listener exists', () => {
+  const order = [];
+  const listeners = new Map();
+  let exposedApi = null;
+  const electronMock = {
+    contextBridge: {
+      exposeInMainWorld: (_name, api) => { exposedApi = api; }
+    },
+    ipcRenderer: {
+      invoke: () => Promise.resolve(),
+      on: (channel, listener) => {
+        listeners.set(channel, listener);
+        order.push(`listen:${channel}`);
+      },
+      send: channel => { order.push(`send:${channel}`); },
+      removeAllListeners: () => {}
+    },
+    webUtils: {
+      getPathForFile: () => ''
+    }
+  };
+  const originalLoad = Module._load;
+  const preloadPath = require.resolve('../preload');
+  delete require.cache[preloadPath];
+  Module._load = function (request, parent, isMain) {
+    if (request === 'electron') return electronMock;
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    require(preloadPath);
+  } finally {
+    Module._load = originalLoad;
+  }
+
+  exposedApi.signalFolderMonitorReady();
+  let received = null;
+  exposedApi.onFolderMonitorNewFiles(files => { received = files; });
+  exposedApi.signalFolderMonitorReady();
+  exposedApi.signalFolderMonitorReady();
+  listeners.get('folder-monitor:new-files')({}, [{ path: 'C:\\watch\\ready.mkv' }]);
+
+  assert.deepEqual(order, [
+    'listen:folder-monitor:new-files',
+    'send:folder-monitor:renderer-ready'
+  ]);
+  assert.deepEqual(received, [{ path: 'C:\\watch\\ready.mkv' }]);
+});
+
 test('preload exposes account cooldown snapshots and removes their listener during cleanup', async () => {
   const listeners = new Map();
   const invocations = [];
@@ -812,7 +860,7 @@ test('startup keeps a missing configured folder disconnected without disabling a
   assert.notEqual(startupEnd, -1);
   const startup = mainSource.slice(startupStart, startupEnd);
 
-  assert.match(startup, /fm\s*&&\s*fm\.enabled\s*&&\s*fm\.folderPath[\s\S]*?await startFolderMonitor\(fm\)/u);
+  assert.match(startup, /fm\s*&&\s*fm\.enabled\s*&&\s*fm\.folderPath[\s\S]*?await startFolderMonitor\(fm,\s*\{\s*deferStartupReconcile:\s*true\s*\}\)/u);
   assert.doesNotMatch(startup, /fm\.paused\s*!==\s*true/u);
   assert.doesNotMatch(startup, /folderMonitor\.scan\(\{\s*emitFiles:\s*true,\s*trigger:\s*'startup'\s*\}\)/u);
   assert.doesNotMatch(startup, /folderMonitor:\s*\{\s*\.\.\.fm,\s*enabled:\s*false\s*\}/u);

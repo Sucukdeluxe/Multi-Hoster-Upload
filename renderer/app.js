@@ -940,7 +940,7 @@ function renderAutomationStatusSnapshot(snapshot) {
       queueTrack.removeAttribute('aria-valuenow');
       queueTrack.removeAttribute('aria-valuemax');
     } else {
-      queueTrack.setAttribute('aria-valuenow', String(snapshot.currentJobCount));
+      queueTrack.setAttribute('aria-valuenow', String(Math.min(snapshot.currentJobCount, snapshot.queueLimitJobs)));
       queueTrack.setAttribute('aria-valuemax', String(snapshot.queueLimitJobs));
     }
     queueTrack.setAttribute('aria-valuetext', queueText);
@@ -1343,6 +1343,7 @@ async function init() {
   window.api.onFolderMonitorNewFiles(files => {
     handleFolderMonitorFiles(files).catch(error => window.api.debugLog(`folder-monitor renderer evaluation failed: ${error.message || String(error)}`));
   });
+  window.api.signalFolderMonitorReady();
   if (typeof window.api.onAutomationStatus === 'function') {
     window.api.onAutomationStatus(status => {
       applyAutomationRuntimeStatus(status);
