@@ -49,6 +49,16 @@ test('automation settings normalize invalid limits intervals and pause timestamp
   });
 });
 
+test('automation settings allow only numeric and trimmed string zero to disable the queue limit', () => {
+  const invalidLimits = [null, '', '   ', false, true, {}, undefined, NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '0.0', '00', '+0', '-0'];
+  assert.deepEqual(
+    invalidLimits.map((queueLimitJobs) => normalizeAutomationSettings({ queueLimitJobs }).queueLimitJobs),
+    invalidLimits.map(() => 15000)
+  );
+  assert.equal(normalizeAutomationSettings({ queueLimitJobs: 0 }).queueLimitJobs, 0);
+  assert.equal(normalizeAutomationSettings({ queueLimitJobs: ' 0 ' }).queueLimitJobs, 0);
+});
+
 test('capacity counts only executable and running queue jobs', () => {
   const statuses = ['preview', 'queued', 'getting-server', 'uploading', 'retrying', 'done', 'error', 'aborted', 'skipped'];
   assert.equal(countAutomaticQueueJobs(statuses.map((status, index) => ({ id: String(index), status }))), 5);
@@ -109,6 +119,31 @@ test('admission tolerates malformed candidates and numeric inputs', () => {
     plannedJobs: 0,
     availableSlots: 15000
   });
+});
+
+test('admission allows only numeric and trimmed string zero to disable the queue limit', () => {
+  const invalidLimits = [null, '', '   ', false, true, {}, undefined, NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '0.0', '00', '+0', '-0'];
+  const candidate = { path: 'large.mkv', mtimeMs: 1, eligibleJobCount: 16000 };
+  assert.deepEqual(
+    invalidLimits.map((queueLimitJobs) => planAtomicAdmissions({ candidates: [candidate], queueLimitJobs })),
+    invalidLimits.map(() => ({
+      admittedPaths: [],
+      deferredPaths: ['large.mkv'],
+      currentJobCount: 0,
+      plannedJobs: 0,
+      availableSlots: 15000
+    }))
+  );
+  assert.deepEqual(
+    [0, ' 0 '].map((queueLimitJobs) => planAtomicAdmissions({ candidates: [candidate], queueLimitJobs })),
+    [0, ' 0 '].map(() => ({
+      admittedPaths: ['large.mkv'],
+      deferredPaths: [],
+      currentJobCount: 0,
+      plannedJobs: 16000,
+      availableSlots: null
+    }))
+  );
 });
 
 test('daily telemetry resets atomically on the local calendar day boundary', () => {
