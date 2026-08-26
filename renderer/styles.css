@@ -1313,6 +1313,66 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 .settings-subpage .settings-grid-mini .checkbox-row label { min-width: 0; cursor: pointer; }
 .settings-subpage .settings-grid-mini .checkbox-row input[type="checkbox"] { order: 2; width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+.settings-subpage .settings-grid-mini .settings-row.checkbox-row.folder-monitor-help-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+.settings-subpage .settings-grid-mini .folder-monitor-help-row input[type="checkbox"] { order: 3; }
+.settings-help {
+  position: relative;
+  order: 2;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: var(--text-dim);
+  cursor: help;
+  outline: none;
+}
+.settings-help svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.settings-help::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 72px));
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
+  white-space: normal;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition: opacity .14s, transform .14s;
+  z-index: 90;
+}
+.settings-help:hover,
+.settings-help:focus-visible {
+  color: var(--text);
+}
+.settings-help:hover::after,
+.settings-help:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
 .settings-hoster-pointer {
   margin-top: 16px;
   padding: 11px 13px;

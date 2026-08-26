@@ -63,6 +63,7 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
   fs.writeFileSync(preloadPath, `
 const { contextBridge } = require('electron');
 const managedOnlineBackupProbeCalls = [];
+const folderMonitorProbeCalls = [];
 const managedOnlineBackupIds = {
   a: 'AAAAAAAAAAAAAAAAAAAAAA',
   b: 'AQEBAQEBAQEBAQEBAQEBAQ',
@@ -142,7 +143,17 @@ contextBridge.exposeInMainWorld('api', {
     pendingManagedOnlineBackupDelete = null;
     pending.resolve({ ok: true, removedId: pending.id, notFound: false });
   },
-  getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; }
+  getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; },
+  debugLog() {},
+  savePendingQueue(payload) {
+    folderMonitorProbeCalls.push(['save', payload?.queueJobs?.length || 0]);
+    return Promise.resolve(true);
+  },
+  addJobsToBatch(payload) {
+    folderMonitorProbeCalls.push(['inject', payload?.jobs?.length || 0]);
+    return Promise.resolve({});
+  },
+  getFolderMonitorProbeCalls() { return folderMonitorProbeCalls; }
 });
 `, 'utf8');
   const appDialogBehaviorScript = `(async () => {
@@ -260,6 +271,105 @@ contextBridge.exposeInMainWorld('api', {
       emptyHidden: document.getElementById('settingsSearchEmpty')?.hidden
     };
     return { germanState, updatePaths, exceptionalPaths, stableSectionPath, umlautAliasPath, managedBackupNavigation, navigationState, englishPath, clearedState };
+  })()`;
+  const folderMonitorBehaviorScript = `(async () => {
+    setUiLanguage('de');
+    renderSettings();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const keys = ['enabled', 'recursive', 'existing', 'duplicates', 'auto-start', 'hosters'];
+    const readTooltips = () => Object.fromEntries(keys.map(key => {
+      const element = document.querySelector('[data-folder-monitor-help="' + key + '"]');
+      return [key, { tooltip: element?.dataset.tooltip, label: element?.getAttribute('aria-label') }];
+    }));
+    const germanTooltips = readTooltips();
+    const gridScope = {
+      ordinary: document.getElementById('alwaysOnTopInput').closest('.checkbox-row').classList.contains('folder-monitor-help-row'),
+      folderMonitor: document.getElementById('fmEnabledInput').closest('.checkbox-row').classList.contains('folder-monitor-help-row')
+    };
+    setUiLanguage('en');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const englishTooltips = readTooltips();
+    const actions = {
+      disabledWhileIdle: resolveFolderMonitorQueueAction({ autoStart: false, uploading: false, healthCheckRunning: false }),
+      disabledWhileUploading: resolveFolderMonitorQueueAction({ autoStart: false, uploading: true, healthCheckRunning: false }),
+      enabledWhileIdle: resolveFolderMonitorQueueAction({ autoStart: true, uploading: false, healthCheckRunning: false }),
+      enabledWhileUploading: resolveFolderMonitorQueueAction({ autoStart: true, uploading: true, healthCheckRunning: false }),
+      enabledDuringHealthCheck: resolveFolderMonitorQueueAction({ autoStart: true, uploading: false, healthCheckRunning: true })
+    };
+    const resetQueue = autoStart => {
+      config = {
+        hosters: Object.fromEntries(HOSTERS.map(hoster => [hoster, []])),
+        globalSettings: { folderMonitor: { hosters: ['doodstream.com'], autoStart } }
+      };
+      hosterSettings = {};
+      selectedUploadHosters = [];
+      selectedFiles = [];
+      queueJobs = [];
+      uploading = true;
+      healthCheckRunning = false;
+      rebuildJobIndex();
+    };
+    resetQueue(false);
+    handleFolderMonitorFiles(['C:\\\\folder-monitor-queue-only.mkv']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const queueOnly = {
+      statuses: queueJobs.map(job => job.status),
+      injectCalls: window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length
+    };
+    resetQueue(true);
+    handleFolderMonitorFiles(['C:\\\\folder-monitor-inject.mkv']);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const autoStart = {
+      statuses: queueJobs.map(job => job.status),
+      injectCalls: window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length
+    };
+    const originalStartUpload = startUpload;
+    let startCalls = 0;
+    startUpload = () => { startCalls++; return Promise.resolve(); };
+    const prepareManualSelection = (filePath, autoStartValue, isUploading) => {
+      const file = { path: filePath, name: filePath.split('\\\\').pop(), size: 1 };
+      resetQueue(autoStartValue);
+      uploading = isUploading;
+      _pendingFiles = [file];
+      _pendingImportInspection = { candidateCount: 1, duplicateCount: 0, unavailableCount: 0, accepted: [file] };
+      _pendingImportInspections = 0;
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.hosterModal = 'doodstream.com';
+      input.checked = true;
+      document.getElementById('hosterModalList').replaceChildren(input);
+      markPendingFolderMonitorFiles([file], autoStartValue);
+      return file;
+    };
+    const injectBeforeManualQueue = window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length;
+    prepareManualSelection('C:\\\\folder-monitor-manual-queue.mkv', false, true);
+    applyHosterSelection();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const manualQueueOnly = {
+      statuses: queueJobs.map(job => job.status),
+      injectCalls: window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length - injectBeforeManualQueue
+    };
+    const injectBeforeManualAuto = window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length;
+    prepareManualSelection('C:\\\\folder-monitor-manual-inject.mkv', true, true);
+    applyHosterSelection();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const manualAutoStartRunning = {
+      statuses: queueJobs.map(job => job.status),
+      injectCalls: window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length - injectBeforeManualAuto
+    };
+    prepareManualSelection('C:\\\\folder-monitor-manual-start.mkv', true, false);
+    applyHosterSelection();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const manualAutoStartIdle = { startCalls };
+    startUpload = originalStartUpload;
+    queueJobs = [
+      { id: 'active-same-name', file: 'C:\\\\active\\\\same-name.mkv', fileName: 'same-name.mkv', hoster: 'doodstream.com', status: 'queued', bytesTotal: 1 },
+      { id: 'waiting-same-name', file: 'D:\\\\watched\\\\same-name.mkv', fileName: 'same-name.mkv', hoster: 'doodstream.com', status: 'preview', bytesTotal: 1 }
+    ];
+    rebuildJobIndex();
+    applySummaryResults({ files: [{ name: 'same-name.mkv', size: 1, results: [{ hoster: 'doodstream.com', status: 'done', file_code: 'active-code' }] }] });
+    const sameBasenameResult = Object.fromEntries(queueJobs.map(job => [job.id, { status: job.status, code: job.result?.file_code || null }]));
+    return { germanTooltips, englishTooltips, gridScope, actions, queueOnly, autoStart, manualQueueOnly, manualAutoStartRunning, manualAutoStartIdle, sameBasenameResult };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -466,6 +576,7 @@ app.whenReady().then(async () => {
   const appDialogBehavior = await window.webContents.executeJavaScript(${JSON.stringify(appDialogBehaviorScript)});
   const onlineBackupBehavior = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupBehaviorScript)});
   const settingsSearchBehavior = await window.webContents.executeJavaScript(${JSON.stringify(settingsSearchBehaviorScript)});
+  const folderMonitorBehavior = await window.webContents.executeJavaScript(${JSON.stringify(folderMonitorBehaviorScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   window.setContentSize(760, Math.min(900, display.workAreaSize.height));
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -483,6 +594,7 @@ app.whenReady().then(async () => {
     liveSpeedChart,
     appDialogBehavior,
     settingsSearchBehavior,
+    folderMonitorBehavior,
     onlineBackupBehavior,
     onlineBackupLayout,
     onlineBackupNarrowLayout
@@ -585,6 +697,41 @@ app.whenReady().then(async () => {
         navigationHidden: false,
         resultsHidden: true,
         emptyHidden: true
+      }
+    });
+    assert.deepEqual(result.folderMonitorBehavior, {
+      germanTooltips: {
+        enabled: { tooltip: 'Startet die Überwachung nach dem Speichern, wenn ein Ordner ausgewählt ist.', label: 'Startet die Überwachung nach dem Speichern, wenn ein Ordner ausgewählt ist.' },
+        recursive: { tooltip: 'Überwacht zusätzlich alle Unterordner des ausgewählten Ordners.', label: 'Überwacht zusätzlich alle Unterordner des ausgewählten Ordners.' },
+        existing: { tooltip: 'Fügt beim nächsten Start der Überwachung alle bereits vorhandenen passenden Dateien hinzu. Die Option wird danach automatisch deaktiviert.', label: 'Fügt beim nächsten Start der Überwachung alle bereits vorhandenen passenden Dateien hinzu. Die Option wird danach automatisch deaktiviert.' },
+        duplicates: { tooltip: 'Ignoriert wiederholte Erkennungen desselben Dateipfads während der aktuellen Überwachung.', label: 'Ignoriert wiederholte Erkennungen desselben Dateipfads während der aktuellen Überwachung.' },
+        'auto-start': { tooltip: 'Startet neu erkannte Dateien automatisch. Ohne diese Option werden sie nur zur Warteschlange hinzugefügt.', label: 'Startet neu erkannte Dateien automatisch. Ohne diese Option werden sie nur zur Warteschlange hinzugefügt.' },
+        hosters: { tooltip: 'Legt die Upload-Ziele für Dateien aus der Ordnerüberwachung fest. Ohne Auswahl ist eine manuelle Bestätigung erforderlich.', label: 'Legt die Upload-Ziele für Dateien aus der Ordnerüberwachung fest. Ohne Auswahl ist eine manuelle Bestätigung erforderlich.' }
+      },
+      englishTooltips: {
+        enabled: { tooltip: 'Starts monitoring after saving when a folder is selected.', label: 'Starts monitoring after saving when a folder is selected.' },
+        recursive: { tooltip: 'Also monitors every subfolder inside the selected folder.', label: 'Also monitors every subfolder inside the selected folder.' },
+        existing: { tooltip: 'Adds all matching files already present when monitoring starts next. The option is then disabled automatically.', label: 'Adds all matching files already present when monitoring starts next. The option is then disabled automatically.' },
+        duplicates: { tooltip: 'Ignores repeated detections of the same file path during the current monitoring session.', label: 'Ignores repeated detections of the same file path during the current monitoring session.' },
+        'auto-start': { tooltip: 'Starts newly detected files automatically. Without this option, they are only added to the queue.', label: 'Starts newly detected files automatically. Without this option, they are only added to the queue.' },
+        hosters: { tooltip: 'Sets the upload destinations for files from folder monitoring. Without a selection, manual confirmation is required.', label: 'Sets the upload destinations for files from folder monitoring. Without a selection, manual confirmation is required.' }
+      },
+      gridScope: { ordinary: false, folderMonitor: true },
+      actions: {
+        disabledWhileIdle: 'queue',
+        disabledWhileUploading: 'queue',
+        enabledWhileIdle: 'start',
+        enabledWhileUploading: 'inject',
+        enabledDuringHealthCheck: 'queue'
+      },
+      queueOnly: { statuses: ['preview'], injectCalls: 0 },
+      autoStart: { statuses: ['queued'], injectCalls: 1 },
+      manualQueueOnly: { statuses: ['preview'], injectCalls: 0 },
+      manualAutoStartRunning: { statuses: ['queued'], injectCalls: 1 },
+      manualAutoStartIdle: { startCalls: 1 },
+      sameBasenameResult: {
+        'active-same-name': { status: 'done', code: 'active-code' },
+        'waiting-same-name': { status: 'preview', code: null }
       }
     });
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);

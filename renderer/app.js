@@ -408,6 +408,66 @@ window.addEventListener('unhandledrejection', (e) => {
   } catch {}
 });
 
+function resolveFolderMonitorQueueAction({ autoStart, uploading: isUploading, healthCheckRunning: isHealthCheckRunning }) {
+  if (!autoStart) return 'queue';
+  if (isUploading) return 'inject';
+  return isHealthCheckRunning ? 'queue' : 'start';
+}
+
+function handleFolderMonitorFiles(files) {
+  window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
+  const fm = config.globalSettings && config.globalSettings.folderMonitor;
+  const fmHosters = fm && Array.isArray(fm.hosters) && fm.hosters.length > 0 ? fm.hosters : [];
+
+  if (fmHosters.length === 0) {
+    addPathsToQueue(files, { folderMonitorAutoStart: !!fm.autoStart });
+    return;
+  }
+
+  selectedUploadHosters = fmHosters.slice();
+  const existing = new Set();
+  for (const file of selectedFiles) existing.add(file.path);
+  for (const file of _pendingFiles) existing.add(file.path);
+  const newFiles = [];
+  for (const filePath of files) {
+    if (existing.has(filePath)) continue;
+    existing.add(filePath);
+    const name = filePath.split('\\').pop().split('/').pop();
+    newFiles.push({ path: filePath, name, size: null });
+  }
+  if (newFiles.length === 0) return;
+
+  const newPaths = new Set(newFiles.map(file => file.path));
+  clearDedupKeysForPaths(newPaths);
+  selectedFiles.push(...newFiles);
+  buildQueuePreview();
+  updateUploadView();
+  const action = resolveFolderMonitorQueueAction({
+    autoStart: fm.autoStart,
+    uploading,
+    healthCheckRunning
+  });
+  if (action === 'start') {
+    startUpload();
+    return;
+  }
+  if (action !== 'inject') return;
+
+  const newJobs = queueJobs.filter(job => job.status === 'preview' && newPaths.has(job.file));
+  if (newJobs.length === 0) return;
+  const cleanupPreparation = prepareSourceCleanup(newJobs);
+  newJobs.forEach(job => { job.status = 'queued'; });
+  renderQueueTable();
+  window.api.addJobsToBatch({
+    jobs: newJobs.map(serializeUploadJob),
+    sourceCleanupGroups: cleanupPreparation.groups
+  }).then(result => {
+    _markSkippedJobs(result);
+    if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+  }).catch(() => {});
+  persistQueueStateSoon(true);
+}
+
 // --- Init ---
 async function init() {
   try {
@@ -501,56 +561,7 @@ async function init() {
     }
   });
 
-  // Folder monitor: auto-queue new files
-  window.api.onFolderMonitorNewFiles((files) => {
-    window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
-    const fm = config.globalSettings && config.globalSettings.folderMonitor;
-    const fmHosters = fm && Array.isArray(fm.hosters) && fm.hosters.length > 0 ? fm.hosters : [];
-
-    if (fmHosters.length > 0) {
-      // Pre-selected hosters: set them as active selection and add directly to queue
-      selectedUploadHosters = fmHosters.slice();
-      const existing = new Set();
-      for (const f of selectedFiles) existing.add(f.path);
-      for (const f of _pendingFiles) existing.add(f.path);
-      const newFiles = [];
-      for (const p of files) {
-        if (existing.has(p)) continue;
-        existing.add(p);
-        const name = p.split('\\').pop().split('/').pop();
-        newFiles.push({ path: p, name, size: null });
-      }
-      if (newFiles.length > 0) {
-        const newPaths = new Set(newFiles.map(f => f.path));
-        clearDedupKeysForPaths(newPaths);
-        selectedFiles.push(...newFiles);
-        buildQueuePreview();
-        updateUploadView();
-        if (fm.autoStart && !uploading && !healthCheckRunning) {
-          startUpload();
-        } else if (uploading) {
-          // Inject new preview jobs into the running batch
-          const newJobs = queueJobs.filter(j => j.status === 'preview' && newPaths.has(j.file));
-          if (newJobs.length > 0) {
-            const cleanupPreparation = prepareSourceCleanup(newJobs);
-            newJobs.forEach(j => { j.status = 'queued'; });
-            renderQueueTable();
-            window.api.addJobsToBatch({
-              jobs: newJobs.map(serializeUploadJob),
-              sourceCleanupGroups: cleanupPreparation.groups
-            }).then(result => {
-              _markSkippedJobs(result);
-              if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-            }).catch(() => {});
-            persistQueueStateSoon(true);
-          }
-        }
-      }
-    } else {
-      // No pre-selected hosters: open modal
-      addPathsToQueue(files);
-    }
-  });
+  window.api.onFolderMonitorNewFiles(handleFolderMonitorFiles);
 
   // Account switched notification
   window.api.onAccountSwitched((data) => {
@@ -1163,6 +1174,10 @@ function applyHosterSelection() {
   const admittedFiles = _pendingFiles.filter(file => window.ImportPreflight
     .getEligibleImportHosters(file, selectedUploadHosters, hosterSettings).length > 0);
   const pendingPaths = new Set(admittedFiles.map(f => f.path));
+  const pathsToInject = new Set(admittedFiles
+    .filter(file => !_pendingFolderMonitorAutoStart.has(file.path) || _pendingFolderMonitorAutoStart.get(file.path))
+    .map(file => file.path));
+  const shouldAutoStart = !uploading && admittedFiles.some(file => _pendingFolderMonitorAutoStart.get(file.path) === true);
   if (admittedFiles.length > 0) {
     selectedFiles.push(...admittedFiles);
   }
@@ -1173,9 +1188,9 @@ function applyHosterSelection() {
   // During an active upload, build preview jobs for the new files and inject
   // them into the running batch immediately (otherwise they'd be lost on
   // handleBatchDone via syncSelectedFilesFromQueue)
-  if (uploading && pendingPaths.size > 0) {
-    buildQueuePreview(); // creates 'preview' jobs for new files
-    const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
+  if (pendingPaths.size > 0) buildQueuePreview();
+  if (uploading && pathsToInject.size > 0) {
+    const newJobs = queueJobs.filter(j => j.status === 'preview' && pathsToInject.has(j.file));
     if (newJobs.length > 0) {
       const cleanupPreparation = prepareSourceCleanup(newJobs);
       newJobs.forEach(j => { j.status = 'queued'; });
@@ -1193,8 +1208,10 @@ function applyHosterSelection() {
 
   updateUploadView();
   persistQueueStateSoon(true); // immediate persist after adding files
+  _pendingFolderMonitorAutoStart.clear();
   _pendingImportInspection = null;
   document.getElementById('hosterModal').style.display = 'none';
+  if (shouldAutoStart) startUpload();
   return true;
 }
 
@@ -1203,6 +1220,7 @@ function cancelHosterModal() {
   _pendingImportInspections = 0;
   _importCoordination = Promise.resolve();
   _pendingFiles = [];
+  _pendingFolderMonitorAutoStart.clear();
   _pendingImportInspection = null;
   syncImportConfirmationState();
   closeHosterModal();
@@ -1420,6 +1438,7 @@ function setupDragDrop() {
 }
 
 let _pendingFiles = [];
+const _pendingFolderMonitorAutoStart = new Map();
 let _pendingImportInspection = null;
 let _importCoordination = Promise.resolve();
 let _importGeneration = 0;
@@ -1516,7 +1535,11 @@ function mergePendingImportInspection(result) {
   };
 }
 
-function coordinateImportEntries(entries) {
+function markPendingFolderMonitorFiles(files, autoStart) {
+  for (const file of files) _pendingFolderMonitorAutoStart.set(file.path, !!autoStart);
+}
+
+function coordinateImportEntries(entries, options = {}) {
   const candidates = Array.isArray(entries) ? entries : [];
   if (candidates.length === 0) return Promise.resolve(null);
   const generation = _importGeneration;
@@ -1535,6 +1558,9 @@ function coordinateImportEntries(entries) {
     if (generation !== _importGeneration) return null;
     mergePendingImportInspection(inspection);
     if (inspection.accepted.length > 0) {
+      if (typeof options.folderMonitorAutoStart === 'boolean') {
+        markPendingFolderMonitorFiles(inspection.accepted, options.folderMonitorAutoStart);
+      }
       if (document.getElementById('hosterModal')?.style.display === 'flex') {
         selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
           .map(input => input.dataset.hosterModal);
@@ -1596,8 +1622,8 @@ async function pickFolder() {
   return enqueueImportEntries(paths);
 }
 
-function addPathsToQueue(paths) {
-  return coordinateImportEntries(paths);
+function addPathsToQueue(paths, options) {
+  return coordinateImportEntries(paths, options);
 }
 
 function updateUploadView() {
@@ -4235,6 +4261,7 @@ function applySummaryResults(summary) {
   // otherwise become O(n²).
   const jobByKey = new Map();
   for (const j of queueJobs) {
+    if (j.status === 'preview') continue;
     jobByKey.set(`${j.fileName}\u0001${j.hoster}`, j);
   }
   for (const file of files) {
@@ -4976,6 +5003,7 @@ function renderSettings() {
         <button class="btn btn-xs btn-secondary" id="manualUpdateCheckBtn">Nach Updates suchen</button>
       </div>
   `;
+  const folderMonitorHelp = (key, text) => `<span class="settings-help" tabindex="0" role="note" aria-label="${escapeAttr(text)}" data-tooltip="${escapeAttr(text)}" data-folder-monitor-help="${escapeAttr(key)}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"></circle><path d="M9.8 9a2.3 2.3 0 0 1 4.4 1c0 1.8-2.2 2-2.2 3.7"></path><path d="M12 17h.01"></path></svg></span>`;
 
   pages.uploads.innerHTML = `
       ${pageHeader('Upload-Verhalten', 'Globale Leistung, Warteschlange und Verhalten nach einem erfolgreichen Upload.')}
@@ -5068,28 +5096,33 @@ function renderSettings() {
       </div>
       <div class="settings-section-label">Verhalten</div>
       <div class="settings-grid-mini">
-        <div class="settings-row checkbox-row">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Aktiviert</label>
           <input type="checkbox" class="settings-autosave" id="fmEnabledInput" ${fm.enabled ? 'checked' : ''}>
+          ${folderMonitorHelp('enabled', 'Startet die Überwachung nach dem Speichern, wenn ein Ordner ausgewählt ist.')}
         </div>
-        <div class="settings-row checkbox-row">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Unterordner einbeziehen</label>
           <input type="checkbox" class="settings-autosave" id="fmRecursiveInput" ${fm.recursive ? 'checked' : ''}>
+          ${folderMonitorHelp('recursive', 'Überwacht zusätzlich alle Unterordner des ausgewählten Ordners.')}
         </div>
-        <div class="settings-row checkbox-row">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Vorhandene Dateien einmalig einlesen</label>
           <input type="checkbox" class="settings-autosave" id="fmIncludeExistingInput" ${fm.includeExisting ? 'checked' : ''}>
+          ${folderMonitorHelp('existing', 'Fügt beim nächsten Start der Überwachung alle bereits vorhandenen passenden Dateien hinzu. Die Option wird danach automatisch deaktiviert.')}
         </div>
-        <div class="settings-row checkbox-row">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Duplikate überspringen</label>
           <input type="checkbox" class="settings-autosave" id="fmSkipDuplicatesInput" ${fm.skipDuplicates !== false ? 'checked' : ''}>
+          ${folderMonitorHelp('duplicates', 'Ignoriert wiederholte Erkennungen desselben Dateipfads während der aktuellen Überwachung.')}
         </div>
-        <div class="settings-row checkbox-row">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Auto-Upload starten</label>
           <input type="checkbox" class="settings-autosave" id="fmAutoStartInput" ${fm.autoStart !== false ? 'checked' : ''}>
+          ${folderMonitorHelp('auto-start', 'Startet neu erkannte Dateien automatisch. Ohne diese Option werden sie nur zur Warteschlange hinzugefügt.')}
         </div>
       </div>
-      <div class="settings-section-label">Hoster-Vorauswahl</div>
+      <div class="settings-section-label">Hoster-Vorauswahl ${folderMonitorHelp('hosters', 'Legt die Upload-Ziele für Dateien aus der Ordnerüberwachung fest. Ohne Auswahl ist eine manuelle Bestätigung erforderlich.')}</div>
       <div class="settings-grid-mini">
         ${configuredAccounts.map(({ name }) => `
         <div class="settings-row checkbox-row">
@@ -5097,7 +5130,7 @@ function renderSettings() {
           <input type="checkbox" class="settings-autosave fm-hoster-checkbox" data-fm-hoster="${name}" ${(fm.hosters || []).includes(name) ? 'checked' : ''}>
         </div>`).join('')}
       </div>
-      ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Auswahl = Hoster-Modal bei jeder Datei.</p>'}
+      ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Vorauswahl = manuelle Hoster-Auswahl für neu erkannte Dateien.</p>'}
   `;
 
   pages.benachrichtigungen.innerHTML = `
