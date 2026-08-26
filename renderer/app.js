@@ -63,6 +63,7 @@ let config = { hosters: {}, hosterSettings: {}, globalSettings: {} };
 let hosterSettings = {};
 let uploading = false;
 let healthCheckRunning = false;
+let automationRuntimeStatus = Object.freeze({});
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupMutationGeneration = 0;
@@ -414,58 +415,307 @@ function resolveFolderMonitorQueueAction({ autoStart, uploading: isUploading, he
   return isHealthCheckRunning ? 'queue' : 'start';
 }
 
-function handleFolderMonitorFiles(files) {
-  window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
-  const fm = config.globalSettings && config.globalSettings.folderMonitor;
-  const fmHosters = fm && Array.isArray(fm.hosters) && fm.hosters.length > 0 ? fm.hosters : [];
+function freezeAutomationValue(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) freezeAutomationValue(nested);
+  return Object.freeze(value);
+}
 
-  if (fmHosters.length === 0) {
-    addPathsToQueue(files, { folderMonitorAutoStart: !!fm.autoStart });
-    return;
+function normalizeAutomationPath(value) {
+  return String(value || '').replace(/\\/g, '/').toLowerCase();
+}
+
+function normalizeAutomationCandidate(value, index) {
+  const source = value && typeof value === 'object' ? value : { path: value };
+  const filePath = String(source.path || '').trim();
+  return {
+    ...source,
+    path: filePath,
+    name: String(source.name || filePath.split(/[\\/]/).pop() || ''),
+    size: Number.isFinite(Number(source.size)) ? Number(source.size) : null,
+    mtimeMs: Number(source.mtimeMs) || index,
+    filterMatched: source.filterMatched !== false && source.allowed !== false && source.classification?.allowed !== false
+  };
+}
+
+function flattenAutomationHistoryRows(history) {
+  const rows = [];
+  for (const entry of Array.isArray(history) ? history : []) {
+    if (!Array.isArray(entry?.files)) {
+      rows.push(entry);
+      continue;
+    }
+    for (const file of entry.files) {
+      rows.push({
+        path: file?.path || file?.file || '',
+        fileName: file?.fileName || file?.filename || file?.name || ''
+      });
+    }
   }
+  return rows;
+}
 
-  selectedUploadHosters = fmHosters.slice();
-  const existing = new Set();
-  for (const file of selectedFiles) existing.add(file.path);
-  for (const file of _pendingFiles) existing.add(file.path);
-  const newFiles = [];
-  for (const filePath of files) {
-    if (existing.has(filePath)) continue;
-    existing.add(filePath);
-    const name = filePath.split('\\').pop().split('/').pop();
-    newFiles.push({ path: filePath, name, size: null });
+function automationSettings() {
+  return window.AutomationControl.normalizeAutomationSettings(config.globalSettings?.folderMonitor || {});
+}
+
+function applyAutomationRuntimeStatus(value) {
+  automationRuntimeStatus = freezeAutomationValue({ ...(value || {}) });
+  return automationRuntimeStatus;
+}
+
+async function refreshAutomationRuntimeStatus() {
+  if (typeof window.api.automationGetStatus !== 'function') return automationRuntimeStatus;
+  return applyAutomationRuntimeStatus(await window.api.automationGetStatus());
+}
+
+async function isAutomationPaused() {
+  try {
+    const status = await refreshAutomationRuntimeStatus();
+    return status.paused === true || config.globalSettings?.folderMonitor?.paused === true;
+  } catch {
+    return true;
   }
-  if (newFiles.length === 0) return;
+}
 
-  const newPaths = new Set(newFiles.map(file => file.path));
-  clearDedupKeysForPaths(newPaths);
-  selectedFiles.push(...newFiles);
-  buildQueuePreview();
-  updateUploadView();
-  const action = resolveFolderMonitorQueueAction({
-    autoStart: fm.autoStart,
+function createAutomationStatusSnapshot() {
+  const folderSettings = config.globalSettings?.folderMonitor || {};
+  const normalized = window.AutomationControl.normalizeAutomationSettings(folderSettings);
+  const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
+  const availableSlots = normalized.queueLimitJobs === 0 ? null : Math.max(0, normalized.queueLimitJobs - currentJobCount);
+  const telemetry = window.AutomationControl.rollDailyTelemetry(folderSettings.telemetry);
+  const snapshot = {
+    ...automationRuntimeStatus,
+    enabled: folderSettings.enabled === true,
+    folderPath: String(folderSettings.folderPath || automationRuntimeStatus.folderPath || ''),
+    paused: automationRuntimeStatus.paused === true || normalized.paused,
+    pausedAt: automationRuntimeStatus.pausedAt ?? normalized.pausedAt,
+    queueLimitJobs: normalized.queueLimitJobs,
+    currentJobCount,
+    availableSlots,
+    queueLimited: normalized.queueLimitJobs !== 0 && availableSlots === 0,
+    telemetry
+  };
+  snapshot.state = window.AutomationControl.deriveAutomationState(snapshot);
+  return freezeAutomationValue(snapshot);
+}
+
+async function evaluateAutomationCandidates(files, options = {}) {
+  const source = Array.isArray(files) ? files : [];
+  const candidates = source.map(normalizeAutomationCandidate);
+  const matched = candidates.filter(candidate => candidate.path && candidate.filterMatched);
+  const folderSettings = config.globalSettings?.folderMonitor || {};
+  const selectedHosters = Array.from(new Set((Array.isArray(options.selectedHosters) ? options.selectedHosters : folderSettings.hosters || [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean)));
+  const [history, uploadLog] = await Promise.all([
+    window.api.getHistory(),
+    window.api.readOwnUploadLog()
+  ]);
+  const processed = window.AutomationControl.classifyProcessedCandidates({
+    candidates: matched,
+    queuePaths: [...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)],
+    historyRows: flattenAutomationHistoryRows(history),
+    uploadLogRows: uploadLog
+  });
+  const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
+  const unprocessed = matched.filter(candidate => !processedPaths.has(normalizeAutomationPath(candidate.path)));
+  const inspection = await window.api.inspectImportFiles(unprocessed, []);
+  const metadata = new Map(unprocessed.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
+  const accepted = (Array.isArray(inspection?.accepted) ? inspection.accepted : []).map(file => ({
+    ...(metadata.get(normalizeAutomationPath(file?.path)) || {}),
+    ...file
+  }));
+  const plannedCandidates = accepted.map(file => {
+    const eligibleHosters = window.ImportPreflight.getEligibleImportHosters(file, selectedHosters, hosterSettings);
+    return {
+      path: file.path,
+      name: file.name,
+      size: file.size,
+      mtimeMs: file.mtimeMs,
+      eligibleHosters,
+      eligibleJobCount: eligibleHosters.length
+    };
+  });
+  const normalizedSettings = automationSettings();
+  const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
+  const availableSlots = normalizedSettings.queueLimitJobs === 0 ? null : Math.max(0, normalizedSettings.queueLimitJobs - currentJobCount);
+  const admission = window.AutomationControl.planAtomicAdmissions({
+    candidates: plannedCandidates,
+    currentJobCount,
+    queueLimitJobs: normalizedSettings.queueLimitJobs
+  });
+  const admittedPaths = new Set(admission.admittedPaths.map(normalizeAutomationPath));
+  const deferredPaths = new Set(admission.deferredPaths.map(normalizeAutomationPath));
+  const admittedFiles = plannedCandidates.filter(candidate => admittedPaths.has(normalizeAutomationPath(candidate.path)));
+  const deferredFiles = plannedCandidates.filter(candidate => deferredPaths.has(normalizeAutomationPath(candidate.path)));
+  const resultingJobs = plannedCandidates.reduce((total, candidate) => total + candidate.eligibleJobCount, 0);
+  const summary = {
+    found: candidates.length,
+    filterMatched: matched.length,
+    alreadyProcessed: processed.processedPaths.length,
+    unavailable: Number(inspection?.unavailableCount) || 0,
+    sizeLimitedJobs: plannedCandidates.length * selectedHosters.length - resultingJobs,
+    acceptedFiles: plannedCandidates.length,
+    selectedTargets: selectedHosters.length,
+    resultingJobs,
+    availableSlots,
+    deferredFiles: deferredFiles.length
+  };
+  return freezeAutomationValue({
+    dryRun: options.dryRun === true,
+    trigger: String(options.trigger || 'watcher'),
+    queueJobCount: currentJobCount,
+    queueLimitJobs: normalizedSettings.queueLimitJobs,
+    selectedHosters,
+    candidates: plannedCandidates,
+    admittedFiles,
+    deferredFiles,
+    summary,
+    telemetryDelta: {
+      detected: summary.found,
+      queued: admittedFiles.length,
+      skipped: summary.alreadyProcessed + summary.unavailable,
+      deferred: deferredFiles.length,
+      lastDetectedName: plannedCandidates.at(-1)?.name || ''
+    }
+  });
+}
+
+function createAutomationPreviewJob(file, hoster) {
+  return {
+    id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    file: file.path,
+    fileName: file.name,
+    hoster,
+    status: 'preview',
+    bytesUploaded: 0,
+    bytesTotal: file.size || 0,
+    speedKbs: 0,
+    elapsed: 0,
+    remaining: 0,
+    error: null,
+    result: null,
+    attempt: 0,
+    maxAttempts: 0,
+    link: ''
+  };
+}
+
+async function persistAutomationTelemetry(delta) {
+  const globalSettings = config.globalSettings || {};
+  const folderSettings = globalSettings.folderMonitor || {};
+  const telemetry = window.AutomationControl.applyTelemetryDelta(folderSettings.telemetry, delta);
+  const nextSettings = {
+    ...globalSettings,
+    folderMonitor: { ...folderSettings, telemetry }
+  };
+  config.globalSettings = nextSettings;
+  try {
+    await saveGlobalSettingsTracked(nextSettings);
+  } catch {}
+  return telemetry;
+}
+
+async function applyAutomationEvaluation(evaluation) {
+  if (!evaluation || evaluation.dryRun === true) {
+    return freezeAutomationValue({ admittedFiles: [], deferredFiles: [], paused: false, dryRun: true });
+  }
+  const manualPreview = evaluation.trigger === 'manual-host' || evaluation.trigger === 'manual-import';
+  const paused = await isAutomationPaused();
+  if (paused && !manualPreview) {
+    return freezeAutomationValue({ admittedFiles: [], deferredFiles: evaluation.candidates || [], paused: true, dryRun: false });
+  }
+  const currentPaths = new Set([...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)].map(normalizeAutomationPath));
+  const candidates = evaluation.candidates.filter(candidate => !currentPaths.has(normalizeAutomationPath(candidate.path)));
+  if (evaluation.selectedHosters.length === 0) {
+    if (candidates.length > 0) {
+      _pendingFiles.push(...candidates.map(file => ({ path: file.path, name: file.name, size: file.size, mtimeMs: file.mtimeMs })));
+      mergePendingImportInspection({
+        candidateCount: evaluation.summary.filterMatched,
+        duplicateCount: evaluation.summary.alreadyProcessed,
+        unavailableCount: evaluation.summary.unavailable,
+        accepted: candidates
+      });
+      markPendingFolderMonitorFiles(candidates, config.globalSettings?.folderMonitor?.autoStart === true);
+      if (document.getElementById('hosterModal')?.style.display === 'flex') renderHosterModal();
+      else openHosterModal();
+    }
+    return freezeAutomationValue({ admittedFiles: [], deferredFiles: [], paused, awaitingHostSelection: candidates.length > 0 });
+  }
+  const normalizedSettings = automationSettings();
+  const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
+  const admission = window.AutomationControl.planAtomicAdmissions({
+    candidates,
+    currentJobCount,
+    queueLimitJobs: normalizedSettings.queueLimitJobs
+  });
+  const admittedPaths = new Set(admission.admittedPaths.map(normalizeAutomationPath));
+  const deferredPaths = new Set(admission.deferredPaths.map(normalizeAutomationPath));
+  const admittedFiles = candidates.filter(candidate => admittedPaths.has(normalizeAutomationPath(candidate.path)));
+  const deferredFiles = candidates.filter(candidate => deferredPaths.has(normalizeAutomationPath(candidate.path)));
+  if (admittedFiles.length === 0) {
+    return freezeAutomationValue({ admittedFiles: [], deferredFiles, paused, dryRun: false });
+  }
+  const filePaths = new Set(admittedFiles.map(file => file.path));
+  const newJobs = admittedFiles.flatMap(file => file.eligibleHosters.map(hoster => createAutomationPreviewJob(file, hoster)));
+  selectedUploadHosters = evaluation.selectedHosters.slice();
+  clearDedupKeysForPaths(filePaths);
+  selectedFiles.push(...admittedFiles.map(file => ({ path: file.path, name: file.name, size: file.size })));
+  queueJobs.push(...newJobs);
+  rebuildJobIndex();
+  _queueStatsCache = null;
+  renderHosterSummary();
+  renderQueueTable();
+  updateUploadView({ rebuildPreview: false });
+  updateStatusBar();
+  updateStatsPanel();
+  persistQueueStateSoon(true);
+  await persistAutomationTelemetry({
+    detected: evaluation.summary.found,
+    queued: admittedFiles.length,
+    skipped: evaluation.summary.alreadyProcessed + evaluation.summary.unavailable,
+    deferred: deferredFiles.length,
+    lastDetectedName: admittedFiles.at(-1)?.name || ''
+  });
+  const action = paused && manualPreview ? 'queue' : resolveFolderMonitorQueueAction({
+    autoStart: config.globalSettings?.folderMonitor?.autoStart === true,
     uploading,
     healthCheckRunning
   });
-  if (action === 'start') {
-    startUpload();
-    return;
+  if (action === 'inject' && !(await isAutomationPaused())) {
+    const cleanupPreparation = prepareSourceCleanup(newJobs);
+    try {
+      const result = await window.api.addJobsToBatch({
+        jobs: newJobs.map(serializeUploadJob),
+        sourceCleanupGroups: cleanupPreparation.groups
+      });
+      if (!result?.error) newJobs.forEach(job => { job.status = 'queued'; });
+      _markSkippedJobs(result);
+      if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+    } catch {}
+    renderQueueTable();
+    persistQueueStateSoon(true);
+  } else if (action === 'start') {
+    await startUpload();
   }
-  if (action !== 'inject') return;
+  return freezeAutomationValue({ admittedFiles, deferredFiles, paused, dryRun: false, plannedJobs: admission.plannedJobs });
+}
 
-  const newJobs = queueJobs.filter(job => job.status === 'preview' && newPaths.has(job.file));
-  if (newJobs.length === 0) return;
-  const cleanupPreparation = prepareSourceCleanup(newJobs);
-  newJobs.forEach(job => { job.status = 'queued'; });
-  renderQueueTable();
-  window.api.addJobsToBatch({
-    jobs: newJobs.map(serializeUploadJob),
-    sourceCleanupGroups: cleanupPreparation.groups
-  }).then(result => {
-    _markSkippedJobs(result);
-    if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-  }).catch(() => {});
-  persistQueueStateSoon(true);
+async function runFolderMonitorTestScan() {
+  const result = await window.api.folderMonitorTestScan();
+  return evaluateAutomationCandidates(result?.files || [], { dryRun: true, trigger: result?.trigger || 'test' });
+}
+
+window.evaluateAutomationCandidates = evaluateAutomationCandidates;
+window.applyAutomationEvaluation = applyAutomationEvaluation;
+window.createAutomationStatusSnapshot = createAutomationStatusSnapshot;
+window.runFolderMonitorTestScan = runFolderMonitorTestScan;
+
+async function handleFolderMonitorFiles(files) {
+  window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
+  const evaluation = await evaluateAutomationCandidates(files, { dryRun: false, trigger: 'watcher' });
+  return applyAutomationEvaluation(evaluation);
 }
 
 // --- Init ---
@@ -476,6 +726,9 @@ async function init() {
     await showAppAlert(error.message || String(error), 'Zugangsdaten gesperrt');
     throw error;
   }
+  try {
+    await refreshAutomationRuntimeStatus();
+  } catch {}
   setUiLanguage(config.globalSettings?.language);
   hosterSettings = config.hosterSettings || {};
   autoHealthCheckEnabled = loadAutoCheckPreference();
@@ -561,7 +814,15 @@ async function init() {
     }
   });
 
-  window.api.onFolderMonitorNewFiles(handleFolderMonitorFiles);
+  window.api.onFolderMonitorNewFiles(files => {
+    handleFolderMonitorFiles(files).catch(error => window.api.debugLog(`folder-monitor renderer evaluation failed: ${error.message || String(error)}`));
+  });
+  if (typeof window.api.onAutomationStatus === 'function') {
+    window.api.onAutomationStatus(status => {
+      applyAutomationRuntimeStatus(status);
+      updateQueueActionButtons();
+    });
+  }
 
   // Account switched notification
   window.api.onAccountSwitched((data) => {
@@ -1167,51 +1428,54 @@ function closeHosterModal() {
   if (modal) modal.style.display = 'none';
 }
 
-function applyHosterSelection() {
+async function applyHosterSelection() {
   if (isImportConfirmationBlocked()) return false;
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
-  const admittedFiles = _pendingFiles.filter(file => window.ImportPreflight
+  const pendingFiles = _pendingFiles.slice();
+  const automationFiles = pendingFiles.filter(file => _pendingFolderMonitorAutoStart.has(file.path));
+  const regularFiles = pendingFiles.filter(file => !_pendingFolderMonitorAutoStart.has(file.path));
+  const admittedFiles = regularFiles.filter(file => window.ImportPreflight
     .getEligibleImportHosters(file, selectedUploadHosters, hosterSettings).length > 0);
   const pendingPaths = new Set(admittedFiles.map(f => f.path));
-  const pathsToInject = new Set(admittedFiles
-    .filter(file => !_pendingFolderMonitorAutoStart.has(file.path) || _pendingFolderMonitorAutoStart.get(file.path))
-    .map(file => file.path));
-  const shouldAutoStart = !uploading && admittedFiles.some(file => _pendingFolderMonitorAutoStart.get(file.path) === true);
   if (admittedFiles.length > 0) {
     selectedFiles.push(...admittedFiles);
   }
   _pendingFiles = [];
   clearDedupKeysForPaths(pendingPaths);
   renderHosterSummary();
-
-  // During an active upload, build preview jobs for the new files and inject
-  // them into the running batch immediately (otherwise they'd be lost on
-  // handleBatchDone via syncSelectedFilesFromQueue)
   if (pendingPaths.size > 0) buildQueuePreview();
-  if (uploading && pathsToInject.size > 0) {
-    const newJobs = queueJobs.filter(j => j.status === 'preview' && pathsToInject.has(j.file));
+  if (uploading && pendingPaths.size > 0 && !(await isAutomationPaused())) {
+    const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
     if (newJobs.length > 0) {
       const cleanupPreparation = prepareSourceCleanup(newJobs);
-      newJobs.forEach(j => { j.status = 'queued'; });
-      renderQueueTable();
-      window.api.addJobsToBatch({
-        jobs: newJobs.map(serializeUploadJob),
-        sourceCleanupGroups: cleanupPreparation.groups
-      }).then(result => {
+      try {
+        const result = await window.api.addJobsToBatch({
+          jobs: newJobs.map(serializeUploadJob),
+          sourceCleanupGroups: cleanupPreparation.groups
+        });
+        if (!result?.error) newJobs.forEach(job => { job.status = 'queued'; });
         _markSkippedJobs(result);
         if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-      }).catch(() => {});
+      } catch {}
+      renderQueueTable();
       persistQueueStateSoon(true);
     }
   }
-
   updateUploadView();
-  persistQueueStateSoon(true); // immediate persist after adding files
+  persistQueueStateSoon(true);
+  const selectedHosters = selectedUploadHosters.slice();
   _pendingFolderMonitorAutoStart.clear();
   _pendingImportInspection = null;
   document.getElementById('hosterModal').style.display = 'none';
-  if (shouldAutoStart) startUpload();
+  if (automationFiles.length > 0) {
+    const evaluation = await evaluateAutomationCandidates(automationFiles, {
+      dryRun: false,
+      trigger: 'manual-host',
+      selectedHosters
+    });
+    await applyAutomationEvaluation(evaluation);
+  }
   return true;
 }
 
@@ -1626,7 +1890,7 @@ function addPathsToQueue(paths, options) {
   return coordinateImportEntries(paths, options);
 }
 
-function updateUploadView() {
+function updateUploadView(options = {}) {
   const dropZone = document.getElementById('dropZone');
   const queueShell = document.getElementById('queueShell');
   const queueActions = document.getElementById('queueActions');
@@ -1639,7 +1903,7 @@ function updateUploadView() {
     dropZone.style.display = 'none';
     queueShell.style.display = 'flex';
     queueActions.style.display = 'flex';
-    if (!uploading && selectedFiles.length > 0) {
+    if (options.rebuildPreview !== false && !uploading && selectedFiles.length > 0) {
       buildQueuePreview();
     }
   }
@@ -3342,6 +3606,7 @@ function serializeUploadJob(job) {
 
 async function startUpload(opts) {
   if (uploading) return;
+  if (await isAutomationPaused()) return false;
   if (!(opts && opts._restoredAutoStart)) cancelStartupQueueAutoStart();
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
   else _cancelAutoRetry(false);
@@ -3420,6 +3685,7 @@ function _markSkippedJobs(result) {
 }
 
 async function startSelectedUpload(explicitJobs) {
+  if (await isAutomationPaused()) return false;
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();

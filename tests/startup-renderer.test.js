@@ -64,6 +64,16 @@ test('Windows compositor paints the full hidden surface with an RDP session envi
 const { contextBridge } = require('electron');
 const managedOnlineBackupProbeCalls = [];
 const folderMonitorProbeCalls = [];
+let automationProbe = {
+  history: [],
+  uploadLog: [],
+  paused: false,
+  dryScan: { files: [], reachable: true, trigger: 'test' },
+  readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
+  mutationCalls: [],
+  logs: [],
+  savedSettings: []
+};
 const managedOnlineBackupIds = {
   a: 'AAAAAAAAAAAAAAAAAAAAAA',
   b: 'AQEBAQEBAQEBAQEBAQEBAQ',
@@ -144,14 +154,80 @@ contextBridge.exposeInMainWorld('api', {
     pending.resolve({ ok: true, removedId: pending.id, notFound: false });
   },
   getManagedOnlineBackupProbeCalls() { return managedOnlineBackupProbeCalls; },
-  debugLog() {},
+  configureAutomationProbe(value = {}) {
+    automationProbe = {
+      history: Array.isArray(value.history) ? value.history : [],
+      uploadLog: Array.isArray(value.uploadLog) ? value.uploadLog : [],
+      paused: value.paused === true,
+      dryScan: value.dryScan || { files: [], reachable: true, trigger: 'test' },
+      readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
+      mutationCalls: [],
+      logs: [],
+      savedSettings: []
+    };
+  },
+  getAutomationProbeState() {
+    return {
+      readCalls: { ...automationProbe.readCalls },
+      mutationCalls: automationProbe.mutationCalls.map(value => [...value]),
+      logs: [...automationProbe.logs],
+      savedSettings: automationProbe.savedSettings.map(value => JSON.parse(JSON.stringify(value)))
+    };
+  },
+  inspectImportFiles(entries) {
+    automationProbe.readCalls.inspect++;
+    const candidates = Array.isArray(entries) ? entries : [];
+    const unavailable = candidates.filter(entry => entry?.unavailable).map(entry => ({ ...entry, reason: 'unreadable' }));
+    const accepted = candidates.filter(entry => !entry?.unavailable).map(entry => ({ ...entry }));
+    return Promise.resolve({
+      candidateCount: candidates.length,
+      duplicateCount: 0,
+      unavailableCount: unavailable.length,
+      acceptedCount: accepted.length,
+      accepted,
+      duplicates: [],
+      unavailable
+    });
+  },
+  getHistory() {
+    automationProbe.readCalls.history++;
+    return Promise.resolve(automationProbe.history);
+  },
+  readOwnUploadLog() {
+    automationProbe.readCalls.uploadLog++;
+    return Promise.resolve(automationProbe.uploadLog);
+  },
+  automationGetStatus() {
+    automationProbe.readCalls.status++;
+    return Promise.resolve({ paused: automationProbe.paused });
+  },
+  folderMonitorTestScan() {
+    automationProbe.readCalls.testScan++;
+    return Promise.resolve(automationProbe.dryScan);
+  },
+  folderMonitorReconcile() {
+    automationProbe.readCalls.reconcile++;
+    return Promise.resolve(automationProbe.dryScan);
+  },
+  debugLog(value) { automationProbe.logs.push(String(value)); },
+  saveGlobalSettings(value) {
+    automationProbe.savedSettings.push(value);
+    automationProbe.mutationCalls.push(['settings']);
+    return Promise.resolve(true);
+  },
   savePendingQueue(payload) {
     folderMonitorProbeCalls.push(['save', payload?.queueJobs?.length || 0]);
+    automationProbe.mutationCalls.push(['save', payload?.queueJobs?.length || 0]);
     return Promise.resolve(true);
   },
   addJobsToBatch(payload) {
     folderMonitorProbeCalls.push(['inject', payload?.jobs?.length || 0]);
-    return Promise.resolve({});
+    automationProbe.mutationCalls.push(['inject', payload?.jobs?.length || 0]);
+    return Promise.resolve({ added: payload?.jobs?.length || 0 });
+  },
+  startUpload(payload) {
+    automationProbe.mutationCalls.push(['start', payload?.jobs?.length || 0]);
+    return Promise.resolve({ started: true });
   },
   getFolderMonitorProbeCalls() { return folderMonitorProbeCalls; }
 });
@@ -310,14 +386,14 @@ contextBridge.exposeInMainWorld('api', {
       rebuildJobIndex();
     };
     resetQueue(false);
-    handleFolderMonitorFiles(['C:\\\\folder-monitor-queue-only.mkv']);
+    await handleFolderMonitorFiles(['C:\\\\folder-monitor-queue-only.mkv']);
     await new Promise(resolve => setTimeout(resolve, 0));
     const queueOnly = {
       statuses: queueJobs.map(job => job.status),
       injectCalls: window.api.getFolderMonitorProbeCalls().filter(call => call[0] === 'inject').length
     };
     resetQueue(true);
-    handleFolderMonitorFiles(['C:\\\\folder-monitor-inject.mkv']);
+    await handleFolderMonitorFiles(['C:\\\\folder-monitor-inject.mkv']);
     await new Promise(resolve => setTimeout(resolve, 0));
     const autoStart = {
       statuses: queueJobs.map(job => job.status),
@@ -370,6 +446,212 @@ contextBridge.exposeInMainWorld('api', {
     applySummaryResults({ files: [{ name: 'same-name.mkv', size: 1, results: [{ hoster: 'doodstream.com', status: 'done', file_code: 'active-code' }] }] });
     const sameBasenameResult = Object.fromEntries(queueJobs.map(job => [job.id, { status: job.status, code: job.result?.file_code || null }]));
     return { germanTooltips, englishTooltips, gridScope, actions, queueOnly, autoStart, manualQueueOnly, manualAutoStartRunning, manualAutoStartIdle, sameBasenameResult };
+  })()`;
+  const automationPipelineScript = `(async () => {
+    const clone = value => JSON.parse(JSON.stringify(value));
+    const captureMutationFingerprint = async () => {
+      const api = await window.api.getAutomationProbeState();
+      return {
+        queueJobs: clone(queueJobs),
+        selectedFiles: clone(selectedFiles),
+        counters: { sessionDone: _sessionDoneCount, sessionError: _sessionErrorCount },
+        pendingFiles: clone(_pendingFiles),
+        pendingInspection: clone(_pendingImportInspection),
+        pendingInspections: _pendingImportInspections,
+        pendingAutoStart: clone([..._pendingFolderMonitorAutoStart]),
+        config: clone(config),
+        monitorSettings: clone(config.globalSettings?.folderMonitor || {}),
+        api: { mutationCalls: api.mutationCalls, logs: api.logs, savedSettings: api.savedSettings }
+      };
+    };
+    const hosters = ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx'];
+    const candidates = Array.from({ length: 500 }, (_, index) => ({
+      path: 'C:\\\\watch\\\\candidate-' + String(index).padStart(3, '0') + '.mkv',
+      name: 'candidate-' + String(index).padStart(3, '0') + '.mkv',
+      size: index >= 55 && index < 75 ? 2 * 1024 * 1024 : 512 * 1024,
+      mtimeMs: index,
+      filterMatched: index < 430,
+      unavailable: index >= 50 && index < 55
+    }));
+    const history = [{
+      id: 'history',
+      files: candidates.slice(0, 25).map(file => ({ path: file.path, name: file.name, results: [{ hoster: hosters[0], status: 'done' }] }))
+    }];
+    const uploadLog = candidates.slice(25, 50).map(file => ({ fileName: file.name, hoster: hosters[0] }));
+    config = {
+      hosters: Object.fromEntries(HOSTERS.map(hoster => [hoster, []])),
+      hosterSettings: {},
+      globalSettings: {
+        folderMonitor: {
+          enabled: true,
+          folderPath: 'C:\\\\watch',
+          hosters,
+          autoStart: false,
+          queueLimitJobs: 1500,
+          paused: false,
+          telemetry: { dateKey: '2026-08-26', detected: 7, queued: 3, skipped: 2, deferred: 1 }
+        }
+      }
+    };
+    hosterSettings = { 'doodstream.com': { maxSizeMb: 1 } };
+    selectedUploadHosters = [];
+    selectedFiles = [{ path: 'C:\\\\manual\\\\selected.mkv', name: 'selected.mkv', size: 1 }];
+    queueJobs = Array.from({ length: 300 }, (_, index) => ({
+      id: 'existing-' + index,
+      file: 'C:\\\\queue\\\\existing-' + index + '.mkv',
+      fileName: 'existing-' + index + '.mkv',
+      hoster: hosters[index % hosters.length],
+      status: 'queued',
+      bytesTotal: 1
+    }));
+    _sessionDoneCount = 4;
+    _sessionErrorCount = 5;
+    _pendingFiles = [{ path: 'C:\\\\pending\\\\pending.mkv', name: 'pending.mkv', size: 1 }];
+    _pendingImportInspection = { candidateCount: 1, accepted: clone(_pendingFiles) };
+    _pendingImportInspections = 1;
+    _pendingFolderMonitorAutoStart.clear();
+    _pendingFolderMonitorAutoStart.set('C:\\\\pending\\\\pending.mkv', true);
+    rebuildJobIndex();
+    window.api.configureAutomationProbe({ history, uploadLog, paused: false });
+    const before = await captureMutationFingerprint();
+    const preview = await evaluateAutomationCandidates(candidates, { dryRun: true, trigger: 'test' });
+    const after = await captureMutationFingerprint();
+    const dryReads = (await window.api.getAutomationProbeState()).readCalls;
+    const dry = {
+      fingerprintEqual: JSON.stringify(after) === JSON.stringify(before),
+      summary: preview.summary,
+      frozen: Object.isFrozen(preview) && Object.isFrozen(preview.summary) && Object.isFrozen(preview.admittedFiles) && Object.isFrozen(preview.deferredFiles),
+      reads: dryReads
+    };
+    window.api.configureAutomationProbe({
+      dryScan: { files: [candidates[55]], reachable: true, trigger: 'test' },
+      paused: false
+    });
+    const manualTestBefore = await captureMutationFingerprint();
+    const manualTestPreview = await runFolderMonitorTestScan();
+    const manualTestAfter = await captureMutationFingerprint();
+    const manualTestProbe = await window.api.getAutomationProbeState();
+    const manualTest = {
+      fingerprintEqual: JSON.stringify(manualTestAfter) === JSON.stringify(manualTestBefore),
+      summary: manualTestPreview.summary,
+      reads: manualTestProbe.readCalls
+    };
+
+    const configureAtomicState = currentCount => {
+      config.globalSettings.folderMonitor = {
+        enabled: true,
+        folderPath: 'C:\\\\watch',
+        hosters,
+        autoStart: false,
+        queueLimitJobs: 15000,
+        paused: false,
+        telemetry: { dateKey: new Date().toLocaleDateString('en-CA'), detected: 0, queued: 0, skipped: 0, deferred: 0 }
+      };
+      hosterSettings = {
+        'doodstream.com': { maxSizeMb: 2 },
+        'voe.sx': { maxSizeMb: 2 }
+      };
+      selectedUploadHosters = [];
+      selectedFiles = [{ path: 'C:\\\\manual\\\\unplanned.mkv', name: 'unplanned.mkv', size: 1 }];
+      queueJobs = Array.from({ length: currentCount }, (_, index) => ({
+        id: 'capacity-' + index,
+        file: 'C:\\\\capacity\\\\existing-' + index + '.mkv',
+        fileName: 'existing-' + index + '.mkv',
+        hoster: hosters[index % hosters.length],
+        status: 'queued',
+        bytesTotal: 1
+      }));
+      _pendingFiles = [];
+      _pendingImportInspection = null;
+      _pendingImportInspections = 0;
+      _pendingFolderMonitorAutoStart.clear();
+      uploading = false;
+      rebuildJobIndex();
+      window.api.configureAutomationProbe({ paused: false });
+    };
+    const atomicCandidates = [
+      { path: 'C:\\\\watch\\\\a.mkv', name: 'a.mkv', size: 1024 * 1024, mtimeMs: 1, filterMatched: true },
+      { path: 'C:\\\\watch\\\\b.mkv', name: 'b.mkv', size: 3 * 1024 * 1024, mtimeMs: 2, filterMatched: true }
+    ];
+    configureAtomicState(14998);
+    const atomicEvaluation = await evaluateAutomationCandidates(atomicCandidates, { dryRun: false, trigger: 'watcher' });
+    const atomicResult = await applyAutomationEvaluation(atomicEvaluation);
+    const atomic = {
+      newQueueFiles: [...new Set(queueJobs.filter(job => job.file === atomicCandidates[0].path || job.file === atomicCandidates[1].path).map(job => job.fileName))],
+      admittedFiles: atomicResult.admittedFiles.map(file => file.name),
+      deferred: config.globalSettings.folderMonitor.telemetry.deferred,
+      queued: config.globalSettings.folderMonitor.telemetry.queued,
+      currentJobCount: window.AutomationControl.countAutomaticQueueJobs(queueJobs),
+      unplannedJobs: queueJobs.filter(job => job.fileName === 'unplanned.mkv').length
+    };
+    const statusSnapshot = createAutomationStatusSnapshot();
+    const status = {
+      state: statusSnapshot.state,
+      currentJobCount: statusSnapshot.currentJobCount,
+      availableSlots: statusSnapshot.availableSlots,
+      queueLimited: statusSnapshot.queueLimited,
+      frozen: Object.isFrozen(statusSnapshot) && Object.isFrozen(statusSnapshot.telemetry)
+    };
+
+    configureAtomicState(14994);
+    const staleEvaluation = await evaluateAutomationCandidates(atomicCandidates, { dryRun: false, trigger: 'watcher' });
+    queueJobs.push(...Array.from({ length: 4 }, (_, index) => ({
+      id: 'stale-' + index,
+      file: 'C:\\\\capacity\\\\stale-' + index + '.mkv',
+      fileName: 'stale-' + index + '.mkv',
+      hoster: hosters[index],
+      status: 'queued',
+      bytesTotal: 1
+    })));
+    rebuildJobIndex();
+    const staleResult = await applyAutomationEvaluation(staleEvaluation);
+    const stale = {
+      plannedBeforeApply: staleEvaluation.admittedFiles.map(file => file.name),
+      admittedAfterApply: staleResult.admittedFiles.map(file => file.name),
+      newQueueFiles: [...new Set(queueJobs.filter(job => job.file === atomicCandidates[0].path || job.file === atomicCandidates[1].path).map(job => job.fileName))]
+    };
+
+    configureAtomicState(0);
+    config.globalSettings.folderMonitor.paused = true;
+    window.api.configureAutomationProbe({ paused: true });
+    const pausedJob = {
+      id: 'paused-preview',
+      file: 'C:\\\\manual\\\\paused-preview.mkv',
+      fileName: 'paused-preview.mkv',
+      hoster: hosters[0],
+      status: 'preview',
+      bytesTotal: 1
+    };
+    queueJobs = [pausedJob];
+    selectedFiles = [{ path: pausedJob.file, name: pausedJob.fileName, size: 1 }];
+    selectedUploadHosters = [hosters[0]];
+    rebuildJobIndex();
+    await startUpload();
+    uploading = true;
+    await startSelectedUpload([pausedJob]);
+    uploading = false;
+    const pausedAutomaticEvaluation = await evaluateAutomationCandidates([
+      { path: 'C:\\\\watch\\\\paused-auto.mkv', name: 'paused-auto.mkv', size: 1, mtimeMs: 1, filterMatched: true }
+    ], { dryRun: false, trigger: 'watcher' });
+    const pausedAutomaticResult = await applyAutomationEvaluation(pausedAutomaticEvaluation);
+    await coordinateImportEntries([
+      { path: 'C:\\\\manual\\\\allowed-preview.mkv', name: 'allowed-preview.mkv', size: 1 }
+    ]);
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.dataset.hosterModal = hosters[0];
+    input.checked = true;
+    document.getElementById('hosterModalList').replaceChildren(input);
+    await applyHosterSelection();
+    const pausedProbe = await window.api.getAutomationProbeState();
+    const paused = {
+      uploading,
+      statuses: Object.fromEntries(queueJobs.map(job => [job.fileName, job.status])),
+      automaticApplied: pausedAutomaticResult.admittedFiles.length,
+      startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
+      injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
+    };
+    return { dry, manualTest, atomic, status, stale, paused };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -577,6 +859,7 @@ app.whenReady().then(async () => {
   const onlineBackupBehavior = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupBehaviorScript)});
   const settingsSearchBehavior = await window.webContents.executeJavaScript(${JSON.stringify(settingsSearchBehaviorScript)});
   const folderMonitorBehavior = await window.webContents.executeJavaScript(${JSON.stringify(folderMonitorBehaviorScript)});
+  const automationPipeline = await window.webContents.executeJavaScript(${JSON.stringify(automationPipelineScript)});
   const onlineBackupLayout = await window.webContents.executeJavaScript(${JSON.stringify(onlineBackupLayoutScript)});
   window.setContentSize(760, Math.min(900, display.workAreaSize.height));
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -595,6 +878,7 @@ app.whenReady().then(async () => {
     appDialogBehavior,
     settingsSearchBehavior,
     folderMonitorBehavior,
+    automationPipeline,
     onlineBackupBehavior,
     onlineBackupLayout,
     onlineBackupNarrowLayout
@@ -733,6 +1017,69 @@ app.whenReady().then(async () => {
         'active-same-name': { status: 'done', code: 'active-code' },
         'waiting-same-name': { status: 'preview', code: null }
       }
+    });
+    assert.deepEqual(result.automationPipeline.dry, {
+      fingerprintEqual: true,
+      summary: {
+        found: 500,
+        filterMatched: 430,
+        alreadyProcessed: 50,
+        unavailable: 5,
+        sizeLimitedJobs: 20,
+        acceptedFiles: 375,
+        selectedTargets: 4,
+        resultingJobs: 1480,
+        availableSlots: 1200,
+        deferredFiles: 70
+      },
+      frozen: true,
+      reads: { history: 1, uploadLog: 1, inspect: 1, status: 0, testScan: 0, reconcile: 0 }
+    });
+    assert.deepEqual(result.automationPipeline.manualTest, {
+      fingerprintEqual: true,
+      summary: {
+        found: 1,
+        filterMatched: 1,
+        alreadyProcessed: 0,
+        unavailable: 0,
+        sizeLimitedJobs: 1,
+        acceptedFiles: 1,
+        selectedTargets: 4,
+        resultingJobs: 3,
+        availableSlots: 1200,
+        deferredFiles: 0
+      },
+      reads: { history: 1, uploadLog: 1, inspect: 1, status: 0, testScan: 1, reconcile: 0 }
+    });
+    assert.deepEqual(result.automationPipeline.atomic, {
+      newQueueFiles: ['b.mkv'],
+      admittedFiles: ['b.mkv'],
+      deferred: 1,
+      queued: 1,
+      currentJobCount: 15000,
+      unplannedJobs: 0
+    });
+    assert.deepEqual(result.automationPipeline.status, {
+      state: 'queue-limited',
+      currentJobCount: 15000,
+      availableSlots: 0,
+      queueLimited: true,
+      frozen: true
+    });
+    assert.deepEqual(result.automationPipeline.stale, {
+      plannedBeforeApply: ['a.mkv', 'b.mkv'],
+      admittedAfterApply: ['b.mkv'],
+      newQueueFiles: ['b.mkv']
+    });
+    assert.deepEqual(result.automationPipeline.paused, {
+      uploading: false,
+      statuses: {
+        'paused-preview.mkv': 'preview',
+        'allowed-preview.mkv': 'preview'
+      },
+      automaticApplied: 0,
+      startCalls: 0,
+      injectCalls: 0
     });
     assert.deepEqual(result.onlineBackupBehavior.initialKeys, ['MHU2-ZYXW…9876', 'MHU2-ABCD…1234']);
     assert.deepEqual(result.onlineBackupBehavior.initialWarning, {
