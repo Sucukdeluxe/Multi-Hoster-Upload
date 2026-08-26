@@ -55,6 +55,7 @@ test('internal rotation writer retries inside userData and reports the file that
   const rotationTargets = [];
   const testFs = {
     mkdirSync: fs.mkdirSync,
+    appendFileSync: fs.appendFileSync,
     promises: {
       appendFile: async (targetPath, ...args) => {
         appendTargets.push(targetPath);
@@ -80,6 +81,55 @@ test('internal rotation writer retries inside userData and reports the file that
   assert.deepEqual(rotationTargets, [primaryPath, fallbackPath]);
   assert.equal(writer.getActivePath(), fallbackPath);
   assert.equal(fs.readFileSync(fallbackPath, 'utf8'), '[rotation]\n');
+});
+
+test('synchronous rotation flush falls back completely and retains buffered lines when every target fails', (t) => {
+  const directory = createTempDirectory(t, 'mhu-internal-log-sync-writer-');
+  const userDataPath = path.join(directory, 'user-data');
+  const primaryPath = path.join(userDataPath, 'logs', 'account-rotation.log');
+  const fallbackPath = path.join(userDataPath, 'internal-logs', 'account-rotation.log');
+  fs.mkdirSync(primaryPath, { recursive: true });
+  const resolveInternalLogPath = createInternalLogPathResolver({ fs, path, userDataPath });
+  const writer = createInternalLogWriter({
+    fs,
+    path,
+    fileName: 'account-rotation.log',
+    resolveInternalLogPath,
+    rotateLogFile: () => {},
+    reportError: () => {}
+  });
+  const buffer = ['[rotation 1]\n', '[rotation 2]\n'];
+
+  assert.equal(writer.flushSync(buffer, 'rot-log'), true);
+  assert.deepEqual(buffer, []);
+  assert.equal(writer.getActivePath(), fallbackPath);
+  assert.equal(fs.readFileSync(fallbackPath, 'utf8'), '[rotation 1]\n[rotation 2]\n');
+
+  const failedUserDataPath = path.join(directory, 'failed-user-data');
+  const failedPrimaryPath = path.join(failedUserDataPath, 'logs', 'account-rotation.log');
+  const failedFallbackPath = path.join(failedUserDataPath, 'internal-logs', 'account-rotation.log');
+  fs.mkdirSync(failedPrimaryPath, { recursive: true });
+  fs.mkdirSync(failedFallbackPath, { recursive: true });
+  const failedWriter = createInternalLogWriter({
+    fs,
+    path,
+    fileName: 'account-rotation.log',
+    resolveInternalLogPath: createInternalLogPathResolver({ fs, path, userDataPath: failedUserDataPath }),
+    rotateLogFile: () => {},
+    reportError: () => {}
+  });
+  const retainedBuffer = ['[retained 1]\n', '[retained 2]\n'];
+
+  assert.equal(failedWriter.flushSync(retainedBuffer, 'rot-log'), false);
+  assert.deepEqual(retainedBuffer, ['[retained 1]\n', '[retained 2]\n']);
+  assert.equal(failedWriter.getActivePath(), null);
+});
+
+test('quit flush delegates the rotation buffer to the synchronous internal writer', () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+
+  assert.match(mainSource, /_rotLogWriter\.flushSync\(_rotLogBuffer, 'rot-log'\);/);
+  assert.doesNotMatch(mainSource, /appendFileSync\(getRotLogPath\(\), _rotLogBuffer\.join\(''\)/);
 });
 
 test('upload audit writer leaves the configured fileuploader log contract unchanged', async (t) => {

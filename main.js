@@ -1785,8 +1785,7 @@ app.on('will-quit', () => {
   } catch {}
   try {
     if (_rotLogBuffer.length) {
-      fs.appendFileSync(getRotLogPath(), _rotLogBuffer.join(''), 'utf-8');
-      _rotLogBuffer.length = 0;
+      _rotLogWriter.flushSync(_rotLogBuffer, 'rot-log');
     }
   } catch {}
 });
