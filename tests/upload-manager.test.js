@@ -603,6 +603,41 @@ describe('UploadManager', () => {
     assert.ok(statuses.some((entry) => entry.jobId === 'job-third' && entry.status === 'done'));
   });
 
+  it('finishAfterActive completes active work without starting queued work', async () => {
+    let releaseActive;
+    const started = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const settled = new Map();
+    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'queued', file: '/test/queued.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+
+    mgr.finishAfterActive();
+    releaseActive();
+    await batch;
+
+    assert.deepEqual(started, ['/test/active.mp4']);
+    assert.equal(settled.get('active'), 'done');
+    assert.equal(settled.get('queued'), 'aborted');
+  });
+
   it('_combineSignals propagates abort from either source', () => {
     const mgr = new UploadManager({});
     const ac1 = new AbortController();

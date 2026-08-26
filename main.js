@@ -473,10 +473,6 @@ function logInfo(a, b) {
   const s = _split(a, b);
   debugLog(`[INFO ] ${_ctxTag(s.ctx)}${s.msg}`);
 }
-function logWarn(a, b) {
-  const s = _split(a, b);
-  debugLog(`[WARN ] ${_ctxTag(s.ctx)}${s.msg}`);
-}
 function logError(a, b, c) {
   let ctx, msg, err;
   if (typeof a === 'string') { ctx = null; msg = a; err = b; }
@@ -1690,18 +1686,15 @@ app.whenReady().then(async () => {
     mainWindow.hide();
   });
 
-  // Auto-start folder monitor if enabled
   try {
     const launchConfig = configStore.load();
     const fm = launchConfig.globalSettings && launchConfig.globalSettings.folderMonitor;
-    if (fm && fm.enabled && fm.folderPath) {
-      if (fs.existsSync(fm.folderPath)) {
-        startFolderMonitor(fm);
-      } else {
-        logWarn(`folder-monitor auto-start skipped: path not found (${fm.folderPath})`);
-        // Persist the disable so the user gets a clean state on next launch
-        const gs = { ...launchConfig.globalSettings, folderMonitor: { ...fm, enabled: false } };
-        configStore.save({ globalSettings: gs }).catch(() => {});
+    if (fm && fm.enabled && fm.folderPath && fm.paused !== true) {
+      startFolderMonitor(fm);
+      if (!fs.existsSync(fm.folderPath)) {
+        void folderMonitor.scan({ emitFiles: true, trigger: 'startup' }).catch(error => {
+          debugLog(`folder-monitor startup scan failed: ${error.message}`);
+        });
       }
     }
   } catch (err) {
@@ -2026,6 +2019,9 @@ ipcMain.handle('select-files', async () => {
 
 // Debug self-test: runs a minimal upload in the main process to verify events work
 ipcMain.handle('debug-test-upload', async () => {
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   const testFile = path.join(__dirname, 'test-self-check.txt');
   try {
     fs.writeFileSync(testFile, 'selftest ' + Date.now(), 'utf-8');
@@ -2118,6 +2114,9 @@ ipcMain.handle('inspect-import-files', async (_event, payload) => {
 });
 
 ipcMain.handle('start-upload', async (_event, payload) => {
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
   if (uploadManager) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
@@ -2158,6 +2157,9 @@ ipcMain.handle('start-upload', async (_event, payload) => {
 
   if (tasks.length === 0) {
     await appendUploadPlanAudit(batchPlan, 'start');
+    if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+      return { error: 'Automatik ist pausiert' };
+    }
     const skippedSummary = stats.mergeSkippedIntoSummary({
       id: `skipped-${Date.now()}`,
       timestamp: new Date().toISOString(),
@@ -2179,6 +2181,10 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   const _thisManager = uploadManager;
 
   await appendUploadPlanAudit(batchPlan, 'start');
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+    return { error: 'Automatik ist pausiert' };
+  }
 
   const recovery = {
     id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -2186,6 +2192,11 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
   try { await configStore.saveUploadRecovery(recovery); } catch (error) { debugLog(`upload recovery state could not be saved: ${error.message}`); }
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared after automation pause: ${error.message}`); }
+    return { error: 'Automatik ist pausiert' };
+  }
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2229,6 +2240,11 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       globalThis._mhuUploadManagerRef = null;
     }
     return { error: `Quelldatei-Schutz konnte nicht vorbereitet werden: ${error.message}` };
+  }
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared after automation pause: ${error.message}`); }
+    return { error: 'Automatik ist pausiert' };
   }
   for (const skipped of skippedJobs) sourceCleanup.markSkipped(skipped.jobId);
   _thisManager.sourceFileCleanup = sourceCleanup;
@@ -2424,6 +2440,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       _producerTracker.finish();
       return;
     }
+    if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+      try { _thisManager.cancel(); } catch {}
+      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+      _producerTracker.finish();
+      return;
+    }
     _accountCooldowns.releaseExpired();
     const pausedAccounts = _accountCooldowns.activeKeys();
     debugLog(`setImmediate: calling startBatch now (priming ${pausedAccounts.length} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
@@ -2480,6 +2502,9 @@ ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
 });
 
 ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!uploadManager || !uploadManager.running) {
     return { error: 'Kein Upload aktiv' };
@@ -2498,6 +2523,9 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   const sourceCleanupFingerprints = batchManager.sourceFileCleanup
     ? await batchManager.sourceFileCleanup.registerGroups(sourceCleanupGroups)
     : {};
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   if (uploadManager !== batchManager || !batchManager.running) {
     return { error: 'Kein Upload aktiv' };
   }
@@ -3162,33 +3190,58 @@ function _sweepOrphanConfigTmps() {
   } catch {}
 }
 
-// --- Folder Monitor ---
+let suppressAutomationStatusEvents = false;
+
+function automationStatusSnapshot() {
+  const settings = configStore.load().globalSettings?.folderMonitor || {};
+  return Object.freeze({
+    ...folderMonitor.status(),
+    enabled: settings.enabled === true,
+    configured: String(settings.folderPath || '').trim().length > 0,
+    paused: settings.paused === true,
+    pausedAt: settings.pausedAt ?? null,
+    queueLimitJobs: settings.queueLimitJobs,
+    reconcileIntervalMinutes: settings.reconcileIntervalMinutes
+  });
+}
+
+function publishAutomationStatus() {
+  const snapshot = automationStatusSnapshot();
+  if (!suppressAutomationStatusEvents) safeSend('automation:status', snapshot);
+  return snapshot;
+}
+
+function bindFolderMonitorEvents(settings) {
+  folderMonitor.removeAllListeners();
+  folderMonitor.on('new-files', (files) => {
+    debugLog(`folder-monitor: ${files.length} new file(s)`);
+    safeSend('folder-monitor:new-files', files);
+  });
+  folderMonitor.on('error', (err) => {
+    debugLog(`folder-monitor error: ${err.message}`);
+  });
+  folderMonitor.on('status', publishAutomationStatus);
+  folderMonitor.on('initial-scan-complete', async () => {
+    try {
+      const latest = configStore.load();
+      const current = latest.globalSettings?.folderMonitor;
+      if (!current?.includeExisting || path.resolve(current.folderPath || '') !== path.resolve(settings.folderPath || '')) return;
+      await configStore.save({
+        globalSettings: {
+          ...latest.globalSettings,
+          folderMonitor: { ...current, includeExisting: false }
+        }
+      });
+    } catch (error) {
+      debugLog(`folder-monitor initial scan state failed: ${error.message}`);
+    }
+  });
+}
+
 function startFolderMonitor(settings) {
   try {
     folderMonitor.stop();
-    folderMonitor.removeAllListeners();
-    folderMonitor.on('new-files', (files) => {
-      debugLog(`folder-monitor: ${files.length} new file(s)`);
-      safeSend('folder-monitor:new-files', files);
-    });
-    folderMonitor.on('error', (err) => {
-      debugLog(`folder-monitor error: ${err.message}`);
-    });
-    folderMonitor.on('initial-scan-complete', async () => {
-      try {
-        const latest = configStore.load();
-        const current = latest.globalSettings?.folderMonitor;
-        if (!current?.includeExisting || path.resolve(current.folderPath || '') !== path.resolve(settings.folderPath || '')) return;
-        await configStore.save({
-          globalSettings: {
-            ...latest.globalSettings,
-            folderMonitor: { ...current, includeExisting: false }
-          }
-        });
-      } catch (error) {
-        debugLog(`folder-monitor initial scan state failed: ${error.message}`);
-      }
-    });
+    bindFolderMonitorEvents(settings);
     const result = folderMonitor.start(settings);
     debugLog(`folder-monitor started: ${settings.folderPath}`);
     return result;
@@ -3198,7 +3251,17 @@ function startFolderMonitor(settings) {
   }
 }
 
+async function resumeFolderMonitor(settings) {
+  bindFolderMonitorEvents(settings);
+  const result = await folderMonitor.resume(settings);
+  debugLog(`folder-monitor resumed: ${settings.folderPath}`);
+  return result;
+}
+
 ipcMain.handle('folder-monitor:start', (_event, settings) => {
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   const result = startFolderMonitor(settings);
   return { ok: true, includesExisting: result?.includesExisting === true };
 });
@@ -3211,6 +3274,58 @@ ipcMain.handle('folder-monitor:stop', () => {
 
 ipcMain.handle('folder-monitor:status', () => {
   return folderMonitor.status();
+});
+
+ipcMain.handle('automation:get-status', () => {
+  return automationStatusSnapshot();
+});
+
+ipcMain.handle('automation:pause-after-active', async () => {
+  const latest = configStore.load();
+  const settings = latest.globalSettings?.folderMonitor || {};
+  await configStore.save({
+    globalSettings: {
+      ...latest.globalSettings,
+      folderMonitor: { ...settings, paused: true, pausedAt: Date.now() }
+    }
+  });
+  suppressAutomationStatusEvents = true;
+  try {
+    await folderMonitor.pause();
+  } finally {
+    suppressAutomationStatusEvents = false;
+  }
+  if (uploadManager) uploadManager.finishAfterActive();
+  return publishAutomationStatus();
+});
+
+ipcMain.handle('automation:resume', async () => {
+  const latest = configStore.load();
+  const settings = latest.globalSettings?.folderMonitor || {};
+  const resumedSettings = { ...settings, paused: false, pausedAt: null };
+  await configStore.save({
+    globalSettings: {
+      ...latest.globalSettings,
+      folderMonitor: resumedSettings
+    }
+  });
+  suppressAutomationStatusEvents = true;
+  try {
+    if (resumedSettings.enabled && resumedSettings.folderPath) {
+      await resumeFolderMonitor(resumedSettings);
+    }
+  } finally {
+    suppressAutomationStatusEvents = false;
+  }
+  return publishAutomationStatus();
+});
+
+ipcMain.handle('folder-monitor:test-scan', () => {
+  return folderMonitor.scan({ emitFiles: false, trigger: 'test' });
+});
+
+ipcMain.handle('folder-monitor:reconcile', () => {
+  return folderMonitor.scan({ emitFiles: true, trigger: 'manual' });
 });
 
 ipcMain.handle('folder-monitor:select-folder', async () => {

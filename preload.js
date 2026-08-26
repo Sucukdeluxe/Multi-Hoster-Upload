@@ -90,8 +90,16 @@ contextBridge.exposeInMainWorld('api', {
   folderMonitorStop: () => ipcRenderer.invoke('folder-monitor:stop'),
   folderMonitorStatus: () => ipcRenderer.invoke('folder-monitor:status'),
   folderMonitorSelectFolder: () => ipcRenderer.invoke('folder-monitor:select-folder'),
+  folderMonitorTestScan: () => ipcRenderer.invoke('folder-monitor:test-scan'),
+  folderMonitorReconcile: () => ipcRenderer.invoke('folder-monitor:reconcile'),
+  automationGetStatus: () => ipcRenderer.invoke('automation:get-status'),
+  automationPauseAfterActive: () => ipcRenderer.invoke('automation:pause-after-active'),
+  automationResume: () => ipcRenderer.invoke('automation:resume'),
   onFolderMonitorNewFiles: (callback) => {
     ipcRenderer.on('folder-monitor:new-files', (_event, data) => callback(data));
+  },
+  onAutomationStatus: (callback) => {
+    ipcRenderer.on('automation:status', (_event, data) => callback(data));
   },
 
   // Account switched event
@@ -176,6 +184,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('app:prepare-close');
     ipcRenderer.removeAllListeners('shutdown-countdown');
     ipcRenderer.removeAllListeners('folder-monitor:new-files');
+    ipcRenderer.removeAllListeners('automation:status');
     ipcRenderer.removeAllListeners('drop-target:files');
     ipcRenderer.removeAllListeners('account-switched');
     ipcRenderer.removeAllListeners('session-failed-accounts-changed');

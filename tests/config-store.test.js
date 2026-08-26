@@ -34,6 +34,16 @@ function createStore() {
   return store;
 }
 
+function createStoreAt(filePath) {
+  const configuredStore = new ConfigStore({
+    isPackaged: false,
+    getPath: () => path.dirname(filePath)
+  });
+  configuredStore.filePath = filePath;
+  configuredStore.historyPath = path.join(path.dirname(filePath), 'electron-history.json');
+  return configuredStore;
+}
+
 describe('ConfigStore', () => {
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-test-'));
@@ -95,6 +105,24 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.lastBrowseDirectory, '');
     assert.equal(config.globalSettings.pendingQueue, null);
     assert.deepEqual(config.history, []);
+  });
+
+  it('automation defaults persist a 15000 job limit and five minute interval', () => {
+    const settings = store.load().globalSettings.folderMonitor;
+
+    assert.equal(settings.queueLimitJobs, 15000);
+    assert.equal(settings.reconcileIntervalMinutes, 5);
+    assert.equal(settings.paused, false);
+    assert.equal(settings.pausedAt, null);
+  });
+
+  it('automation pause survives a save and reload', async () => {
+    await store.save({ globalSettings: { folderMonitor: { paused: true, pausedAt: 1787712000000 } } });
+
+    const reloaded = createStoreAt(store.filePath).load();
+
+    assert.equal(reloaded.globalSettings.folderMonitor.paused, true);
+    assert.equal(reloaded.globalSettings.folderMonitor.pausedAt, 1787712000000);
   });
 
   it('drops the retired plaintext credential setting from legacy configurations', () => {
@@ -499,6 +527,33 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.diagnostics.port, 7777);
     assert.equal(config.globalSettings.historyRetention, '7d');
     assert.deepEqual(config.globalSettings.remote, { enabled: true, port: 9200, token: 'main-token', allowInput: false });
+  });
+
+  it('renderer settings saves cannot clear the authoritative automation pause', async () => {
+    const current = store.load();
+    await store.save({
+      globalSettings: {
+        ...current.globalSettings,
+        folderMonitor: {
+          ...current.globalSettings.folderMonitor,
+          enabled: true,
+          folderPath: 'C:\\watch',
+          paused: true,
+          pausedAt: 1787712000000
+        }
+      }
+    });
+
+    await store.saveRendererGlobalSettings({
+      alwaysOnTop: true,
+      folderMonitor: { paused: false, pausedAt: null }
+    });
+
+    const saved = store.load().globalSettings.folderMonitor;
+    assert.equal(saved.paused, true);
+    assert.equal(saved.pausedAt, 1787712000000);
+    assert.equal(saved.enabled, true);
+    assert.equal(saved.folderPath, 'C:\\watch');
   });
 
   it('persists the last browse directory across stale renderer settings saves', async () => {

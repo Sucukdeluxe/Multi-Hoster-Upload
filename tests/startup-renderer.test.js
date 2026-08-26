@@ -1054,6 +1054,109 @@ app.whenReady().then(async () => {
   }
 });
 
+test('persisted automation pause rejects batch starts through hidden real IPC', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const startUploadStart = mainSource.indexOf("ipcMain.handle('start-upload'");
+  const startUploadEnd = mainSource.indexOf('\n// Logged at batch boundaries', startUploadStart);
+  const addJobsStart = mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'");
+  const addJobsEnd = mainSource.indexOf("\nipcMain.handle('finish-after-active'", addJobsStart);
+  assert.notEqual(startUploadStart, -1);
+  assert.notEqual(startUploadEnd, -1);
+  assert.notEqual(addJobsStart, -1);
+  assert.notEqual(addJobsEnd, -1);
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-pause-ipc-'));
+  const probePath = path.join(probeRoot, 'probe.cjs');
+  const preloadPath = path.join(probeRoot, 'preload.cjs');
+  const rendererPath = path.join(probeRoot, 'renderer.html');
+  const outputPath = path.join(probeRoot, 'result.json');
+  const userDataPath = path.join(probeRoot, 'user-data');
+  fs.writeFileSync(preloadPath, `
+const { contextBridge, ipcRenderer } = require('electron');
+contextBridge.exposeInMainWorld('automationProbe', {
+  start: () => ipcRenderer.invoke('start-upload', { files: [], hosters: [], jobs: [] }),
+  extend: () => ipcRenderer.invoke('add-jobs-to-batch', { jobs: [], sourceCleanupGroups: [] })
+});
+`, 'utf8');
+  fs.writeFileSync(rendererPath, `<!doctype html><html><body><script>
+(async () => {
+  const start = await window.automationProbe.start();
+  const extend = await window.automationProbe.extend();
+  window.__automationPauseResult = { start, extend };
+})().catch(error => { window.__automationPauseResult = { error: error.message || String(error) }; });
+</script></body></html>`, 'utf8');
+  const productionHandlers = `${mainSource.slice(startUploadStart, startUploadEnd)}\n${mainSource.slice(addJobsStart, addJobsEnd)}`;
+  const probeSource = `
+const { app, BrowserWindow, ipcMain } = require('electron');
+const fs = require('node:fs');
+const ConfigStore = require(${JSON.stringify(path.join(projectRoot, 'lib', 'config-store.js'))});
+const outputPath = process.env.MHU_AUTOMATION_OUTPUT;
+const rendererPath = process.env.MHU_AUTOMATION_RENDERER;
+const preloadPath = process.env.MHU_AUTOMATION_PRELOAD;
+app.setPath('userData', process.env.MHU_AUTOMATION_USER_DATA);
+const configStore = new ConfigStore(app);
+let closeFlushRequested = false;
+const settingsImportGate = { canStartUpload: () => true };
+let uploadManager = { running: false };
+${productionHandlers}
+app.whenReady().then(async () => {
+  const current = configStore.load();
+  await configStore.save({
+    globalSettings: {
+      ...current.globalSettings,
+      folderMonitor: { ...current.globalSettings.folderMonitor, paused: true, pausedAt: Date.now() }
+    }
+  });
+  const window = new BrowserWindow({
+    show: false,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, preload: preloadPath }
+  });
+  await window.loadFile(rendererPath);
+  let result = null;
+  for (let attempt = 0; attempt < 200; attempt++) {
+    result = await window.webContents.executeJavaScript('window.__automationPauseResult || null');
+    if (result) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  fs.writeFileSync(outputPath, JSON.stringify({ hidden: window.isVisible() === false, result }), 'utf8');
+  window.destroy();
+  app.exit(0);
+}).catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
+  app.exit(1);
+});
+`;
+  fs.writeFileSync(probePath, probeSource, 'utf8');
+  try {
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        MHU_AUTOMATION_OUTPUT: outputPath,
+        MHU_AUTOMATION_RENDERER: rendererPath,
+        MHU_AUTOMATION_PRELOAD: preloadPath,
+        MHU_AUTOMATION_USER_DATA: userDataPath
+      },
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000
+    });
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
+    const outcome = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
+    assert.equal(outcome.error, undefined);
+    assert.deepEqual(outcome, {
+      hidden: true,
+      result: {
+        start: { error: 'Automatik ist pausiert' },
+        extend: { error: 'Automatik ist pausiert' }
+      }
+    });
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
+  }
+});
+
 test('resolveStartupLanguage accepts only the supported persisted language', () => {
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'de' } }), 'de');
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'en' } }), 'en');

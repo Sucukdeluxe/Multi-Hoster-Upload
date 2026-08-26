@@ -253,3 +253,142 @@ test('preload exposes account cooldown snapshots and removes their listener duri
   assert.deepEqual(pushed, { version: 2, accounts: [{ accountId: 'a1' }] });
   assert.equal(removed.includes('session-failed-accounts-changed'), true);
 });
+
+test('exposes persistent automation controls and status through narrow IPC boundaries', () => {
+  const preloadSource = fs.readFileSync(path.join(projectRoot, 'preload.js'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+
+  assert.match(mainSource, /ipcMain\.handle\('automation:get-status'/u);
+  assert.match(mainSource, /ipcMain\.handle\('automation:pause-after-active'/u);
+  assert.match(mainSource, /ipcMain\.handle\('automation:resume'/u);
+  assert.match(mainSource, /ipcMain\.handle\('folder-monitor:test-scan'/u);
+  assert.match(mainSource, /ipcMain\.handle\('folder-monitor:reconcile'/u);
+  assert.match(mainSource, /safeSend\('automation:status'/u);
+  assert.match(preloadSource, /automationGetStatus:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:get-status'\)/u);
+  assert.match(preloadSource, /automationPauseAfterActive:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:pause-after-active'\)/u);
+  assert.match(preloadSource, /automationResume:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:resume'\)/u);
+  assert.match(preloadSource, /folderMonitorTestScan:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('folder-monitor:test-scan'\)/u);
+  assert.match(preloadSource, /folderMonitorReconcile:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('folder-monitor:reconcile'\)/u);
+  assert.match(preloadSource, /onAutomationStatus:\s*\(callback\)\s*=>\s*\{[\s\S]*?ipcRenderer\.on\('automation:status'/u);
+  assert.match(preloadSource, /ipcRenderer\.removeAllListeners\('automation:status'\)/u);
+});
+
+test('every batch start and extension IPC fails closed before account and cleanup side effects', () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const gate = /configStore\.load\(\)\.globalSettings\?\.folderMonitor\?\.paused\s*===\s*true/u;
+  const cases = [
+    ['debug-test-upload', "ipcMain.handle('debug-test-upload'", "ipcMain.handle('select-folder'", 'fs.writeFileSync', 1],
+    ['start-upload', "ipcMain.handle('start-upload'", '\n// Logged at batch boundaries', 'makeAccountPicker', 6],
+    ['add-jobs-to-batch', "ipcMain.handle('add-jobs-to-batch'", "ipcMain.handle('finish-after-active'", 'makeAccountPicker', 2]
+  ];
+
+  for (const [channel, startMarker, endMarker, sideEffectMarker, expectedGateCount] of cases) {
+    const start = mainSource.indexOf(startMarker);
+    const end = mainSource.indexOf(endMarker, start);
+    assert.notEqual(start, -1, `${channel} handler missing`);
+    assert.notEqual(end, -1, `${channel} handler boundary missing`);
+    const handler = mainSource.slice(start, end);
+    const gateIndex = handler.search(gate);
+    const sideEffectIndex = handler.indexOf(sideEffectMarker);
+    assert.notEqual(gateIndex, -1, `${channel} pause gate missing`);
+    assert.notEqual(sideEffectIndex, -1, `${channel} side-effect marker missing`);
+    assert.ok(gateIndex < sideEffectIndex, `${channel} pause gate runs after side effects`);
+    assert.equal([...handler.matchAll(new RegExp(gate.source, 'gu'))].length, expectedGateCount, `${channel} does not recheck every asynchronous race boundary`);
+  }
+});
+
+test('automation pause and resume commit state before lifecycle effects', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const blockStart = mainSource.indexOf('let suppressAutomationStatusEvents = false;');
+  const blockEnd = mainSource.indexOf('\n// --- Remote Control ---', blockStart);
+  assert.notEqual(blockStart, -1, 'automation lifecycle block missing');
+  assert.notEqual(blockEnd, -1, 'automation lifecycle block boundary missing');
+  const handlers = new Map();
+  const order = [];
+  const sent = [];
+  const folderMonitor = new (require('node:events').EventEmitter)();
+  folderMonitor.running = true;
+  folderMonitor.status = () => ({ running: folderMonitor.running, paused: !folderMonitor.running, reachable: true });
+  folderMonitor.stop = () => { folderMonitor.running = false; order.push('stop'); };
+  folderMonitor.start = () => { folderMonitor.running = true; order.push('start'); folderMonitor.emit('status'); return {}; };
+  folderMonitor.pause = async () => { folderMonitor.running = false; order.push('pause'); folderMonitor.emit('status'); };
+  folderMonitor.resume = async () => { folderMonitor.running = true; order.push('resume'); folderMonitor.emit('status'); return { reachable: true }; };
+  folderMonitor.scan = async options => { order.push(`scan:${options.trigger}:${options.emitFiles}`); return { reachable: true }; };
+  let state = {
+    globalSettings: {
+      folderMonitor: {
+        enabled: true,
+        folderPath: 'C:\\watch',
+        paused: false,
+        pausedAt: null,
+        queueLimitJobs: 15000,
+        reconcileIntervalMinutes: 5
+      }
+    }
+  };
+  let rejectSave = false;
+  const configStore = {
+    load: () => structuredClone(state),
+    save: async config => {
+      const paused = config.globalSettings.folderMonitor.paused;
+      order.push(`save:${paused}`);
+      if (rejectSave) throw new Error('save failed');
+      state = structuredClone(config);
+    }
+  };
+  const uploadManager = {
+    finishAfterActive: () => order.push('finish'),
+    startBatch: () => order.push('startBatch')
+  };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), {
+    configStore,
+    debugLog: () => {},
+    dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+    folderMonitor,
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    path,
+    safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
+    uploadManager
+  });
+
+  await handlers.get('automation:pause-after-active')();
+  assert.deepEqual(order, ['save:true', 'pause', 'finish']);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][0], 'automation:status');
+  assert.equal(sent[0][1].paused, true);
+
+  order.length = 0;
+  sent.length = 0;
+  state.globalSettings.folderMonitor.paused = false;
+  state.globalSettings.folderMonitor.pausedAt = null;
+  folderMonitor.running = true;
+  rejectSave = true;
+  await assert.rejects(handlers.get('automation:pause-after-active')(), /save failed/u);
+  assert.deepEqual(order, ['save:true']);
+  assert.equal(folderMonitor.running, true);
+  assert.equal(sent.length, 0);
+
+  order.length = 0;
+  rejectSave = false;
+  state.globalSettings.folderMonitor.paused = true;
+  state.globalSettings.folderMonitor.pausedAt = 1;
+  folderMonitor.running = false;
+  await handlers.get('automation:resume')();
+  assert.deepEqual(order, ['save:false', 'resume']);
+  assert.equal(order.includes('startBatch'), false);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1].paused, false);
+});
+
+test('startup keeps a missing configured folder disconnected without disabling automation', () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const startupStart = mainSource.indexOf('app.whenReady().then(async () => {');
+  const startupEnd = mainSource.indexOf("\napp.on('window-all-closed'", startupStart);
+  assert.notEqual(startupStart, -1);
+  assert.notEqual(startupEnd, -1);
+  const startup = mainSource.slice(startupStart, startupEnd);
+
+  assert.match(startup, /fm\s*&&\s*fm\.enabled\s*&&\s*fm\.folderPath\s*&&\s*fm\.paused\s*!==\s*true[\s\S]*?startFolderMonitor\(fm\)/u);
+  assert.match(startup, /startFolderMonitor\(fm\);[\s\S]*?!fs\.existsSync\(fm\.folderPath\)[\s\S]*?folderMonitor\.scan\(\{\s*emitFiles:\s*true,\s*trigger:\s*'startup'\s*\}\)/u);
+  assert.doesNotMatch(startup, /folderMonitor:\s*\{\s*\.\.\.fm,\s*enabled:\s*false\s*\}/u);
+});
