@@ -442,14 +442,26 @@ function flattenAutomationHistoryRows(history) {
   const rows = [];
   for (const entry of Array.isArray(history) ? history : []) {
     if (!Array.isArray(entry?.files)) {
-      rows.push(entry);
+      const status = String(entry?.status || '').toLowerCase();
+      const link = entry?.download_url || entry?.embed_url || entry?.link || entry?.file_code || '';
+      if (['done', 'success', 'completed'].includes(status) || link) rows.push({ ...entry, link });
       continue;
     }
     for (const file of entry.files) {
-      rows.push({
-        path: file?.path || file?.file || '',
-        fileName: file?.fileName || file?.filename || file?.name || ''
-      });
+      const results = Array.isArray(file?.results) ? file.results : [];
+      for (const result of results) {
+        const status = String(result?.status || '').toLowerCase();
+        const link = result?.download_url || result?.embed_url || result?.link || result?.file_code || '';
+        if (!['done', 'success', 'completed'].includes(status) && !link) continue;
+        rows.push({
+          ...result,
+          path: file?.path || file?.file || '',
+          fileName: file?.fileName || file?.filename || file?.name || '',
+          status,
+          hoster: result?.hoster || '',
+          link
+        });
+      }
     }
   }
   return rows;
@@ -502,9 +514,16 @@ function createAutomationStatusSnapshot() {
 
 async function evaluateAutomationCandidates(files, options = {}) {
   const source = Array.isArray(files) ? files : [];
-  const candidates = source.map(normalizeAutomationCandidate);
+  const normalizedCandidates = source.map(normalizeAutomationCandidate);
+  const candidateMap = new Map();
+  for (const candidate of normalizedCandidates) {
+    const key = normalizeAutomationPath(candidate.path);
+    if (key && !candidateMap.has(key)) candidateMap.set(key, candidate);
+  }
+  const candidates = [...candidateMap.values()];
   const matched = candidates.filter(candidate => candidate.path && candidate.filterMatched);
   const folderSettings = config.globalSettings?.folderMonitor || {};
+  const ownedPendingPaths = new Set((Array.isArray(options.ownedPendingPaths) ? options.ownedPendingPaths : []).map(normalizeAutomationPath));
   const selectedHosters = Array.from(new Set((Array.isArray(options.selectedHosters) ? options.selectedHosters : folderSettings.hosters || [])
     .map(value => String(value || '').trim())
     .filter(Boolean)));
@@ -520,7 +539,10 @@ async function evaluateAutomationCandidates(files, options = {}) {
   });
   const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
   const unprocessed = matched.filter(candidate => !processedPaths.has(normalizeAutomationPath(candidate.path)));
-  const inspection = await window.api.inspectImportFiles(unprocessed, []);
+  const inspection = await window.api.inspectImportFiles(
+    unprocessed,
+    _pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
+  );
   const metadata = new Map(unprocessed.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
   const accepted = (Array.isArray(inspection?.accepted) ? inspection.accepted : []).map(file => ({
     ...(metadata.get(normalizeAutomationPath(file?.path)) || {}),
@@ -568,6 +590,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     queueJobCount: currentJobCount,
     queueLimitJobs: normalizedSettings.queueLimitJobs,
     selectedHosters,
+    ownedPendingPaths: [...ownedPendingPaths],
     candidates: plannedCandidates,
     admittedFiles,
     deferredFiles,
@@ -598,7 +621,8 @@ function createAutomationPreviewJob(file, hoster) {
     result: null,
     attempt: 0,
     maxAttempts: 0,
-    link: ''
+    link: '',
+    automationAdmission: true
   };
 }
 
@@ -613,8 +637,10 @@ async function persistAutomationTelemetry(delta) {
   config.globalSettings = nextSettings;
   try {
     await saveGlobalSettingsTracked(nextSettings);
-  } catch {}
-  return telemetry;
+    return { telemetry, warning: '' };
+  } catch {
+    return { telemetry, warning: 'Telemetrie konnte nicht gespeichert werden.' };
+  }
 }
 
 async function applyAutomationEvaluation(evaluation) {
@@ -626,9 +652,30 @@ async function applyAutomationEvaluation(evaluation) {
   if (paused && !manualPreview) {
     return freezeAutomationValue({ admittedFiles: [], deferredFiles: evaluation.candidates || [], paused: true, dryRun: false });
   }
-  const currentPaths = new Set([...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)].map(normalizeAutomationPath));
-  const candidates = evaluation.candidates.filter(candidate => !currentPaths.has(normalizeAutomationPath(candidate.path)));
-  if (evaluation.selectedHosters.length === 0) {
+  const selectedHosters = Array.from(new Set((manualPreview
+    ? evaluation.selectedHosters
+    : config.globalSettings?.folderMonitor?.hosters || [])
+    .map(value => String(value || '').trim())
+    .filter(Boolean)));
+  const replannedCandidates = evaluation.candidates.map(file => {
+    const eligibleHosters = window.ImportPreflight.getEligibleImportHosters(file, selectedHosters, hosterSettings);
+    return {
+      path: file.path,
+      name: file.name,
+      size: file.size,
+      mtimeMs: file.mtimeMs,
+      eligibleHosters,
+      eligibleJobCount: eligibleHosters.length
+    };
+  });
+  const ownedPendingPaths = new Set(Array.isArray(evaluation.ownedPendingPaths) ? evaluation.ownedPendingPaths : []);
+  const currentPaths = new Set([
+    ...queueJobs.map(job => job.file),
+    ...selectedFiles.map(file => file.path),
+    ..._pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
+  ].map(normalizeAutomationPath));
+  const candidates = replannedCandidates.filter(candidate => !currentPaths.has(normalizeAutomationPath(candidate.path)));
+  if (selectedHosters.length === 0) {
     if (candidates.length > 0) {
       _pendingFiles.push(...candidates.map(file => ({ path: file.path, name: file.name, size: file.size, mtimeMs: file.mtimeMs })));
       mergePendingImportInspection({
@@ -657,11 +704,7 @@ async function applyAutomationEvaluation(evaluation) {
   if (admittedFiles.length === 0) {
     return freezeAutomationValue({ admittedFiles: [], deferredFiles, paused, dryRun: false });
   }
-  const filePaths = new Set(admittedFiles.map(file => file.path));
   const newJobs = admittedFiles.flatMap(file => file.eligibleHosters.map(hoster => createAutomationPreviewJob(file, hoster)));
-  selectedUploadHosters = evaluation.selectedHosters.slice();
-  clearDedupKeysForPaths(filePaths);
-  selectedFiles.push(...admittedFiles.map(file => ({ path: file.path, name: file.name, size: file.size })));
   queueJobs.push(...newJobs);
   rebuildJobIndex();
   _queueStatsCache = null;
@@ -671,35 +714,59 @@ async function applyAutomationEvaluation(evaluation) {
   updateStatusBar();
   updateStatsPanel();
   persistQueueStateSoon(true);
-  await persistAutomationTelemetry({
-    detected: evaluation.summary.found,
-    queued: admittedFiles.length,
-    skipped: evaluation.summary.alreadyProcessed + evaluation.summary.unavailable,
-    deferred: deferredFiles.length,
-    lastDetectedName: admittedFiles.at(-1)?.name || ''
-  });
   const action = paused && manualPreview ? 'queue' : resolveFolderMonitorQueueAction({
     autoStart: config.globalSettings?.folderMonitor?.autoStart === true,
     uploading,
     healthCheckRunning
   });
-  if (action === 'inject' && !(await isAutomationPaused())) {
+  if (action === 'inject') {
+    if (await isAutomationPaused()) {
+      return freezeAutomationValue({ ok: false, error: 'Automatik ist pausiert', warning: null, admittedFiles: [], deferredFiles, paused: true, dryRun: false });
+    }
     const cleanupPreparation = prepareSourceCleanup(newJobs);
     try {
       const result = await window.api.addJobsToBatch({
         jobs: newJobs.map(serializeUploadJob),
         sourceCleanupGroups: cleanupPreparation.groups
       });
-      if (!result?.error) newJobs.forEach(job => { job.status = 'queued'; });
+      if (result?.error) {
+        const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
+        return freezeAutomationValue({ ok: false, error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(error), dryRun: false });
+      }
+      if ((Number(result?.added) || 0) !== newJobs.length) {
+        return freezeAutomationValue({ ok: false, error: 'Jobs wurden nicht vollständig hinzugefügt.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
+      }
+      newJobs.forEach(job => { job.status = 'queued'; });
       _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-    } catch {}
+    } catch {
+      return freezeAutomationValue({ ok: false, error: 'Jobs konnten nicht hinzugefügt werden.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
+    }
     renderQueueTable();
     persistQueueStateSoon(true);
   } else if (action === 'start') {
-    await startUpload();
+    const result = await startUpload();
+    if (result?.ok === false) {
+      return freezeAutomationValue({ ok: false, error: result.error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(result.error), dryRun: false });
+    }
   }
-  return freezeAutomationValue({ admittedFiles, deferredFiles, paused, dryRun: false, plannedJobs: admission.plannedJobs });
+  const telemetryResult = await persistAutomationTelemetry({
+    detected: evaluation.summary.found,
+    queued: admittedFiles.length,
+    skipped: evaluation.summary.alreadyProcessed + evaluation.summary.unavailable,
+    deferred: deferredFiles.length,
+    lastDetectedName: admittedFiles.at(-1)?.name || ''
+  });
+  return freezeAutomationValue({
+    ok: telemetryResult.warning === '',
+    error: null,
+    warning: telemetryResult.warning || null,
+    admittedFiles,
+    deferredFiles,
+    paused,
+    dryRun: false,
+    plannedJobs: admission.plannedJobs
+  });
 }
 
 async function runFolderMonitorTestScan() {
@@ -1433,15 +1500,17 @@ async function applyHosterSelection() {
   selectedUploadHosters = Array.from(document.querySelectorAll('input[data-hoster-modal]:checked'))
     .map(input => input.dataset.hosterModal);
   const pendingFiles = _pendingFiles.slice();
-  const automationFiles = pendingFiles.filter(file => _pendingFolderMonitorAutoStart.has(file.path));
-  const regularFiles = pendingFiles.filter(file => !_pendingFolderMonitorAutoStart.has(file.path));
+  const automationPathKeys = new Set([..._pendingFolderMonitorAutoStart.keys()].map(normalizeAutomationPath));
+  const automationFiles = pendingFiles.filter(file => automationPathKeys.has(normalizeAutomationPath(file.path)));
+  const regularFiles = pendingFiles.filter(file => !automationPathKeys.has(normalizeAutomationPath(file.path)));
   const admittedFiles = regularFiles.filter(file => window.ImportPreflight
     .getEligibleImportHosters(file, selectedUploadHosters, hosterSettings).length > 0);
   const pendingPaths = new Set(admittedFiles.map(f => f.path));
+  let regularInjectionFailure = null;
   if (admittedFiles.length > 0) {
     selectedFiles.push(...admittedFiles);
   }
-  _pendingFiles = [];
+  _pendingFiles = automationFiles.slice();
   clearDedupKeysForPaths(pendingPaths);
   renderHosterSummary();
   if (pendingPaths.size > 0) buildQueuePreview();
@@ -1454,27 +1523,64 @@ async function applyHosterSelection() {
           jobs: newJobs.map(serializeUploadJob),
           sourceCleanupGroups: cleanupPreparation.groups
         });
-        if (!result?.error) newJobs.forEach(job => { job.status = 'queued'; });
-        _markSkippedJobs(result);
-        if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
-      } catch {}
+        if (result?.error) {
+          regularInjectionFailure = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
+        } else if ((Number(result?.added) || 0) !== newJobs.length) {
+          regularInjectionFailure = 'Jobs wurden nicht vollständig hinzugefügt.';
+        } else {
+          newJobs.forEach(job => { job.status = 'queued'; });
+          _markSkippedJobs(result);
+          if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
+        }
+      } catch {
+        regularInjectionFailure = 'Jobs konnten nicht hinzugefügt werden.';
+      }
       renderQueueTable();
       persistQueueStateSoon(true);
     }
   }
   updateUploadView();
   persistQueueStateSoon(true);
+  if (regularInjectionFailure) {
+    showCopyToast(regularInjectionFailure, 6500);
+    return { ok: false, error: regularInjectionFailure };
+  }
   const selectedHosters = selectedUploadHosters.slice();
-  _pendingFolderMonitorAutoStart.clear();
-  _pendingImportInspection = null;
-  document.getElementById('hosterModal').style.display = 'none';
   if (automationFiles.length > 0) {
-    const evaluation = await evaluateAutomationCandidates(automationFiles, {
-      dryRun: false,
-      trigger: 'manual-host',
-      selectedHosters
-    });
-    await applyAutomationEvaluation(evaluation);
+    try {
+      const evaluation = await evaluateAutomationCandidates(automationFiles, {
+        dryRun: false,
+        trigger: 'manual-host',
+        selectedHosters,
+        ownedPendingPaths: automationFiles.map(file => file.path)
+      });
+      const result = await applyAutomationEvaluation(evaluation);
+      const admittedPaths = new Set((result?.admittedFiles || []).map(file => normalizeAutomationPath(file.path)));
+      if (result?.error || admittedPaths.size === 0) throw new Error('manual-host-apply-failed');
+      _pendingFiles = _pendingFiles.filter(file => !admittedPaths.has(normalizeAutomationPath(file.path)));
+      for (const path of [..._pendingFolderMonitorAutoStart.keys()]) {
+        if (admittedPaths.has(normalizeAutomationPath(path))) _pendingFolderMonitorAutoStart.delete(path);
+      }
+      if (_pendingImportInspection) {
+        _pendingImportInspection = {
+          ..._pendingImportInspection,
+          accepted: (_pendingImportInspection.accepted || []).filter(file => !admittedPaths.has(normalizeAutomationPath(file.path)))
+        };
+      }
+    } catch {
+      const failure = { ok: false, error: 'Automatische Aufnahme konnte nicht abgeschlossen werden.' };
+      showCopyToast(failure.error, 6500);
+      document.getElementById('hosterModal').style.display = 'flex';
+      renderImportPlanSummary();
+      return failure;
+    }
+  }
+  if (_pendingFiles.length === 0) {
+    _pendingImportInspection = null;
+    document.getElementById('hosterModal').style.display = 'none';
+  } else {
+    document.getElementById('hosterModal').style.display = 'flex';
+    renderImportPlanSummary();
   }
   return true;
 }
@@ -1550,6 +1656,7 @@ function restoreQueueStateFromConfig() {
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
+        automationAdmission: job.automationAdmission === true,
         attempt: 0,
         maxAttempts: job.maxAttempts || 0,
         link: '',
@@ -1576,7 +1683,7 @@ function buildPersistedQueueState() {
   const selectedFileMap = new Map(selectedFiles.map(file => [file.path, file]));
 
   for (const job of persistableJobs) {
-    if (job.file && !selectedFileMap.has(job.file)) {
+    if (job.file && job.automationAdmission !== true && !selectedFileMap.has(job.file)) {
       selectedFileMap.set(job.file, {
         path: job.file,
         name: job.fileName,
@@ -1627,6 +1734,7 @@ function buildPersistedQueueState() {
         sourceCleanupRequiredHosters: Array.isArray(job.sourceCleanupRequiredHosters) ? [...job.sourceCleanupRequiredHosters] : [],
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
+        automationAdmission: job.automationAdmission === true,
         maxAttempts: job.maxAttempts || 0
       };
     })
@@ -1999,7 +2107,7 @@ function suppressPreviewKeysStillSelected(keys) {
 // Build preview jobs from selected files x selected hosters (before upload starts)
 function buildQueuePreview() {
   const hosters = getSelectedHosters();
-  queueJobs = queueJobs.filter(j => j.status !== 'preview');
+  queueJobs = queueJobs.filter(j => j.status !== 'preview' || j.automationAdmission === true);
 
   if (hosters.length > 0) {
     const existingKeys = new Set();
@@ -3604,6 +3712,24 @@ function serializeUploadJob(job) {
   };
 }
 
+function captureUploadJobStates(jobs) {
+  return jobs.map(job => [job, { ...job }]);
+}
+
+function restoreUploadJobStates(states) {
+  for (const [job, state] of states) {
+    for (const key of Object.keys(job)) {
+      if (!Object.prototype.hasOwnProperty.call(state, key)) delete job[key];
+    }
+    Object.assign(job, state);
+  }
+}
+
+function sanitizeUploadControlError(error, fallback) {
+  const message = String(error?.message || error || '');
+  return /pausiert/i.test(message) ? 'Automatik ist pausiert' : fallback;
+}
+
 async function startUpload(opts) {
   if (uploading) return;
   if (await isAutomationPaused()) return false;
@@ -3627,6 +3753,7 @@ async function startUpload(opts) {
 
   const jobsToStart = queueJobs.filter((job) => isStartableQueueStatus(job.status));
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
+  const originalStates = captureUploadJobStates(jobsToStart);
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3652,23 +3779,32 @@ async function startUpload(opts) {
       sourceCleanupGroups: cleanupPreparation.groups
     };
     const result = await window.api.startUpload(uploadPayload);
+    if (result && result.error) {
+      restoreUploadJobStates(originalStates);
+      const error = sanitizeUploadControlError(result.error, 'Upload konnte nicht gestartet werden.');
+      uploading = false;
+      renderQueueTable();
+      updateQueueActionButtons();
+      updateStatusBar();
+      await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+      return { ok: false, error };
+    }
     if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
     persistQueueStateSoon();
 
-    if (result && result.error) {
-      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
-      uploading = false;
-      updateQueueActionButtons();
-      updateStatusBar();
-    }
+    return { ok: true };
   } catch (err) {
+    restoreUploadJobStates(originalStates);
     uploading = false;
+    renderQueueTable();
     updateQueueActionButtons();
     updateStatusBar();
-    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
+    const error = sanitizeUploadControlError(err, 'Upload konnte nicht gestartet werden.');
+    await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+    return { ok: false, error };
   }
 }
 
@@ -3695,6 +3831,7 @@ async function startSelectedUpload(explicitJobs) {
       return;
     }
     {
+      const originalStates = captureUploadJobStates(addable);
       const cleanupPreparation = prepareSourceCleanup(addable);
       addable.forEach(j => {
         j.status = 'queued'; j.error = null; j.result = null;
@@ -3708,17 +3845,26 @@ async function startSelectedUpload(explicitJobs) {
           sourceCleanupGroups: cleanupPreparation.groups
         });
       } catch (err) {
-        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${err.message}`);
-        return;
+        restoreUploadJobStates(originalStates);
+        renderQueueTable();
+        const error = sanitizeUploadControlError(err, 'Jobs konnten nicht hinzugefügt werden.');
+        showCopyToast(error);
+        return { ok: false, error };
       }
 
-      // If the batch ended between UI-state and IPC call, start a fresh batch immediately
       if (result && result.error === 'Kein Upload aktiv') {
+        restoreUploadJobStates(originalStates);
         uploading = false;
         updateQueueActionButtons();
         updateStatusBar();
-        await startSelectedUpload(addable);
-        return;
+        return startSelectedUpload(addable);
+      }
+      if (result && result.error) {
+        restoreUploadJobStates(originalStates);
+        renderQueueTable();
+        const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
+        showCopyToast(error);
+        return { ok: false, error };
       }
       _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
@@ -3742,7 +3888,7 @@ async function startSelectedUpload(explicitJobs) {
       } else {
         showCopyToast('Keine Jobs hinzugefuegt');
       }
-      return;
+      return { ok: true, added };
     }
   }
   uploading = true; // set immediately to prevent double-click race
@@ -3751,6 +3897,7 @@ async function startSelectedUpload(explicitJobs) {
   const hosters = getSelectedHosters();
   const jobsToStart = scopedJobs.filter(job => isStartableQueueStatus(job.status));
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
+  const originalStates = captureUploadJobStates(jobsToStart);
 
   try {
     const cleanupPreparation = prepareSourceCleanup(jobsToStart);
@@ -3773,23 +3920,32 @@ async function startSelectedUpload(explicitJobs) {
       sourceCleanupGroups: cleanupPreparation.groups
   };
     const result = await window.api.startUpload(uploadPayload);
+    if (result && result.error) {
+      restoreUploadJobStates(originalStates);
+      const error = sanitizeUploadControlError(result.error, 'Upload konnte nicht gestartet werden.');
+      uploading = false;
+      renderQueueTable();
+      updateQueueActionButtons();
+      updateStatusBar();
+      await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+      return { ok: false, error };
+    }
     if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) {
       window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     }
     _markSkippedJobs(result);
     persistQueueStateSoon();
 
-    if (result && result.error) {
-      await showAppAlert(result.error, 'Upload-Start fehlgeschlagen');
-      uploading = false;
-      updateQueueActionButtons();
-      updateStatusBar();
-    }
+    return { ok: true };
   } catch (err) {
+    restoreUploadJobStates(originalStates);
     uploading = false;
+    renderQueueTable();
     updateQueueActionButtons();
     updateStatusBar();
-    await showAppAlert(`Upload-Start fehlgeschlagen: ${err.message}`, 'Upload-Start fehlgeschlagen');
+    const error = sanitizeUploadControlError(err, 'Upload konnte nicht gestartet werden.');
+    await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+    return { ok: false, error };
   }
 }
 
@@ -4463,7 +4619,7 @@ function moveSelectedJobs(direction) {
 function syncSelectedFilesFromQueue() {
   const fileMap = new Map();
   queueJobs
-    .filter((job) => !['done', 'skipped', 'aborted'].includes(job.status))
+    .filter((job) => job.automationAdmission !== true && !['done', 'skipped', 'aborted'].includes(job.status))
     .forEach((job) => {
       if (!job.file || fileMap.has(job.file)) return;
       fileMap.set(job.file, {
