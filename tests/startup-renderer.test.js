@@ -253,7 +253,19 @@ contextBridge.exposeInMainWorld('api', {
   },
   addJobsToBatch(payload) {
     folderMonitorProbeCalls.push(['inject', payload?.jobs?.length || 0]);
-    automationProbe.mutationCalls.push(['inject', payload?.jobs?.length || 0, (payload?.jobs || []).map(job => job.id)]);
+    automationProbe.mutationCalls.push([
+      'inject',
+      payload?.jobs?.length || 0,
+      (payload?.jobs || []).map(job => job.id),
+      (payload?.jobs || []).map(job => ({
+        id: job.id,
+        requiredHosters: [...(job.sourceCleanupRequiredHosters || [])]
+      })),
+      (payload?.sourceCleanupGroups || []).map(group => ({
+        requiredHosters: [...(group.requiredHosters || [])],
+        jobIds: (group.jobs || []).map(job => job.jobId)
+      }))
+    ]);
     if (automationProbe.addError) return Promise.reject(new Error(automationProbe.addError));
     if (automationProbe.addMode === 'partial-consistent' && payload?.jobs?.length >= 4) {
       return Promise.resolve({
@@ -1212,34 +1224,50 @@ contextBridge.exposeInMainWorld('api', {
       job.sourceCleanupFingerprint = { index, nested: ['before-' + index] };
       return job;
     };
-    const summarizeCollisionPath = async (jobs, result, before) => {
+    const summarizeCollisionPath = async (jobs, invalidJobs, result, before) => {
       const probe = await window.api.getAutomationProbeState();
       const inject = probe.mutationCalls.find(call => call[0] === 'inject');
       return {
         result,
         sentIds: inject?.[2] || [],
+        sentJobs: inject?.[3] || [],
+        sourceCleanupGroups: inject?.[4] || [],
         statuses: jobs.map(job => job.status),
-        invalidRestored: jobs.slice(0, 3).map((job, index) => JSON.stringify(job) === before[index])
+        invalidRestored: invalidJobs.map((job, index) => JSON.stringify(job) === before[index])
       };
     };
 
     configureAtomicState(0);
     config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
     uploading = true;
+    const activeCollisionFile = 'C:\\\\collision\\\\active.mkv';
     const activeMissingJob = makePauseRaceJob('active-missing.mkv');
     delete activeMissingJob.id;
     const activeCollisionJobs = [
       { ...makePauseRaceJob('active-duplicate-a.mkv'), id: 'active-duplicate' },
       { ...makePauseRaceJob('active-duplicate-b.mkv'), id: 'active-duplicate' },
       activeMissingJob,
+      { ...makePauseRaceJob('active-shadowed.mkv'), id: 'active-shadowed' },
       { ...makePauseRaceJob('active-unique.mkv'), id: 'active-unique' }
-    ].map(applyCollisionCleanupFixture);
-    queueJobs = activeCollisionJobs;
+    ].map((job, index) => {
+      job.file = activeCollisionFile;
+      job.hoster = [hosters[0], hosters[1], hosters[2], hosters[0], hosters[3]][index];
+      return applyCollisionCleanupFixture(job, index);
+    });
+    const activeShadowSibling = applyCollisionCleanupFixture({
+      ...makePauseRaceJob('active-shadow-sibling.mkv'),
+      id: 'active-shadowed',
+      file: activeCollisionFile,
+      hoster: hosters[1],
+      status: 'done'
+    }, 5);
+    queueJobs = [...activeCollisionJobs, activeShadowSibling];
     rebuildJobIndex();
-    const activeCollisionBefore = activeCollisionJobs.slice(0, 3).map(job => JSON.stringify(job));
+    const activeInvalidJobs = [...activeCollisionJobs.slice(0, 4), activeShadowSibling];
+    const activeCollisionBefore = activeInvalidJobs.map(job => JSON.stringify(job));
     window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
     const activeCollisionResult = await startSelectedUpload(activeCollisionJobs);
-    const activeCollision = await summarizeCollisionPath(activeCollisionJobs, activeCollisionResult, activeCollisionBefore);
+    const activeCollision = await summarizeCollisionPath(activeCollisionJobs, activeInvalidJobs, activeCollisionResult, activeCollisionBefore);
 
     configureAtomicState(0);
     config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
@@ -1260,22 +1288,39 @@ contextBridge.exposeInMainWorld('api', {
     document.getElementById('hosterModalList').replaceChildren(...manualCollisionInputs);
     const originalBuildQueuePreviewForCollision = buildQueuePreview;
     let manualCollisionJobs = [];
+    let manualInvalidJobs = [];
     let manualCollisionBefore = [];
     buildQueuePreview = () => {
       originalBuildQueuePreviewForCollision();
       manualCollisionJobs = queueJobs.filter(job => job.file === manualCollisionFile.path);
       manualCollisionJobs[0].id = 'manual-duplicate';
       manualCollisionJobs[1].id = 'manual-duplicate';
-      delete manualCollisionJobs[2].id;
+      manualCollisionJobs[2].id = 'manual-shadowed';
       manualCollisionJobs[3].id = 'manual-unique';
       manualCollisionJobs.forEach(applyCollisionCleanupFixture);
-      manualCollisionBefore = manualCollisionJobs.slice(0, 3).map(job => JSON.stringify(job));
+      const manualShadowSibling = applyCollisionCleanupFixture({
+        ...makePauseRaceJob('manual-shadow-sibling.mkv'),
+        id: 'manual-shadowed',
+        file: manualCollisionFile.path,
+        hoster: hosters[0],
+        status: 'done'
+      }, 4);
+      const manualMissingSibling = applyCollisionCleanupFixture({
+        ...makePauseRaceJob('manual-missing-sibling.mkv'),
+        file: manualCollisionFile.path,
+        hoster: hosters[1],
+        status: 'done'
+      }, 5);
+      delete manualMissingSibling.id;
+      queueJobs.push(manualShadowSibling, manualMissingSibling);
+      manualInvalidJobs = [...manualCollisionJobs.slice(0, 3), manualShadowSibling, manualMissingSibling];
+      manualCollisionBefore = manualInvalidJobs.map(job => JSON.stringify(job));
       rebuildJobIndex();
     };
     window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
     const manualCollisionResult = await applyHosterSelection();
     buildQueuePreview = originalBuildQueuePreviewForCollision;
-    const manualCollision = await summarizeCollisionPath(manualCollisionJobs, manualCollisionResult, manualCollisionBefore);
+    const manualCollision = await summarizeCollisionPath(manualCollisionJobs, manualInvalidJobs, manualCollisionResult, manualCollisionBefore);
 
     configureAtomicState(0);
     config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
@@ -1284,6 +1329,25 @@ contextBridge.exposeInMainWorld('api', {
     selectedFiles = [];
     uploading = true;
     const automationCollisionFile = { path: 'C:\\collision\\automation.mkv', name: 'automation.mkv', size: 1, mtimeMs: 1 };
+    const automationShadowSibling = applyCollisionCleanupFixture({
+      ...makePauseRaceJob('automation-shadow-sibling.mkv'),
+      id: 'automation-shadowed',
+      file: 'C:\\collision\\automation-shadow-existing.mkv',
+      hoster: hosters[0],
+      status: 'done'
+    }, 4);
+    const automationMissingSibling = applyCollisionCleanupFixture({
+      ...makePauseRaceJob('automation-missing-sibling.mkv'),
+      file: 'C:\\collision\\automation-missing-existing.mkv',
+      hoster: hosters[1],
+      status: 'done'
+    }, 5);
+    delete automationMissingSibling.id;
+    automationShadowSibling.sourceCleanupToken = 'automation-collision-token';
+    automationMissingSibling.sourceCleanupToken = 'automation-collision-token';
+    queueJobs.push(automationShadowSibling, automationMissingSibling);
+    rebuildJobIndex();
+    const automationExternalBefore = [automationShadowSibling, automationMissingSibling].map(job => JSON.stringify(job));
     const originalCreateAutomationPreviewJobForCollision = createAutomationPreviewJob;
     const automationCollisionJobs = [];
     const automationCollisionBefore = [];
@@ -1291,9 +1355,10 @@ contextBridge.exposeInMainWorld('api', {
       const job = originalCreateAutomationPreviewJobForCollision(file, hoster);
       const index = automationCollisionJobs.length;
       if (index < 2) job.id = 'automation-duplicate';
-      else if (index === 2) delete job.id;
+      else if (index === 2) job.id = 'automation-shadowed';
       else job.id = 'automation-unique';
       applyCollisionCleanupFixture(job, index);
+      job.sourceCleanupToken = 'automation-collision-token';
       automationCollisionJobs.push(job);
       if (index < 3) automationCollisionBefore.push(JSON.stringify(job));
       return job;
@@ -1302,11 +1367,12 @@ contextBridge.exposeInMainWorld('api', {
     const automationCollisionEvaluation = await evaluateAutomationCandidates([automationCollisionFile], { dryRun: false, trigger: 'watcher' });
     const automationCollisionResult = await applyAutomationEvaluation(automationCollisionEvaluation);
     createAutomationPreviewJob = originalCreateAutomationPreviewJobForCollision;
-    const automationCollision = await summarizeCollisionPath(automationCollisionJobs, {
+    const automationInvalidJobs = [...automationCollisionJobs.slice(0, 3), automationShadowSibling, automationMissingSibling];
+    const automationCollision = await summarizeCollisionPath(automationCollisionJobs, automationInvalidJobs, {
       ok: automationCollisionResult.ok,
       error: automationCollisionResult.error,
       admitted: automationCollisionResult.admittedFiles.map(file => file.name)
-    }, automationCollisionBefore);
+    }, [...automationCollisionBefore, ...automationExternalBefore]);
     uploading = false;
     const collisionAdmission = { active: activeCollision, manual: manualCollision, automation: automationCollision };
 
@@ -2101,20 +2167,26 @@ app.whenReady().then(async () => {
       active: {
         result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
         sentIds: ['active-unique'],
-        statuses: ['preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true]
+        sentJobs: [{ id: 'active-unique', requiredHosters: ['byse.sx'] }],
+        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['active-unique'] }],
+        statuses: ['preview', 'preview', 'preview', 'preview', 'queued'],
+        invalidRestored: [true, true, true, true, true]
       },
       manual: {
         result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
         sentIds: ['manual-unique'],
+        sentJobs: [{ id: 'manual-unique', requiredHosters: ['byse.sx'] }],
+        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['manual-unique'] }],
         statuses: ['preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true]
+        invalidRestored: [true, true, true, true, true]
       },
       automation: {
         result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.', admitted: [] },
         sentIds: ['automation-unique'],
+        sentJobs: [{ id: 'automation-unique', requiredHosters: ['byse.sx'] }],
+        sourceCleanupGroups: [{ requiredHosters: ['byse.sx'], jobIds: ['automation-unique'] }],
         statuses: ['preview', 'preview', 'preview', 'queued'],
-        invalidRestored: [true, true, true]
+        invalidRestored: [true, true, true, true, true]
       }
     });
     assert.deepEqual(result.automationPipeline.pauseBetweenApplyAndStart, {

@@ -732,7 +732,10 @@ async function applyAutomationEvaluation(evaluation) {
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
         return freezeAutomationValue({ ok: false, error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(error), dryRun: false });
       }
-      const outcome = applyAddJobsOutcome(newJobs, result, { cleanupStates: cleanupPreparation.rollbackStates });
+      const outcome = applyAddJobsOutcome(newJobs, result, {
+        analysis: addRequest,
+        cleanupStates: cleanupPreparation.rollbackStates
+      });
       if (!outcome.consistent) {
         renderQueueTable();
         persistQueueStateSoon(true);
@@ -1535,7 +1538,10 @@ async function applyHosterSelection() {
           regularInjectionFailure = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
           restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         } else {
-          const outcome = applyAddJobsOutcome(newJobs, result, { cleanupStates: cleanupPreparation.rollbackStates });
+          const outcome = applyAddJobsOutcome(newJobs, result, {
+            analysis: addRequest,
+            cleanupStates: cleanupPreparation.rollbackStates
+          });
           if (!outcome.consistent) regularInjectionFailure = 'Jobs konnten nicht eindeutig bestätigt werden.';
           else if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
         }
@@ -3785,13 +3791,21 @@ function sanitizeUploadControlError(error, fallback) {
   return /pausiert/i.test(message) ? 'Automatik ist pausiert' : fallback;
 }
 
-function analyzeAddJobsInput(jobs) {
+function analyzeAddJobsInput(jobs, relevantJobs = jobs) {
   const inputJobs = Array.isArray(jobs) ? jobs : [];
+  const identityJobs = Array.isArray(relevantJobs) ? relevantJobs : [];
   const idCounts = new Map();
-  for (const job of inputJobs) {
+  for (const job of identityJobs) {
     const id = job?.id;
     if (typeof id !== 'string' || id.trim().length === 0) continue;
     idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  }
+  const confirmableJobs = [];
+  const confirmableJobsById = new Map();
+  for (const job of identityJobs) {
+    if (typeof job?.id !== 'string' || job.id.trim().length === 0 || idCounts.get(job.id) !== 1) continue;
+    confirmableJobs.push(job);
+    confirmableJobsById.set(job.id, job);
   }
   const sendableJobs = [];
   const unconfirmableJobs = [];
@@ -3804,13 +3818,38 @@ function analyzeAddJobsInput(jobs) {
       unconfirmableJobs.push(job);
     }
   }
-  return { inputJobs, sendableJobs, unconfirmableJobs, jobsById };
+  return { inputJobs, sendableJobs, unconfirmableJobs, jobsById, confirmableJobs, confirmableJobsById };
+}
+
+function prepareAddSourceCleanup(analysis) {
+  const rollbackStates = captureSourceCleanupStates();
+  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [], rollbackStates };
+  const cleanupJobs = analysis.confirmableJobs.map(job => ({
+    ...job,
+    sourceCleanupRequiredHosters: []
+  }));
+  const cleanupJobsById = new Map(cleanupJobs.map(job => [job.id, job]));
+  const prepared = window.SourceCleanupPolicy.prepareGroups(
+    cleanupJobs,
+    analysis.sendableJobs.map(job => cleanupJobsById.get(job.id)).filter(Boolean),
+    () => window.crypto.randomUUID(),
+    'win32'
+  );
+  for (const cleanupJob of prepared.touchedJobs) {
+    const job = analysis.confirmableJobsById.get(cleanupJob.id);
+    if (!job) continue;
+    for (const field of sourceCleanupFields) {
+      if (!Object.prototype.hasOwnProperty.call(cleanupJob, field)) delete job[field];
+      else job[field] = cloneSourceCleanupValue(cleanupJob[field]);
+    }
+  }
+  return { ...prepared, rollbackStates };
 }
 
 function createAddJobsRequest(jobs) {
-  const analysis = analyzeAddJobsInput(jobs);
+  const analysis = analyzeAddJobsInput(jobs, queueJobs.slice());
   const cleanupPreparation = analysis.sendableJobs.length > 0
-    ? prepareSourceCleanup(analysis.sendableJobs)
+    ? prepareAddSourceCleanup(analysis)
     : { groups: [], rollbackStates: [] };
   return {
     ...analysis,
@@ -3827,8 +3866,8 @@ async function submitAddJobsRequest(request) {
   return window.api.addJobsToBatch(request.payload);
 }
 
-function resolveAddJobsOutcome(jobs, result) {
-  const { sendableJobs, unconfirmableJobs, jobsById } = analyzeAddJobsInput(jobs);
+function resolveAddJobsOutcome(jobs, result, analysis = null) {
+  const { sendableJobs, unconfirmableJobs, jobsById } = analysis || analyzeAddJobsInput(jobs);
   const skippedEntries = [];
   const skippedIds = new Set();
   const alreadyIds = new Set();
@@ -3864,7 +3903,7 @@ function resolveAddJobsOutcome(jobs, result) {
 }
 
 function applyAddJobsOutcome(jobs, result, options = {}) {
-  const outcome = resolveAddJobsOutcome(jobs, result);
+  const outcome = resolveAddJobsOutcome(jobs, result, options.analysis);
   const confirmedJobs = new Set([...outcome.addedJobs, ...outcome.alreadyJobs, ...outcome.skippedJobs]);
   const cleanupRollbackJobs = outcome.consistent
     ? []
@@ -4036,6 +4075,7 @@ async function startSelectedUpload(explicitJobs) {
         return { ok: false, error };
       }
       const outcome = applyAddJobsOutcome(addable, result, {
+        analysis: addRequest,
         cleanupStates: cleanupPreparation.rollbackStates,
         uploadStates: originalStates
       });
