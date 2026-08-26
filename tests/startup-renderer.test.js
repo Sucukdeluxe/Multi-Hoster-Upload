@@ -3682,6 +3682,186 @@ ${startupAutomation}
   }
 });
 
+test('real app resume keeps the ConfigStore-restored manual preview byte-identical without starting work', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-real-resume-e2e-'));
+  const appRoot = path.join(probeRoot, 'app');
+  const userDataPath = path.join(probeRoot, 'user-data');
+  const outputPath = path.join(probeRoot, 'result.json');
+  const previewPath = path.join(probeRoot, 'manual-preview.mkv');
+  fs.mkdirSync(appRoot, { recursive: true });
+  fs.writeFileSync(previewPath, Buffer.alloc(17, 7));
+  for (const relativePath of ['main.js', 'preload.js', 'preload-drop-target.js', 'package.json']) {
+    fs.copyFileSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath));
+  }
+  for (const relativePath of ['lib', 'renderer', 'assets']) {
+    fs.cpSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath), { recursive: true });
+  }
+  fs.symlinkSync(path.join(projectRoot, 'node_modules'), path.join(appRoot, 'node_modules'), 'junction');
+  const probePath = path.join(appRoot, 'real-resume-probe.cjs');
+  const probeSource = `
+const { app, BrowserWindow, ipcMain } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const ConfigStore = require('./lib/config-store');
+const outputPath = process.env.MHU_REAL_RESUME_OUTPUT;
+const userDataPath = process.env.MHU_REAL_RESUME_USER_DATA;
+const previewPath = process.env.MHU_REAL_RESUME_PREVIEW;
+app.setPath('userData', userDataPath);
+BrowserWindow.prototype.show = function () {};
+const calls = { resume: 0, start: 0, add: 0 };
+let resumeDiagnostic = null;
+const originalHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => originalHandle(channel, function (event, ...args) {
+  if (channel === 'automation:resume') calls.resume++;
+  if (channel === 'start-upload') calls.start++;
+  if (channel === 'add-jobs-to-batch') calls.add++;
+  return handler.call(this, event, ...args);
+});
+let rendererReady = 0;
+const originalOn = ipcMain.on.bind(ipcMain);
+ipcMain.on = (channel, handler) => originalOn(channel, function (event, ...args) {
+  if (channel === 'app:close-handshake-ready') rendererReady++;
+  return handler.call(this, event, ...args);
+});
+
+async function waitFor(read, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('real resume probe timed out');
+}
+
+(async () => {
+  const store = new ConfigStore(app);
+  const current = store.load();
+  await store.save({
+    globalSettings: {
+      ...current.globalSettings,
+      language: 'en',
+      resumeQueueOnLaunch: true,
+      autoStartRestoredQueue: false,
+      logVerbose: false,
+      logFilePath: path.join(userDataPath, 'fileuploader.log'),
+      pendingQueue: {
+        savedAt: 1787712000000,
+        selectedUploadHosters: ['doodstream.com'],
+        selectedFiles: [],
+        completedKeys: [],
+        suppressedKeys: [],
+        queueJobs: [{
+          id: 'real-restored-preview',
+          file: previewPath,
+          fileName: 'manual-preview.mkv',
+          hoster: 'doodstream.com',
+          status: 'preview',
+          bytesTotal: 17,
+          error: null,
+          failureDetails: null,
+          result: null,
+          sourceCleanupToken: 'real-preview-token',
+          sourceCleanupRequiredHosters: ['doodstream.com'],
+          sourceCleanupCompletedHosters: [],
+          sourceCleanupFingerprint: { size: 17, mtimeMs: 1787712000000, headHash: 'real-preview-head' },
+          automationAdmission: false,
+          maxAttempts: 3
+        }]
+      },
+      folderMonitor: {
+        ...current.globalSettings.folderMonitor,
+        enabled: false,
+        folderPath: '',
+        paused: true,
+        pausedAt: 1787712000000
+      }
+    }
+  });
+
+  require('./main.js');
+  await app.whenReady();
+  const window = await waitFor(async () => BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed()) || null);
+  await waitFor(async () => rendererReady === 1);
+  const readRendererState = async () => {
+    try {
+      return await window.webContents.executeJavaScript("(() => { const queueReady = typeof queueJobs !== 'undefined'; const apiReady = typeof window.api?.automationResume === 'function'; const snapshotReady = typeof createAutomationStatusSnapshot === 'function'; const job = queueReady ? queueJobs.find(entry => entry.fileName === 'manual-preview.mkv' && entry.hoster === 'doodstream.com') : null; const button = document.getElementById('automationPauseResumeBtn'); const ready = Boolean(queueReady && apiReady && snapshotReady && job && button); return { ready, queueReady, apiReady, snapshotReady, jobPresent: Boolean(job), buttonPresent: Boolean(button), jobJson: job ? JSON.stringify(job) : null, status: job?.status || null, buttonText: button?.textContent.trim() || null, paused: snapshotReady ? createAutomationStatusSnapshot().paused : null, queueIds: queueReady ? queueJobs.map(entry => entry.id) : [], selectedPaths: typeof selectedFiles !== 'undefined' ? selectedFiles.map(entry => entry.path) : [], pendingIds: config?.globalSettings?.pendingQueue?.queueJobs?.map(entry => entry.id) || [], uploading: typeof uploading === 'boolean' ? uploading : null }; })()");
+    } catch (error) {
+      return { ready: false, executeError: error.message || String(error) };
+    }
+  };
+  const before = await waitFor(async () => {
+    const state = await readRendererState();
+    return state.ready ? state : null;
+  });
+  const rendererUrl = window.webContents.getURL();
+  await window.webContents.executeJavaScript("document.getElementById('automationPauseResumeBtn').click(); true");
+  const after = await waitFor(async () => {
+    const state = await readRendererState();
+    const persisted = new ConfigStore(app).load().globalSettings.folderMonitor;
+    resumeDiagnostic = { state, persistedPaused: persisted.paused, calls: { ...calls } };
+    return calls.resume === 1 && state?.ready === true && state.paused === false && persisted.paused === false ? state : null;
+  });
+  fs.writeFileSync(outputPath, JSON.stringify({
+    hidden: window.isVisible() === false,
+    rendererUrl,
+    before,
+    after,
+    calls,
+    rendererReady,
+    persistedPaused: new ConfigStore(app).load().globalSettings.folderMonitor.paused
+  }), 'utf8');
+  window.destroy();
+  app.exit(0);
+})().catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error), calls, resumeDiagnostic }), 'utf8');
+  app.exit(1);
+});
+`;
+  fs.writeFileSync(probePath, probeSource, 'utf8');
+  try {
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const probeEnvironment = {
+      ...process.env,
+      MHU_PERF: '0',
+      MHU_REAL_RESUME_OUTPUT: outputPath,
+      MHU_REAL_RESUME_USER_DATA: userDataPath,
+      MHU_REAL_RESUME_PREVIEW: previewPath
+    };
+    delete probeEnvironment.RUN_UI_SMOKE;
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: appRoot,
+      env: probeEnvironment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 60000
+    });
+    const probeOutput = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}\n${probeOutput}`);
+    const outcome = JSON.parse(probeOutput);
+    assert.equal(outcome.error, undefined);
+    assert.equal(outcome.hidden, true);
+    assert.equal(new URL(outcome.rendererUrl).pathname.replace(/^\/([A-Za-z]:)/u, '$1').split('/').join(path.sep), path.join(appRoot, 'renderer', 'index.html'));
+    assert.equal(outcome.before.apiReady, true);
+    assert.equal(outcome.before.status, 'preview');
+    assert.equal(JSON.parse(outcome.before.jobJson).id, 'real-restored-preview');
+    assert.equal(outcome.before.buttonText, 'Resume');
+    assert.equal(outcome.before.paused, true);
+    assert.equal(outcome.after.status, 'preview');
+    assert.equal(outcome.after.buttonText, 'Finish and pause');
+    assert.equal(outcome.after.paused, false);
+    assert.equal(outcome.after.apiReady, true);
+    assert.equal(outcome.after.jobJson, outcome.before.jobJson);
+    assert.deepEqual(outcome.calls, { resume: 1, start: 0, add: 0 });
+    assert.equal(outcome.rendererReady, 1);
+    assert.equal(outcome.persistedPaused, false);
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    assert.equal(fs.existsSync(probeRoot), false);
+  }
+});
+
 test('resolveStartupLanguage accepts only the supported persisted language', () => {
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'de' } }), 'de');
   assert.equal(resolveStartupLanguage({ globalSettings: { language: 'en' } }), 'en');
