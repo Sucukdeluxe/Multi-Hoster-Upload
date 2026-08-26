@@ -723,12 +723,10 @@ async function applyAutomationEvaluation(evaluation) {
     if (await isAutomationPaused()) {
       return freezeAutomationValue({ ok: false, error: 'Automatik ist pausiert', warning: null, admittedFiles: [], deferredFiles, paused: true, dryRun: false });
     }
-    const cleanupPreparation = prepareSourceCleanup(newJobs);
+    const addRequest = createAddJobsRequest(newJobs);
+    const cleanupPreparation = addRequest.cleanupPreparation;
     try {
-      const result = await window.api.addJobsToBatch({
-        jobs: newJobs.map(serializeUploadJob),
-        sourceCleanupGroups: cleanupPreparation.groups
-      });
+      const result = await submitAddJobsRequest(addRequest);
       if (result?.error) {
         restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
@@ -1529,12 +1527,10 @@ async function applyHosterSelection() {
   if (uploading && pendingPaths.size > 0 && !(await isAutomationPaused())) {
     const newJobs = queueJobs.filter(j => j.status === 'preview' && pendingPaths.has(j.file));
     if (newJobs.length > 0) {
-      const cleanupPreparation = prepareSourceCleanup(newJobs);
+      const addRequest = createAddJobsRequest(newJobs);
+      const cleanupPreparation = addRequest.cleanupPreparation;
       try {
-        const result = await window.api.addJobsToBatch({
-          jobs: newJobs.map(serializeUploadJob),
-          sourceCleanupGroups: cleanupPreparation.groups
-        });
+        const result = await submitAddJobsRequest(addRequest);
         if (result?.error) {
           regularInjectionFailure = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
           restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
@@ -3789,13 +3785,54 @@ function sanitizeUploadControlError(error, fallback) {
   return /pausiert/i.test(message) ? 'Automatik ist pausiert' : fallback;
 }
 
-function resolveAddJobsOutcome(jobs, result) {
+function analyzeAddJobsInput(jobs) {
   const inputJobs = Array.isArray(jobs) ? jobs : [];
-  const jobsById = new Map(inputJobs.filter(job => job?.id).map(job => [job.id, job]));
+  const idCounts = new Map();
+  for (const job of inputJobs) {
+    const id = job?.id;
+    if (typeof id !== 'string' || id.trim().length === 0) continue;
+    idCounts.set(id, (idCounts.get(id) || 0) + 1);
+  }
+  const sendableJobs = [];
+  const unconfirmableJobs = [];
+  const jobsById = new Map();
+  for (const job of inputJobs) {
+    if (typeof job?.id === 'string' && job.id.trim().length > 0 && idCounts.get(job.id) === 1) {
+      sendableJobs.push(job);
+      jobsById.set(job.id, job);
+    } else {
+      unconfirmableJobs.push(job);
+    }
+  }
+  return { inputJobs, sendableJobs, unconfirmableJobs, jobsById };
+}
+
+function createAddJobsRequest(jobs) {
+  const analysis = analyzeAddJobsInput(jobs);
+  const cleanupPreparation = analysis.sendableJobs.length > 0
+    ? prepareSourceCleanup(analysis.sendableJobs)
+    : { groups: [], rollbackStates: [] };
+  return {
+    ...analysis,
+    cleanupPreparation,
+    payload: {
+      jobs: analysis.sendableJobs.map(serializeUploadJob),
+      sourceCleanupGroups: cleanupPreparation.groups
+    }
+  };
+}
+
+async function submitAddJobsRequest(request) {
+  if (request.sendableJobs.length === 0) return { added: 0 };
+  return window.api.addJobsToBatch(request.payload);
+}
+
+function resolveAddJobsOutcome(jobs, result) {
+  const { sendableJobs, unconfirmableJobs, jobsById } = analyzeAddJobsInput(jobs);
   const skippedEntries = [];
   const skippedIds = new Set();
   const alreadyIds = new Set();
-  let valid = jobsById.size === inputJobs.length;
+  let valid = true;
   for (const entry of Array.isArray(result?.skippedJobs) ? result.skippedJobs : []) {
     const id = entry?.jobId;
     if (!jobsById.has(id) || skippedIds.has(id)) {
@@ -3812,17 +3849,17 @@ function resolveAddJobsOutcome(jobs, result) {
     }
     alreadyIds.add(id);
   }
-  const remainingJobs = inputJobs.filter(job => !skippedIds.has(job.id) && !alreadyIds.has(job.id));
+  const remainingJobs = sendableJobs.filter(job => !skippedIds.has(job.id) && !alreadyIds.has(job.id));
   const added = Number(result?.added);
-  const consistent = valid && Number.isInteger(added) && added >= 0 && added === remainingJobs.length;
+  const confirmationConsistent = valid && Number.isInteger(added) && added >= 0 && added === remainingJobs.length;
   return {
-    consistent,
+    consistent: unconfirmableJobs.length === 0 && confirmationConsistent,
     added: Number.isInteger(added) && added >= 0 ? added : 0,
-    addedJobs: consistent ? remainingJobs : [],
+    addedJobs: confirmationConsistent ? remainingJobs : [],
     alreadyJobs: [...alreadyIds].map(id => jobsById.get(id)),
     skippedEntries,
     skippedJobs: skippedEntries.map(entry => jobsById.get(entry.jobId)),
-    unconfirmedJobs: consistent ? [] : remainingJobs
+    unconfirmedJobs: [...unconfirmableJobs, ...(confirmationConsistent ? [] : remainingJobs)]
   };
 }
 
@@ -3963,7 +4000,8 @@ async function startSelectedUpload(explicitJobs) {
     }
     {
       const originalStates = captureUploadJobStates(addable);
-      const cleanupPreparation = prepareSourceCleanup(addable);
+      const addRequest = createAddJobsRequest(addable);
+      const cleanupPreparation = addRequest.cleanupPreparation;
       addable.forEach(j => {
         j.status = 'queued'; j.error = null; j.result = null;
         j.bytesUploaded = 0; j.speedKbs = 0; j.progress = 0; j.uploadId = null;
@@ -3971,10 +4009,7 @@ async function startSelectedUpload(explicitJobs) {
       renderQueueTable();
       let result = null;
       try {
-        result = await window.api.addJobsToBatch({
-          jobs: addable.map(serializeUploadJob),
-          sourceCleanupGroups: cleanupPreparation.groups
-        });
+        result = await submitAddJobsRequest(addRequest);
       } catch (err) {
         restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         restoreUploadJobStates(originalStates);

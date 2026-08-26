@@ -253,7 +253,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   addJobsToBatch(payload) {
     folderMonitorProbeCalls.push(['inject', payload?.jobs?.length || 0]);
-    automationProbe.mutationCalls.push(['inject', payload?.jobs?.length || 0]);
+    automationProbe.mutationCalls.push(['inject', payload?.jobs?.length || 0, (payload?.jobs || []).map(job => job.id)]);
     if (automationProbe.addError) return Promise.reject(new Error(automationProbe.addError));
     if (automationProbe.addMode === 'partial-consistent' && payload?.jobs?.length >= 4) {
       return Promise.resolve({
@@ -1179,6 +1179,137 @@ contextBridge.exposeInMainWorld('api', {
       }
     };
 
+    const resolverMissingJob = makePauseRaceJob('resolver-missing.mkv');
+    delete resolverMissingJob.id;
+    const collisionJobs = [
+      { ...makePauseRaceJob('resolver-duplicate-a.mkv'), id: 'resolver-duplicate' },
+      { ...makePauseRaceJob('resolver-duplicate-b.mkv'), id: 'resolver-duplicate' },
+      resolverMissingJob,
+      { ...makePauseRaceJob('resolver-unique.mkv'), id: 'resolver-unique' }
+    ];
+    const cleanCollisionOutcome = resolveAddJobsOutcome(collisionJobs, { added: 1 });
+    const hostileCollisionOutcome = resolveAddJobsOutcome(collisionJobs, {
+      added: 1,
+      alreadyInBatchJobIds: ['resolver-duplicate'],
+      skippedJobs: [{ reason: 'Ungültig' }]
+    });
+    const summarizeCollisionOutcome = outcome => ({
+      consistent: outcome.consistent,
+      added: outcome.addedJobs.map(job => job.fileName),
+      already: outcome.alreadyJobs.map(job => job.fileName),
+      skipped: outcome.skippedJobs.map(job => job.fileName),
+      unconfirmed: outcome.unconfirmedJobs.map(job => job.fileName)
+    });
+    const collisionResolver = {
+      clean: summarizeCollisionOutcome(cleanCollisionOutcome),
+      hostile: summarizeCollisionOutcome(hostileCollisionOutcome)
+    };
+
+    const applyCollisionCleanupFixture = (job, index) => {
+      job.sourceCleanupToken = 'collision-token-' + index;
+      job.sourceCleanupRequiredHosters = ['required-' + index];
+      job.sourceCleanupCompletedHosters = ['completed-' + index];
+      job.sourceCleanupFingerprint = { index, nested: ['before-' + index] };
+      return job;
+    };
+    const summarizeCollisionPath = async (jobs, result, before) => {
+      const probe = await window.api.getAutomationProbeState();
+      const inject = probe.mutationCalls.find(call => call[0] === 'inject');
+      return {
+        result,
+        sentIds: inject?.[2] || [],
+        statuses: jobs.map(job => job.status),
+        invalidRestored: jobs.slice(0, 3).map((job, index) => JSON.stringify(job) === before[index])
+      };
+    };
+
+    configureAtomicState(0);
+    config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+    uploading = true;
+    const activeMissingJob = makePauseRaceJob('active-missing.mkv');
+    delete activeMissingJob.id;
+    const activeCollisionJobs = [
+      { ...makePauseRaceJob('active-duplicate-a.mkv'), id: 'active-duplicate' },
+      { ...makePauseRaceJob('active-duplicate-b.mkv'), id: 'active-duplicate' },
+      activeMissingJob,
+      { ...makePauseRaceJob('active-unique.mkv'), id: 'active-unique' }
+    ].map(applyCollisionCleanupFixture);
+    queueJobs = activeCollisionJobs;
+    rebuildJobIndex();
+    const activeCollisionBefore = activeCollisionJobs.slice(0, 3).map(job => JSON.stringify(job));
+    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    const activeCollisionResult = await startSelectedUpload(activeCollisionJobs);
+    const activeCollision = await summarizeCollisionPath(activeCollisionJobs, activeCollisionResult, activeCollisionBefore);
+
+    configureAtomicState(0);
+    config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+    selectedFiles = [];
+    uploading = true;
+    const manualCollisionFile = { path: 'C:\\collision\\manual.mkv', name: 'manual.mkv', size: 1 };
+    _pendingFiles = [manualCollisionFile];
+    _pendingImportInspection = { candidateCount: 1, duplicateCount: 0, unavailableCount: 0, accepted: [manualCollisionFile] };
+    _pendingImportInspections = 0;
+    _pendingFolderMonitorAutoStart.clear();
+    const manualCollisionInputs = hosters.map(hoster => {
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.hosterModal = hoster;
+      input.checked = true;
+      return input;
+    });
+    document.getElementById('hosterModalList').replaceChildren(...manualCollisionInputs);
+    const originalBuildQueuePreviewForCollision = buildQueuePreview;
+    let manualCollisionJobs = [];
+    let manualCollisionBefore = [];
+    buildQueuePreview = () => {
+      originalBuildQueuePreviewForCollision();
+      manualCollisionJobs = queueJobs.filter(job => job.file === manualCollisionFile.path);
+      manualCollisionJobs[0].id = 'manual-duplicate';
+      manualCollisionJobs[1].id = 'manual-duplicate';
+      delete manualCollisionJobs[2].id;
+      manualCollisionJobs[3].id = 'manual-unique';
+      manualCollisionJobs.forEach(applyCollisionCleanupFixture);
+      manualCollisionBefore = manualCollisionJobs.slice(0, 3).map(job => JSON.stringify(job));
+      rebuildJobIndex();
+    };
+    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    const manualCollisionResult = await applyHosterSelection();
+    buildQueuePreview = originalBuildQueuePreviewForCollision;
+    const manualCollision = await summarizeCollisionPath(manualCollisionJobs, manualCollisionResult, manualCollisionBefore);
+
+    configureAtomicState(0);
+    config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+    config.globalSettings.folderMonitor.hosters = hosters.slice();
+    config.globalSettings.folderMonitor.autoStart = true;
+    selectedFiles = [];
+    uploading = true;
+    const automationCollisionFile = { path: 'C:\\collision\\automation.mkv', name: 'automation.mkv', size: 1, mtimeMs: 1 };
+    const originalCreateAutomationPreviewJobForCollision = createAutomationPreviewJob;
+    const automationCollisionJobs = [];
+    const automationCollisionBefore = [];
+    createAutomationPreviewJob = (file, hoster) => {
+      const job = originalCreateAutomationPreviewJobForCollision(file, hoster);
+      const index = automationCollisionJobs.length;
+      if (index < 2) job.id = 'automation-duplicate';
+      else if (index === 2) delete job.id;
+      else job.id = 'automation-unique';
+      applyCollisionCleanupFixture(job, index);
+      automationCollisionJobs.push(job);
+      if (index < 3) automationCollisionBefore.push(JSON.stringify(job));
+      return job;
+    };
+    window.api.configureAutomationProbe({ paused: false, addResult: { added: 1 } });
+    const automationCollisionEvaluation = await evaluateAutomationCandidates([automationCollisionFile], { dryRun: false, trigger: 'watcher' });
+    const automationCollisionResult = await applyAutomationEvaluation(automationCollisionEvaluation);
+    createAutomationPreviewJob = originalCreateAutomationPreviewJobForCollision;
+    const automationCollision = await summarizeCollisionPath(automationCollisionJobs, {
+      ok: automationCollisionResult.ok,
+      error: automationCollisionResult.error,
+      admitted: automationCollisionResult.admittedFiles.map(file => file.name)
+    }, automationCollisionBefore);
+    uploading = false;
+    const collisionAdmission = { active: activeCollision, manual: manualCollision, automation: automationCollision };
+
     configureAtomicState(0);
     selectedFiles = [];
     config.globalSettings.folderMonitor.autoStart = true;
@@ -1371,7 +1502,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -1948,6 +2079,42 @@ app.whenReady().then(async () => {
           'vidmoly.me': 'skipped',
           'byse.sx': 'queued'
         }
+      }
+    });
+    assert.deepEqual(result.automationPipeline.collisionResolver, {
+      clean: {
+        consistent: false,
+        added: ['resolver-unique.mkv'],
+        already: [],
+        skipped: [],
+        unconfirmed: ['resolver-duplicate-a.mkv', 'resolver-duplicate-b.mkv', 'resolver-missing.mkv']
+      },
+      hostile: {
+        consistent: false,
+        added: [],
+        already: [],
+        skipped: [],
+        unconfirmed: ['resolver-duplicate-a.mkv', 'resolver-duplicate-b.mkv', 'resolver-missing.mkv', 'resolver-unique.mkv']
+      }
+    });
+    assert.deepEqual(result.automationPipeline.collisionAdmission, {
+      active: {
+        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
+        sentIds: ['active-unique'],
+        statuses: ['preview', 'preview', 'preview', 'queued'],
+        invalidRestored: [true, true, true]
+      },
+      manual: {
+        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.' },
+        sentIds: ['manual-unique'],
+        statuses: ['preview', 'preview', 'preview', 'queued'],
+        invalidRestored: [true, true, true]
+      },
+      automation: {
+        result: { ok: false, error: 'Jobs konnten nicht eindeutig bestätigt werden.', admitted: [] },
+        sentIds: ['automation-unique'],
+        statuses: ['preview', 'preview', 'preview', 'queued'],
+        invalidRestored: [true, true, true]
       }
     });
     assert.deepEqual(result.automationPipeline.pauseBetweenApplyAndStart, {
