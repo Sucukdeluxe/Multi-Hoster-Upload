@@ -81,6 +81,9 @@ let automationProbe = {
   saveSettingsError: '',
   testScanError: '',
   deferTestScan: false,
+  deferInspect: false,
+  activeInspections: 0,
+  maxConcurrentInspections: 0,
   dryScan: { files: [], reachable: true, trigger: 'test' },
   readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
   mutationCalls: [],
@@ -184,6 +187,9 @@ contextBridge.exposeInMainWorld('api', {
       saveSettingsError: String(value.saveSettingsError || ''),
       testScanError: String(value.testScanError || ''),
       deferTestScan: value.deferTestScan === true,
+      deferInspect: value.deferInspect === true,
+      activeInspections: 0,
+      maxConcurrentInspections: 0,
       dryScan: value.dryScan || { files: [], reachable: true, trigger: 'test' },
       readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
       mutationCalls: [],
@@ -194,13 +200,17 @@ contextBridge.exposeInMainWorld('api', {
   getAutomationProbeState() {
     return {
       readCalls: { ...automationProbe.readCalls },
+      activeInspections: automationProbe.activeInspections,
+      maxConcurrentInspections: automationProbe.maxConcurrentInspections,
       mutationCalls: automationProbe.mutationCalls.map(value => [...value]),
       logs: [...automationProbe.logs],
       savedSettings: automationProbe.savedSettings.map(value => JSON.parse(JSON.stringify(value)))
     };
   },
-  inspectImportFiles(entries, existingPaths) {
+  async inspectImportFiles(entries, existingPaths) {
     automationProbe.readCalls.inspect++;
+    automationProbe.activeInspections++;
+    automationProbe.maxConcurrentInspections = Math.max(automationProbe.maxConcurrentInspections, automationProbe.activeInspections);
     const candidates = Array.isArray(entries) ? entries : [];
     const normalize = value => String(value || '').replace(/\\\\/g, '/').toLowerCase();
     const seen = new Set((Array.isArray(existingPaths) ? existingPaths : []).map(normalize));
@@ -216,7 +226,9 @@ contextBridge.exposeInMainWorld('api', {
     }
     const unavailable = unique.filter(entry => entry?.unavailable).map(entry => ({ ...entry, reason: 'unreadable' }));
     const accepted = unique.filter(entry => !entry?.unavailable).map(entry => ({ ...entry }));
-    return Promise.resolve({
+    if (automationProbe.deferInspect) await new Promise(resolve => setTimeout(resolve, 5));
+    automationProbe.activeInspections--;
+    return {
       candidateCount: candidates.length,
       duplicateCount: duplicates.length,
       unavailableCount: unavailable.length,
@@ -224,7 +236,7 @@ contextBridge.exposeInMainWorld('api', {
       accepted,
       duplicates,
       unavailable
-    });
+    };
   },
   getHistory() {
     automationProbe.readCalls.history++;
@@ -805,12 +817,75 @@ contextBridge.exposeInMainWorld('api', {
       handleFolderMonitorFiles([{ ...parallelFile, path: 'C:\\\\watch\\\\PARALLEL.mkv' }])
     ]);
     const parallelAdmission = {
-      admittedFiles: parallelResults.flatMap(result => result.admittedFiles.map(file => file.name)),
+      admittedFiles: [...new Set(parallelResults.flatMap(result => result.admittedFiles.map(file => file.name)))],
       matchingJobs: queueJobs.filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(parallelFile.path)).length,
       matchingPaths: [...new Set(queueJobs
         .filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(parallelFile.path))
         .map(job => normalizeAutomationPath(job.file)))],
       queuedTelemetry: config.globalSettings.folderMonitor.telemetry.queued
+    };
+    configureAtomicState(18);
+    config.globalSettings.folderMonitor.queueLimitJobs = 20;
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.autoStart = false;
+    hosterSettings = {};
+    const distinctFiles = Array.from({ length: 20 }, (_, index) => ({
+      path: 'C:\\\\distinct\\\\distinct-' + String(index).padStart(3, '0') + '.mkv',
+      name: 'distinct-' + String(index).padStart(3, '0') + '.mkv',
+      size: 1,
+      mtimeMs: index
+    }));
+    window.api.configureAutomationProbe({ paused: false, deferInspect: true });
+    await Promise.all(distinctFiles.map(file => handleFolderMonitorFiles([file])));
+    const distinctProbe = await window.api.getAutomationProbeState();
+    const distinctTelemetry = config.globalSettings.folderMonitor.telemetry;
+    const distinctParallel = {
+      inspectCalls: distinctProbe.readCalls.inspect,
+      maxConcurrentInspections: distinctProbe.maxConcurrentInspections,
+      capacityJobs: window.AutomationControl.countAutomaticQueueJobs(queueJobs),
+      distinctJobs: queueJobs.filter(job => job.file.startsWith('C:\\\\distinct\\\\')).length,
+      detected: distinctTelemetry.detected,
+      queued: distinctTelemetry.queued,
+      deferred: distinctTelemetry.deferred,
+      lastDetectedName: distinctTelemetry.lastDetectedName
+    };
+    configureAtomicState(14999);
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.autoStart = false;
+    hosterSettings = { 'doodstream.com': { maxSizeMb: 2 } };
+    const reasonCandidates = [
+      { path: 'C:\\\\reasons\\\\admitted.mkv', name: 'admitted.mkv', size: 1, mtimeMs: 1, filterMatched: true },
+      { path: 'C:\\\\reasons\\\\deferred.mkv', name: 'deferred.mkv', size: 1, mtimeMs: 2, filterMatched: true },
+      { path: 'C:\\\\reasons\\\\filtered.txt', name: 'filtered.txt', size: 1, mtimeMs: 3, filterMatched: false },
+      { path: 'C:\\\\reasons\\\\processed.mkv', name: 'processed.mkv', size: 1, mtimeMs: 4, filterMatched: true },
+      { path: 'C:\\\\reasons\\\\inspection-duplicate.mkv', name: 'inspection-duplicate.mkv', size: 1, mtimeMs: 5, filterMatched: true },
+      { path: 'C:\\\\reasons\\\\unavailable.mkv', name: 'unavailable.mkv', size: 1, mtimeMs: 6, filterMatched: true, unavailable: true },
+      { path: 'C:\\\\reasons\\\\size-limited.mkv', name: 'size-limited.mkv', size: 3 * 1024 * 1024, mtimeMs: 7, filterMatched: true }
+    ];
+    _pendingFiles = [reasonCandidates[4]];
+    window.api.configureAutomationProbe({
+      paused: false,
+      history: [{ files: [{ path: reasonCandidates[3].path, name: reasonCandidates[3].name, results: [{ hoster: 'doodstream.com', status: 'done' }] }] }]
+    });
+    const reasonEvaluation = await evaluateAutomationCandidates(reasonCandidates, { dryRun: false, trigger: 'watcher' });
+    const reasonResult = await applyAutomationEvaluation(reasonEvaluation);
+    const reasonCounts = {};
+    for (const entry of reasonEvaluation.classifications || []) reasonCounts[entry.reason] = (reasonCounts[entry.reason] || 0) + 1;
+    const disjointClassification = {
+      summary: reasonEvaluation.summary,
+      reasonCounts,
+      classificationCount: reasonEvaluation.classifications?.length || 0,
+      telemetryDelta: reasonEvaluation.telemetryDelta,
+      applied: {
+        admitted: reasonResult.admittedFiles.map(file => file.name),
+        deferred: reasonResult.deferredFiles.map(file => file.name)
+      },
+      telemetry: {
+        detected: config.globalSettings.folderMonitor.telemetry.detected,
+        queued: config.globalSettings.folderMonitor.telemetry.queued,
+        skipped: config.globalSettings.folderMonitor.telemetry.skipped,
+        deferred: config.globalSettings.folderMonitor.telemetry.deferred
+      }
     };
     const atomicCandidates = [
       { path: 'C:\\\\watch\\\\a.mkv', name: 'a.mkv', size: 1024 * 1024, mtimeMs: 1, filterMatched: true },
@@ -833,6 +908,8 @@ contextBridge.exposeInMainWorld('api', {
       queued: config.globalSettings.folderMonitor.telemetry.queued,
       currentJobCount: window.AutomationControl.countAutomaticQueueJobs(queueJobs),
       unplannedJobs: queueJobs.filter(job => job.fileName === 'unplanned.mkv').length,
+      manualJobHosters: queueJobs.filter(job => job.fileName === 'unplanned.mkv').map(job => job.hoster),
+      automationJobHosters: queueJobs.filter(job => job.file === atomicCandidates[1].path).map(job => job.hoster).sort(),
       selectedHostersAfterApply,
       manualSelectionFilesAfterApply,
       plannedHostsBeforeRebuild,
@@ -1802,7 +1879,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, distinctParallel, disjointClassification, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const automationControlCenterScript = `(async () => {
     const waitFor = async predicate => {
@@ -1820,6 +1897,7 @@ contextBridge.exposeInMainWorld('api', {
       folderPath: 'C:\\\\watch',
       lastScanAt: fixedNow - 60000,
       startedAt: fixedNow - 3600000,
+      nextReconcileAt: fixedNow + 123456,
       error: ''
     };
     setUiLanguage('de');
@@ -1882,8 +1960,17 @@ contextBridge.exposeInMainWorld('api', {
       queueLimitMin: queueLimitInput?.min || null,
       intervalDefault: intervalInput?.value || null,
       intervalOptions: [...(intervalInput?.options || [])].map(option => option.value),
-      snapshotFrozen: Object.isFrozen(createAutomationStatusSnapshot()) && Object.isFrozen(createAutomationStatusSnapshot().telemetry)
+      snapshotFrozen: Object.isFrozen(createAutomationStatusSnapshot()) && Object.isFrozen(createAutomationStatusSnapshot().telemetry),
+      startedAt: createAutomationStatusSnapshot().startedAt,
+      nextReconcileAt: createAutomationStatusSnapshot().nextReconcileAt
     };
+    applyAutomationRuntimeStatus({ ...runtimeStatus, startedAt: null, nextReconcileAt: null });
+    const missingMainTimes = createAutomationStatusSnapshot();
+    const noRendererTimeEstimate = {
+      startedAt: missingMainTimes.startedAt,
+      nextReconcileAt: missingMainTimes.nextReconcileAt
+    };
+    applyAutomationRuntimeStatus(runtimeStatus);
     if (queueLimitInput) {
       queueLimitInput.value = '0';
       queueLimitInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1908,6 +1995,24 @@ contextBridge.exposeInMainWorld('api', {
       renderAutomationStatusSnapshot(baseSnapshot);
     }
     const originalSnapshotFactory = createAutomationStatusSnapshot;
+    const finiteQueueSnapshot = originalSnapshotFactory();
+    renderAutomationStatusSnapshot(Object.freeze({ ...finiteQueueSnapshot, queueLimitJobs: 0, availableSlots: null }));
+    const unlimitedQueueAria = {
+      now: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuenow'),
+      max: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuemax'),
+      text: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuetext')
+    };
+    renderAutomationStatusSnapshot(finiteQueueSnapshot);
+    const finiteQueueAria = {
+      now: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuenow'),
+      max: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuemax'),
+      text: document.getElementById('automationQueueMeterTrack')?.getAttribute('aria-valuetext')
+    };
+    setUiLanguage('en');
+    renderAutomationStatusSnapshot(Object.freeze({ ...finiteQueueSnapshot, state: 'error', error: 'Ordnerscan fehlgeschlagen' }));
+    const localizedStatusError = document.getElementById('automationLastError')?.textContent.trim() || '';
+    setUiLanguage('de');
+    renderAutomationStatusSnapshot(finiteQueueSnapshot);
     let snapshotCalls = 0;
     const pausedSnapshot = Object.freeze({
       ...originalSnapshotFactory(),
@@ -2089,7 +2194,7 @@ contextBridge.exposeInMainWorld('api', {
       enabledAfterCancel,
       lateResultStayedClosed: document.getElementById('automationTestOverlay')?.style.display === 'none'
     };
-    return { initial, states, pausedControls, pauseResumeActions, loading, completed, english, closed, errorState, cancelLoading };
+    return { initial, noRendererTimeEstimate, states, unlimitedQueueAria, finiteQueueAria, localizedStatusError, pausedControls, pauseResumeActions, loading, completed, english, closed, errorState, cancelLoading };
   })()`;
   const automationControlCenterLayoutScript = `(() => {
     const card = document.getElementById('automationStatusCard');
@@ -2545,6 +2650,49 @@ app.whenReady().then(async () => {
       matchingPaths: ['c:/watch/parallel.mkv'],
       queuedTelemetry: 1
     });
+    assert.deepEqual(result.automationPipeline.distinctParallel, {
+      inspectCalls: 3,
+      maxConcurrentInspections: 1,
+      capacityJobs: 20,
+      distinctJobs: 2,
+      detected: 20,
+      queued: 2,
+      deferred: 18,
+      lastDetectedName: 'distinct-019.mkv'
+    });
+    assert.deepEqual(result.automationPipeline.disjointClassification, {
+      summary: {
+        found: 7,
+        filterMatched: 6,
+        alreadyProcessed: 2,
+        unavailable: 1,
+        sizeLimitedJobs: 1,
+        acceptedFiles: 2,
+        selectedTargets: 1,
+        resultingJobs: 2,
+        availableSlots: 1,
+        deferredFiles: 1
+      },
+      reasonCounts: {
+        admitted: 1,
+        deferred: 1,
+        'filter-rejected': 1,
+        processed: 1,
+        'inspection-duplicate': 1,
+        unavailable: 1,
+        'size-limited': 1
+      },
+      classificationCount: 7,
+      telemetryDelta: {
+        detected: 7,
+        queued: 1,
+        skipped: 5,
+        deferred: 1,
+        lastDetectedName: 'size-limited.mkv'
+      },
+      applied: { admitted: ['admitted.mkv'], deferred: ['deferred.mkv'] },
+      telemetry: { detected: 7, queued: 1, skipped: 5, deferred: 1 }
+    });
     assert.deepEqual(result.automationPipeline.manualHostTransactional, {
       readFailure: {
         result: { ok: false, error: 'Automatische Aufnahme konnte nicht abgeschlossen werden.' },
@@ -2569,8 +2717,10 @@ app.whenReady().then(async () => {
       admittedFiles: ['b.mkv'],
       deferred: 1,
       queued: 1,
-      currentJobCount: 15000,
-      unplannedJobs: 0,
+      currentJobCount: 15001,
+      unplannedJobs: 1,
+      manualJobHosters: ['clouddrop.cc'],
+      automationJobHosters: ['byse.sx', 'vidmoly.me'],
       selectedHostersAfterApply: ['clouddrop.cc'],
       manualSelectionFilesAfterApply: ['unplanned.mkv'],
       plannedHostsBeforeRebuild: ['byse.sx', 'vidmoly.me'],
@@ -2578,7 +2728,7 @@ app.whenReady().then(async () => {
     });
     assert.deepEqual(result.automationPipeline.status, {
       state: 'queue-limited',
-      currentJobCount: 15000,
+      currentJobCount: 15001,
       availableSlots: 0,
       queueLimited: true,
       frozen: true
@@ -2842,15 +2992,15 @@ app.whenReady().then(async () => {
     assert.deepEqual(result.automationPipeline.fulfilledFeedback, {
       watcherWarning: {
         result: { ok: false, warning: 'Telemetrie konnte nicht gespeichert werden.', error: null },
-        feedback: ['Telemetrie konnte nicht gespeichert werden.']
+        feedback: ['Telemetry could not be saved.']
       },
       watcherError: {
         result: { ok: false, warning: null, error: 'Jobs konnten nicht hinzugefügt werden.' },
-        feedback: ['Jobs konnten nicht hinzugefügt werden.']
+        feedback: ['Jobs could not be added.']
       },
       modalWarning: {
         result: { ok: false, warning: 'Telemetrie konnte nicht gespeichert werden.', error: null },
-        feedback: ['Telemetrie konnte nicht gespeichert werden.'],
+        feedback: ['Telemetry could not be saved.'],
         pending: 0,
         markers: 0,
         modalOpen: false,
@@ -2919,6 +3069,9 @@ app.whenReady().then(async () => {
     assert.equal(result.automationControlCenter.initial.intervalDefault, '5');
     assert.deepEqual(result.automationControlCenter.initial.intervalOptions, ['1', '5', '15', '30', '60']);
     assert.equal(result.automationControlCenter.initial.snapshotFrozen, true);
+    assert.equal(result.automationControlCenter.initial.startedAt, 1787709000000);
+    assert.equal(result.automationControlCenter.initial.nextReconcileAt, 1787712723456);
+    assert.deepEqual(result.automationControlCenter.noRendererTimeEstimate, { startedAt: null, nextReconcileAt: null });
     assert.deepEqual(result.automationControlCenter.states, [
       { state: 'inactive', expectedLabel: 'Inaktiv', text: 'Inaktiv', classApplied: true },
       { state: 'active', expectedLabel: 'Aktiv', text: 'Aktiv', classApplied: true },
@@ -2927,6 +3080,9 @@ app.whenReady().then(async () => {
       { state: 'disconnected', expectedLabel: 'Ordner getrennt', text: 'Ordner getrennt', classApplied: true },
       { state: 'error', expectedLabel: 'Fehler', text: 'Fehler', classApplied: true }
     ]);
+    assert.deepEqual(result.automationControlCenter.unlimitedQueueAria, { now: null, max: null, text: '8.420 / Unbegrenzt' });
+    assert.deepEqual(result.automationControlCenter.finiteQueueAria, { now: '8420', max: '15000', text: '8.420 / 15.000' });
+    assert.equal(result.automationControlCenter.localizedStatusError, 'Folder scan failed');
     assert.deepEqual(result.automationControlCenter.pausedControls, {
       snapshotCalls: 1,
       pauseButtonDisabled: false,
@@ -3393,6 +3549,7 @@ test('persisted automation pause survives runtime restart and resumes one reconc
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('restartProbe', {
   status: () => ipcRenderer.invoke('automation:get-status'),
+  testScan: () => ipcRenderer.invoke('folder-monitor:test-scan'),
   startMonitor: settings => ipcRenderer.invoke('folder-monitor:start', settings),
   reconcile: () => ipcRenderer.invoke('folder-monitor:reconcile'),
   start: job => ipcRenderer.invoke('start-upload', { files: [], hosters: [], jobs: [job] }),
@@ -3421,6 +3578,7 @@ contextBridge.exposeInMainWorld('restartProbe', {
     status: 'preview'
   };
   const initial = await window.restartProbe.status();
+  const testScan = await window.restartProbe.testScan();
   const monitorStart = await window.restartProbe.startMonitor({ folderPath: 'C:\\\\blocked' });
   const reconcile = await captureFailure(() => window.restartProbe.reconcile());
   const start = await window.restartProbe.start(preview);
@@ -3443,6 +3601,7 @@ contextBridge.exposeInMainWorld('restartProbe', {
   const final = await window.restartProbe.counters();
   window.__automationRestartResult = {
     initial,
+    testScan,
     monitorStart,
     reconcile,
     start,
@@ -3467,6 +3626,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ConfigStore = require(${JSON.stringify(path.join(projectRoot, 'lib', 'config-store.js'))});
 const FolderMonitor = require(${JSON.stringify(path.join(projectRoot, 'lib', 'folder-monitor.js'))});
+const { normalizeAutomationSettings } = require(${JSON.stringify(path.join(projectRoot, 'lib', 'automation-control.js'))});
 const outputPath = process.env.MHU_AUTOMATION_OUTPUT;
 const rendererPath = process.env.MHU_AUTOMATION_RENDERER;
 const preloadPath = process.env.MHU_AUTOMATION_PRELOAD;
@@ -3650,18 +3810,23 @@ ${startupAutomation}
     });
     assert.equal(outcome.result.error, undefined);
     assert.equal(outcome.result.initial.paused, true);
+    assert.equal(outcome.result.testScan.reachable, true);
+    assert.equal(outcome.result.testScan.trigger, 'test');
+    assert.equal(outcome.result.testScan.files.length, 1);
+    assert.equal(outcome.result.testScan.files[0].name, 'manual-preview.mkv');
     assert.deepEqual(outcome.result.monitorStart, { error: 'Automatik ist pausiert' });
-    assert.equal(outcome.result.reconcile.ok, false);
+    assert.equal(outcome.result.reconcile.ok, true);
+    assert.deepEqual(outcome.result.reconcile.value, { error: 'Automatik ist pausiert' });
     assert.deepEqual(outcome.result.start, { error: 'Automatik ist pausiert' });
     assert.deepEqual(outcome.result.extend, { error: 'Automatik ist pausiert' });
     assert.equal(outcome.result.previewStatus, 'preview');
     assert.equal(outcome.result.beforeResume.watcherStarts, 0);
     assert.equal(outcome.result.beforeResume.intervalCount, 0);
-    assert.equal(outcome.result.beforeResume.walkCalls, 0);
+    assert.equal(outcome.result.beforeResume.walkCalls, 1);
     assert.equal(outcome.result.resume.paused, false);
     assert.equal(outcome.result.afterResume.watcherStarts, 1);
     assert.equal(outcome.result.afterResume.intervalCount, 1);
-    assert.equal(outcome.result.afterResume.walkCalls, 1);
+    assert.equal(outcome.result.afterResume.walkCalls, 2);
     assert.equal(outcome.result.afterResume.newFileEvents, 1);
     assert.equal(outcome.result.afterResume.addJobsCalls, 0);
     assert.equal(outcome.result.afterResume.startBatchCalls, 0);
@@ -3673,7 +3838,7 @@ ${startupAutomation}
     assert.equal(outcome.result.final.finishCalls, 1);
     assert.equal(outcome.result.final.watcherCloseCalls, 1);
     assert.equal(outcome.result.final.intervalCount, 0);
-    assert.equal(outcome.result.final.walkCalls, 1);
+    assert.equal(outcome.result.final.walkCalls, 2);
     assert.equal(outcome.result.final.configPaused, true);
     assert.equal(outcome.result.final.monitor.paused, true);
     assert.equal(outcome.result.final.monitor.running, false);
@@ -3685,6 +3850,7 @@ ${startupAutomation}
 test('real app resume keeps the ConfigStore-restored manual preview byte-identical without starting work', { skip: process.platform !== 'win32' }, () => {
   const projectRoot = path.join(__dirname, '..');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-real-resume-e2e-'));
+  try {
   const appRoot = path.join(probeRoot, 'app');
   const userDataPath = path.join(probeRoot, 'user-data');
   const outputPath = path.join(probeRoot, 'result.json');
@@ -3820,7 +3986,6 @@ async function waitFor(read, timeoutMs = 20000) {
 });
 `;
   fs.writeFileSync(probePath, probeSource, 'utf8');
-  try {
     const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
     const probeEnvironment = {
       ...process.env,

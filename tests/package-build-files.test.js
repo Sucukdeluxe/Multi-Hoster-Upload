@@ -45,6 +45,8 @@ function createAutomationLifecycleHarness(mainSource) {
   const saves = [];
   const pauseDeferred = createDeferred();
   const resumeDeferred = createDeferred();
+  const configuredSettings = [];
+  const startedSettings = [];
   let publishStatus = () => {};
   let state = {
     globalSettings: {
@@ -60,9 +62,22 @@ function createAutomationLifecycleHarness(mainSource) {
   };
   const folderMonitor = new (require('node:events').EventEmitter)();
   folderMonitor.running = false;
-  folderMonitor.status = () => ({ running: folderMonitor.running, reachable: true });
+  folderMonitor.status = () => ({ running: folderMonitor.running, reachable: true, startedAt: 100, nextReconcileAt: 200 });
   folderMonitor.stop = () => { folderMonitor.running = false; order.push('stop'); };
-  folderMonitor.start = () => { folderMonitor.running = true; order.push('start'); publishStatus(); return {}; };
+  folderMonitor.configure = settings => {
+    configuredSettings.push(structuredClone(settings));
+    folderMonitor.running = false;
+    order.push('configure');
+    publishStatus();
+    return { includesExisting: false, paused: true };
+  };
+  folderMonitor.start = settings => {
+    startedSettings.push(structuredClone(settings));
+    folderMonitor.running = true;
+    order.push('start');
+    publishStatus();
+    return {};
+  };
   folderMonitor.pause = () => {
     order.push('pause');
     publishStatus();
@@ -80,7 +95,10 @@ function createAutomationLifecycleHarness(mainSource) {
       return { reachable: true };
     });
   };
-  folderMonitor.scan = async () => ({ reachable: true });
+  folderMonitor.scan = async options => {
+    order.push(`scan:${options.trigger}:${options.emitFiles}`);
+    return { reachable: true, trigger: options.trigger };
+  };
   const configStore = {
     load: () => structuredClone(state),
     save: config => {
@@ -101,6 +119,7 @@ function createAutomationLifecycleHarness(mainSource) {
     dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
     folderMonitor,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    normalizeAutomationSettings: require('../lib/automation-control').normalizeAutomationSettings,
     path,
     safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
     uploadManager
@@ -109,11 +128,17 @@ function createAutomationLifecycleHarness(mainSource) {
   publishStatus = () => context.publishAutomationStatus();
   return {
     handlers,
+    configuredSettings,
+    context,
     order,
     pauseDeferred,
     resumeDeferred,
     saves,
     sent,
+    setFolderMonitorState(value) {
+      state.globalSettings.folderMonitor = { ...state.globalSettings.folderMonitor, ...value };
+    },
+    startedSettings,
     state: () => structuredClone(state),
     publishStatus
   };
@@ -422,6 +447,7 @@ test('automation pause save commits before lifecycle effects and save failure is
   folderMonitor.running = true;
   folderMonitor.status = () => ({ running: folderMonitor.running, paused: !folderMonitor.running, reachable: true });
   folderMonitor.stop = () => { folderMonitor.running = false; order.push('stop'); };
+  folderMonitor.configure = () => { folderMonitor.running = false; order.push('configure'); return { paused: true }; };
   folderMonitor.start = () => { folderMonitor.running = true; order.push('start'); folderMonitor.emit('status'); return {}; };
   folderMonitor.pause = async () => { folderMonitor.running = false; order.push('pause'); folderMonitor.emit('status'); };
   folderMonitor.resume = async () => { folderMonitor.running = true; order.push('resume'); folderMonitor.emit('status'); return { reachable: true }; };
@@ -458,6 +484,7 @@ test('automation pause save commits before lifecycle effects and save failure is
     dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
     folderMonitor,
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    normalizeAutomationSettings: require('../lib/automation-control').normalizeAutomationSettings,
     path,
     safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
     uploadManager
@@ -486,7 +513,7 @@ test('automation pause save commits before lifecycle effects and save failure is
   state.globalSettings.folderMonitor.pausedAt = 1;
   folderMonitor.running = false;
   await handlers.get('automation:resume')();
-  assert.deepEqual(order, ['save:false', 'resume']);
+  assert.deepEqual(order, ['resume', 'save:false', 'scan:resume:true']);
   assert.equal(order.includes('startBatch'), false);
   assert.equal(sent.length, 1);
   assert.equal(sent[0][1].paused, false);
@@ -504,15 +531,15 @@ test('automation lifecycle serializes pause then resume so the newer intent wins
   harness.saves[0].deferred.resolve();
   await flushMicrotasks();
   harness.pauseDeferred.resolve();
+  await waitForCondition(() => harness.order.includes('resume'));
+  harness.resumeDeferred.resolve();
   await waitForCondition(() => harness.saves.length === 2);
   assert.equal(harness.saves.length, 2);
   assert.equal(harness.saves[1].paused, false);
   harness.saves[1].deferred.resolve();
-  await flushMicrotasks();
-  harness.resumeDeferred.resolve();
   await Promise.all([pause, resume]);
 
-  assert.deepEqual(harness.order, ['save:true', 'pause', 'finish', 'save:false', 'resume']);
+  assert.deepEqual(harness.order, ['save:true', 'pause', 'finish', 'resume', 'save:false', 'scan:resume:true']);
   assert.equal(harness.state().globalSettings.folderMonitor.paused, false);
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0][1].paused, false);
@@ -525,11 +552,12 @@ test('automation lifecycle serializes resume then pause so the newer intent wins
   const resume = harness.handlers.get('automation:resume')();
   const pause = harness.handlers.get('automation:pause-after-active')();
 
-  assert.equal(harness.saves.length, 1);
+  assert.equal(harness.saves.length, 0);
+  assert.deepEqual(harness.order, ['resume']);
+  harness.resumeDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 1);
   assert.equal(harness.saves[0].paused, false);
   harness.saves[0].deferred.resolve();
-  await flushMicrotasks();
-  harness.resumeDeferred.resolve();
   await waitForCondition(() => harness.saves.length === 2);
   assert.equal(harness.saves.length, 2);
   assert.equal(harness.saves[1].paused, true);
@@ -538,7 +566,7 @@ test('automation lifecycle serializes resume then pause so the newer intent wins
   harness.pauseDeferred.resolve();
   await Promise.all([resume, pause]);
 
-  assert.deepEqual(harness.order, ['save:false', 'resume', 'save:true', 'pause', 'finish']);
+  assert.deepEqual(harness.order, ['resume', 'save:false', 'scan:resume:true', 'save:true', 'pause', 'finish']);
   assert.equal(harness.state().globalSettings.folderMonitor.paused, true);
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0][1].paused, true);
@@ -553,14 +581,14 @@ test('automation status suppression remains active until the serialized operatio
   harness.saves[0].deferred.resolve();
   await waitForCondition(() => harness.order.includes('pause'));
   harness.pauseDeferred.resolve();
-  await waitForCondition(() => harness.saves.length === 2);
+  await waitForCondition(() => harness.order.includes('resume'));
   harness.publishStatus();
 
   assert.equal(harness.sent.length, 0);
 
-  harness.saves[1].deferred.resolve();
-  await waitForCondition(() => harness.order.includes('resume'));
   harness.resumeDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 2);
+  harness.saves[1].deferred.resolve();
   await Promise.all([pause, resume]);
 
   assert.equal(harness.sent.length, 1);
@@ -583,6 +611,62 @@ test('automation pause rejection still finishes active uploads and returns a san
   assert.equal(harness.order.includes('finish'), true);
   assert.equal(harness.sent.length, 1);
   assert.equal(JSON.stringify(harness.sent[0][1]).includes('secret-value'), false);
+});
+
+test('every folder monitor start obeys current persisted pause and active activation reconciles exactly once', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+  const settings = { folderPath: 'C:\\watch', enabled: true, paused: false, reconcileIntervalMinutes: '1' };
+
+  const pausedResult = await harness.handlers.get('folder-monitor:start')(null, settings);
+  assert.deepEqual({ ...pausedResult }, { error: 'Automatik ist pausiert' });
+  assert.deepEqual(harness.order, ['configure']);
+  assert.equal(harness.configuredSettings[0].reconcileIntervalMinutes, 5);
+
+  harness.order.length = 0;
+  harness.setFolderMonitorState({ paused: false, pausedAt: null, reconcileIntervalMinutes: '1' });
+  const activeResult = await harness.handlers.get('folder-monitor:start')(null, settings);
+  assert.deepEqual({ ...activeResult }, { ok: true, includesExisting: false });
+  assert.deepEqual(harness.order, ['start', 'scan:startup:true']);
+  assert.equal(harness.startedSettings[0].reconcileIntervalMinutes, 5);
+  const status = harness.handlers.get('automation:get-status')();
+  assert.equal(status.reconcileIntervalMinutes, 5);
+  assert.equal(status.startedAt, 100);
+  assert.equal(status.nextReconcileAt, 200);
+});
+
+test('resume keeps pause authoritative until monitor success and restores the previous pause after rejection', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+  let settled = false;
+  const resume = harness.handlers.get('automation:resume')();
+  const outcome = resume.then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+  await flushMicrotasks();
+  const pendingState = harness.state().globalSettings.folderMonitor;
+  const savesBeforeResolution = harness.saves.length;
+  const orderBeforeResolution = [...harness.order];
+  if (harness.saves[0]) harness.saves[0].deferred.resolve();
+  await waitForCondition(() => harness.order.includes('resume'));
+  harness.resumeDeferred.reject(new Error('token=resume-secret'));
+  for (let attempt = 0; attempt < 50 && !settled; attempt++) {
+    for (const save of harness.saves) save.deferred.resolve();
+    await Promise.resolve();
+  }
+  const result = await outcome;
+
+  assert.equal(savesBeforeResolution, 0);
+  assert.deepEqual(orderBeforeResolution, ['resume']);
+  assert.equal(pendingState.paused, true);
+  assert.equal(pendingState.pausedAt, 1);
+  assert.equal(result.error, undefined);
+  assert.equal(result.value.error, 'Automatik konnte nicht fortgesetzt werden');
+  assert.equal(result.value.paused, true);
+  assert.equal(result.value.pausedAt, 1);
+  assert.deepEqual(harness.saves.map(save => save.paused), [true]);
+  assert.deepEqual(harness.order, ['resume', 'stop', 'configure', 'save:true']);
+  assert.equal(harness.state().globalSettings.folderMonitor.paused, true);
+  assert.equal(harness.state().globalSettings.folderMonitor.pausedAt, 1);
+  assert.equal(JSON.stringify(result.value).includes('resume-secret'), false);
 });
 
 test('prepared upload start waits for the final tick and clears recovery when pause wins', async () => {
@@ -728,7 +812,8 @@ test('startup keeps a missing configured folder disconnected without disabling a
   assert.notEqual(startupEnd, -1);
   const startup = mainSource.slice(startupStart, startupEnd);
 
-  assert.match(startup, /fm\s*&&\s*fm\.enabled\s*&&\s*fm\.folderPath\s*&&\s*fm\.paused\s*!==\s*true[\s\S]*?startFolderMonitor\(fm\)/u);
-  assert.match(startup, /startFolderMonitor\(fm\);[\s\S]*?!fs\.existsSync\(fm\.folderPath\)[\s\S]*?folderMonitor\.scan\(\{\s*emitFiles:\s*true,\s*trigger:\s*'startup'\s*\}\)/u);
+  assert.match(startup, /fm\s*&&\s*fm\.enabled\s*&&\s*fm\.folderPath[\s\S]*?await startFolderMonitor\(fm\)/u);
+  assert.doesNotMatch(startup, /fm\.paused\s*!==\s*true/u);
+  assert.doesNotMatch(startup, /folderMonitor\.scan\(\{\s*emitFiles:\s*true,\s*trigger:\s*'startup'\s*\}\)/u);
   assert.doesNotMatch(startup, /folderMonitor:\s*\{\s*\.\.\.fm,\s*enabled:\s*false\s*\}/u);
 });

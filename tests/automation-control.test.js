@@ -37,7 +37,7 @@ test('automation settings normalize invalid limits intervals and pause timestamp
     pausedAt: 1700
   }), {
     queueLimitJobs: 42,
-    reconcileIntervalMinutes: 15,
+    reconcileIntervalMinutes: 5,
     paused: false,
     pausedAt: null
   });
@@ -47,6 +47,7 @@ test('automation settings normalize invalid limits intervals and pause timestamp
     paused: false,
     pausedAt: null
   });
+  assert.equal(normalizeAutomationSettings({ reconcileIntervalMinutes: 15 }).reconcileIntervalMinutes, 15);
 });
 
 test('automation settings allow only numeric and trimmed string zero to disable the queue limit', () => {
@@ -236,6 +237,37 @@ test('telemetry deltas increment counters and update event details immutably', (
   });
   assert.equal(telemetry.detected, 1);
   assert.equal(telemetry.lastError, 'old');
+});
+
+test('telemetry and deltas normalize every counter to a finite nonnegative integer', () => {
+  const now = new Date(2026, 7, 26, 13, 14, 15).getTime();
+  const telemetry = rollDailyTelemetry({
+    dateKey: '2026-08-26',
+    detected: Number.POSITIVE_INFINITY,
+    queued: Number.NaN,
+    skipped: -4,
+    deferred: 3.9
+  }, now);
+  assert.deepEqual({
+    detected: telemetry.detected,
+    queued: telemetry.queued,
+    skipped: telemetry.skipped,
+    deferred: telemetry.deferred
+  }, { detected: 0, queued: 0, skipped: 0, deferred: 3 });
+
+  const changed = applyTelemetryDelta(telemetry, {
+    detected: Number.POSITIVE_INFINITY,
+    queued: Number.NaN,
+    skipped: -2,
+    deferred: 2.8
+  }, now);
+  assert.deepEqual({
+    detected: changed.detected,
+    queued: changed.queued,
+    skipped: changed.skipped,
+    deferred: changed.deferred
+  }, { detected: 0, queued: 0, skipped: 0, deferred: 5 });
+  assert.equal(Object.values(changed).filter(value => typeof value === 'number').every(value => Number.isFinite(value)), true);
 });
 
 test('pause has higher display priority than disconnect error and queue limit', () => {

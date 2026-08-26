@@ -7,6 +7,7 @@ const path = require('path');
 const {
   createInternalLogPathResolver,
   createInternalLogWriter,
+  createBufferedInternalLogFlusher,
   createUploadAuditWriter,
   getLogOpenDirectory
 } = require('../lib/upload-audit');
@@ -128,8 +129,44 @@ test('synchronous rotation flush falls back completely and retains buffered line
 test('quit flush delegates the rotation buffer to the synchronous internal writer', () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 
-  assert.match(mainSource, /_rotLogWriter\.flushSync\(_rotLogBuffer, 'rot-log'\);/);
+  assert.match(mainSource, /_rotLogFlusher\.flushSync\('rot-log'\);/);
   assert.doesNotMatch(mainSource, /appendFileSync\(getRotLogPath\(\), _rotLogBuffer\.join\(''\)/);
+});
+
+test('asynchronous rotation flush restores a failed chunk ahead of newer lines without a retry loop', async () => {
+  const buffer = ['first\n', 'second\n'];
+  const scheduled = [];
+  let resolveAppend;
+  const appendCalls = [];
+  const syncCalls = [];
+  const writer = {
+    append(value) {
+      appendCalls.push(value);
+      return new Promise(resolve => { resolveAppend = resolve; });
+    },
+    flushSync(lines) {
+      syncCalls.push([...lines]);
+      lines.length = 0;
+      return true;
+    }
+  };
+  const flusher = createBufferedInternalLogFlusher({
+    buffer,
+    writer,
+    schedule: callback => scheduled.push(callback)
+  });
+
+  const failed = flusher.flush('rot-log');
+  assert.deepEqual(buffer, []);
+  buffer.push('third\n');
+  resolveAppend(false);
+  assert.equal(await failed, false);
+  assert.deepEqual(buffer, ['first\n', 'second\n', 'third\n']);
+  assert.deepEqual(appendCalls, ['first\nsecond\n']);
+  assert.deepEqual(scheduled, []);
+  assert.equal(flusher.flushSync('rot-log'), true);
+  assert.deepEqual(syncCalls, [['first\n', 'second\n', 'third\n']]);
+  assert.deepEqual(buffer, []);
 });
 
 test('upload audit writer leaves the configured fileuploader log contract unchanged', async (t) => {

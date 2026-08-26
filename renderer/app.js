@@ -67,12 +67,15 @@ let uploading = false;
 let healthCheckRunning = false;
 let automationRuntimeStatus = Object.freeze({});
 let automationRuntimeStatusAvailable = false;
-let automationRuntimeStartedAt = null;
 let automationPauseResumeBusy = false;
 let automationTestGeneration = 0;
 let automationTestReturnFocus = null;
 let automationTestInertState = [];
 let automationTestViewState = Object.freeze({ loading: false, summary: null, error: '' });
+const automationEventBatchSize = 8;
+const automationEventQueue = new Map();
+const automationEventInFlight = new Set();
+let automationEventDrainPromise = null;
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupMutationGeneration = 0;
@@ -482,14 +485,6 @@ function automationSettings() {
 
 function applyAutomationRuntimeStatus(value) {
   const next = { ...(value || {}) };
-  const incomingStartedAt = automationTimestamp(next.startedAt);
-  const wasRunning = automationRuntimeStatus.running === true && automationRuntimeStatus.paused !== true;
-  if (next.running === true && next.paused !== true) {
-    automationRuntimeStartedAt = incomingStartedAt || (wasRunning ? automationRuntimeStartedAt : null) || Date.now();
-  } else if (incomingStartedAt) {
-    automationRuntimeStartedAt = incomingStartedAt;
-  }
-  if (automationRuntimeStartedAt) next.startedAt = automationRuntimeStartedAt;
   if (typeof next.paused === 'boolean' && config.globalSettings) {
     const folderMonitor = config.globalSettings.folderMonitor || {};
     config.globalSettings.folderMonitor = {
@@ -532,11 +527,9 @@ function createAutomationStatusSnapshot() {
     && availableSlots < configuredTargetCount;
   const telemetry = window.AutomationControl.rollDailyTelemetry(folderSettings.telemetry);
   const error = String(automationRuntimeStatus.error || automationRuntimeStatus.monitorError || telemetry.lastError || '');
-  const startedAt = automationTimestamp(automationRuntimeStatus.startedAt) || automationRuntimeStartedAt;
+  const startedAt = automationTimestamp(automationRuntimeStatus.startedAt);
   const lastReconcileAt = automationTimestamp(automationRuntimeStatus.lastScanAt);
-  const nextReconcileAt = automationRuntimeStatus.running === true && automationRuntimeStatus.paused !== true && lastReconcileAt
-    ? lastReconcileAt + normalized.reconcileIntervalMinutes * 60000
-    : null;
+  const nextReconcileAt = automationTimestamp(automationRuntimeStatus.nextReconcileAt);
   const snapshot = {
     ...automationRuntimeStatus,
     enabled: folderSettings.enabled === true,
@@ -569,6 +562,9 @@ async function evaluateAutomationCandidates(files, options = {}) {
   }
   const candidates = [...candidateMap.values()];
   const matched = candidates.filter(candidate => candidate.path && candidate.filterMatched);
+  const reasons = new Map(candidates
+    .filter(candidate => !candidate.path || !candidate.filterMatched)
+    .map(candidate => [normalizeAutomationPath(candidate.path), 'filter-rejected']));
   const folderSettings = config.globalSettings?.folderMonitor || {};
   const ownedPendingPaths = new Set((Array.isArray(options.ownedPendingPaths) ? options.ownedPendingPaths : []).map(normalizeAutomationPath));
   const selectedHosters = Array.from(new Set((Array.isArray(options.selectedHosters) ? options.selectedHosters : folderSettings.hosters || [])
@@ -585,12 +581,17 @@ async function evaluateAutomationCandidates(files, options = {}) {
     uploadLogRows: uploadLog
   });
   const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
+  for (const path of processedPaths) reasons.set(path, 'processed');
   const unprocessed = matched.filter(candidate => !processedPaths.has(normalizeAutomationPath(candidate.path)));
   const inspection = await window.api.inspectImportFiles(
     unprocessed,
     _pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
   );
   const metadata = new Map(unprocessed.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
+  const inspectionDuplicatePaths = new Set((Array.isArray(inspection?.duplicates) ? inspection.duplicates : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
+  const unavailablePaths = new Set((Array.isArray(inspection?.unavailable) ? inspection.unavailable : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
+  for (const path of inspectionDuplicatePaths) reasons.set(path, 'inspection-duplicate');
+  for (const path of unavailablePaths) reasons.set(path, 'unavailable');
   const accepted = (Array.isArray(inspection?.accepted) ? inspection.accepted : []).map(file => ({
     ...(metadata.get(normalizeAutomationPath(file?.path)) || {}),
     ...file
@@ -610,7 +611,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
   const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
   const availableSlots = normalizedSettings.queueLimitJobs === 0 ? null : Math.max(0, normalizedSettings.queueLimitJobs - currentJobCount);
   const admission = window.AutomationControl.planAtomicAdmissions({
-    candidates: plannedCandidates,
+    candidates: plannedCandidates.filter(candidate => candidate.eligibleJobCount > 0),
     currentJobCount,
     queueLimitJobs: normalizedSettings.queueLimitJobs
   });
@@ -618,14 +619,28 @@ async function evaluateAutomationCandidates(files, options = {}) {
   const deferredPaths = new Set(admission.deferredPaths.map(normalizeAutomationPath));
   const admittedFiles = plannedCandidates.filter(candidate => admittedPaths.has(normalizeAutomationPath(candidate.path)));
   const deferredFiles = plannedCandidates.filter(candidate => deferredPaths.has(normalizeAutomationPath(candidate.path)));
-  const resultingJobs = plannedCandidates.reduce((total, candidate) => total + candidate.eligibleJobCount, 0);
+  for (const candidate of plannedCandidates) {
+    const key = normalizeAutomationPath(candidate.path);
+    if (selectedHosters.length === 0) reasons.set(key, 'awaiting-host-selection');
+    else if (candidate.eligibleJobCount === 0) reasons.set(key, 'size-limited');
+    else if (admittedPaths.has(key)) reasons.set(key, 'admitted');
+    else if (deferredPaths.has(key)) reasons.set(key, 'deferred');
+  }
+  const actionableCandidates = plannedCandidates.filter(candidate => candidate.eligibleJobCount > 0);
+  const resultingJobs = actionableCandidates.reduce((total, candidate) => total + candidate.eligibleJobCount, 0);
+  const classifications = candidates.map(candidate => ({
+    path: candidate.path,
+    name: candidate.name,
+    reason: reasons.get(normalizeAutomationPath(candidate.path)) || 'unavailable'
+  }));
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'inspection-duplicate', 'unavailable', 'size-limited']);
   const summary = {
     found: candidates.length,
     filterMatched: matched.length,
-    alreadyProcessed: processed.processedPaths.length,
-    unavailable: Number(inspection?.unavailableCount) || 0,
+    alreadyProcessed: processed.processedPaths.length + inspectionDuplicatePaths.size,
+    unavailable: unavailablePaths.size,
     sizeLimitedJobs: plannedCandidates.length * selectedHosters.length - resultingJobs,
-    acceptedFiles: plannedCandidates.length,
+    acceptedFiles: selectedHosters.length === 0 ? plannedCandidates.length : actionableCandidates.length,
     selectedTargets: selectedHosters.length,
     resultingJobs,
     availableSlots,
@@ -639,15 +654,16 @@ async function evaluateAutomationCandidates(files, options = {}) {
     selectedHosters,
     ownedPendingPaths: [...ownedPendingPaths],
     candidates: plannedCandidates,
+    classifications,
     admittedFiles,
     deferredFiles,
     summary,
     telemetryDelta: {
       detected: summary.found,
       queued: admittedFiles.length,
-      skipped: summary.alreadyProcessed + summary.unavailable,
+      skipped: classifications.filter(entry => skippedReasons.has(entry.reason)).length,
       deferred: deferredFiles.length,
-      lastDetectedName: plannedCandidates.at(-1)?.name || ''
+      lastDetectedName: candidates.at(-1)?.name || ''
     }
   });
 }
@@ -740,7 +756,7 @@ async function applyAutomationEvaluation(evaluation) {
   const normalizedSettings = automationSettings();
   const currentJobCount = window.AutomationControl.countAutomaticQueueJobs(queueJobs);
   const admission = window.AutomationControl.planAtomicAdmissions({
-    candidates,
+    candidates: candidates.filter(candidate => candidate.eligibleJobCount > 0),
     currentJobCount,
     queueLimitJobs: normalizedSettings.queueLimitJobs
   });
@@ -748,12 +764,25 @@ async function applyAutomationEvaluation(evaluation) {
   const deferredPaths = new Set(admission.deferredPaths.map(normalizeAutomationPath));
   const admittedFiles = candidates.filter(candidate => admittedPaths.has(normalizeAutomationPath(candidate.path)));
   const deferredFiles = candidates.filter(candidate => deferredPaths.has(normalizeAutomationPath(candidate.path)));
+  const dynamicPaths = new Set(replannedCandidates.map(candidate => normalizeAutomationPath(candidate.path)));
+  const dynamicReasons = new Map();
+  for (const candidate of replannedCandidates) {
+    const key = normalizeAutomationPath(candidate.path);
+    if (currentPaths.has(key)) dynamicReasons.set(key, 'inspection-duplicate');
+    else if (candidate.eligibleJobCount === 0) dynamicReasons.set(key, 'size-limited');
+    else if (admittedPaths.has(key)) dynamicReasons.set(key, 'admitted');
+    else dynamicReasons.set(key, 'deferred');
+  }
+  const classifications = (evaluation.classifications || []).map(entry => dynamicPaths.has(normalizeAutomationPath(entry.path))
+    ? { ...entry, reason: dynamicReasons.get(normalizeAutomationPath(entry.path)) }
+    : entry);
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'inspection-duplicate', 'unavailable', 'size-limited']);
   const telemetryDelta = {
-    detected: evaluation.summary.found,
+    detected: classifications.length,
     queued: admittedFiles.length,
-    skipped: evaluation.summary.alreadyProcessed + evaluation.summary.unavailable,
+    skipped: classifications.filter(entry => skippedReasons.has(entry.reason)).length,
     deferred: deferredFiles.length,
-    lastDetectedName: admittedFiles.at(-1)?.name || ''
+    lastDetectedName: evaluation.telemetryDelta?.lastDetectedName || ''
   };
   if (admittedFiles.length === 0) {
     const telemetryResult = await persistAutomationTelemetry(telemetryDelta);
@@ -907,9 +936,13 @@ function renderAutomationStatusSnapshot(snapshot) {
   }
   const queueTrack = document.getElementById('automationQueueMeterTrack');
   if (queueTrack) {
-    queueTrack.setAttribute('aria-valuenow', String(snapshot.currentJobCount));
-    if (snapshot.queueLimitJobs === 0) queueTrack.removeAttribute('aria-valuemax');
-    else queueTrack.setAttribute('aria-valuemax', String(snapshot.queueLimitJobs));
+    if (snapshot.queueLimitJobs === 0) {
+      queueTrack.removeAttribute('aria-valuenow');
+      queueTrack.removeAttribute('aria-valuemax');
+    } else {
+      queueTrack.setAttribute('aria-valuenow', String(snapshot.currentJobCount));
+      queueTrack.setAttribute('aria-valuemax', String(snapshot.queueLimitJobs));
+    }
     queueTrack.setAttribute('aria-valuetext', queueText);
   }
   const telemetry = snapshot.telemetry || {};
@@ -925,7 +958,7 @@ function renderAutomationStatusSnapshot(snapshot) {
   const errorRow = document.getElementById('automationLastErrorRow');
   const errorText = String(snapshot.error || telemetry.lastError || '');
   if (errorRow) errorRow.hidden = errorText.length === 0;
-  setAutomationText('automationLastError', errorText);
+  setAutomationText('automationLastError', errorText ? localizeUiText(errorText) : '');
   return snapshot;
 }
 
@@ -1151,7 +1184,7 @@ async function toggleAutomationPauseResume() {
       updateStatusBar();
     }
   } catch {
-    showCopyToast(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.');
+    showCopyToast(localizeUiText(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.'));
   } finally {
     automationPauseResumeBusy = false;
     refreshAutomationControlCenter();
@@ -1166,16 +1199,49 @@ window.runFolderMonitorTestScan = runFolderMonitorTestScan;
 function surfaceAutomationOutcome(result) {
   if (result?.ok !== false) return '';
   const message = result.warning || result.error || 'Automatische Aufnahme konnte nicht abgeschlossen werden.';
-  showCopyToast(message, 6500);
-  return message;
+  const localized = localizeUiText(message);
+  showCopyToast(localized, 6500);
+  return localized;
 }
 
-async function handleFolderMonitorFiles(files) {
+async function processFolderMonitorFiles(files) {
   window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
   const evaluation = await evaluateAutomationCandidates(files, { dryRun: false, trigger: 'watcher' });
   const result = await applyAutomationEvaluation(evaluation);
   surfaceAutomationOutcome(result);
   return result;
+}
+
+async function drainFolderMonitorFiles() {
+  let result = freezeAutomationValue({ admittedFiles: [], deferredFiles: [], paused: false, dryRun: false });
+  while (automationEventQueue.size > 0) {
+    const entries = [...automationEventQueue.entries()].slice(0, automationEventBatchSize);
+    for (const [key] of entries) {
+      automationEventQueue.delete(key);
+      automationEventInFlight.add(key);
+    }
+    try {
+      result = await processFolderMonitorFiles(entries.map(([, file]) => file));
+    } finally {
+      for (const [key] of entries) automationEventInFlight.delete(key);
+    }
+  }
+  return result;
+}
+
+function handleFolderMonitorFiles(files) {
+  for (const file of Array.isArray(files) ? files : []) {
+    const candidate = normalizeAutomationCandidate(file, automationEventQueue.size);
+    const key = normalizeAutomationPath(candidate.path);
+    if (!key || automationEventQueue.has(key) || automationEventInFlight.has(key)) continue;
+    automationEventQueue.set(key, candidate);
+  }
+  if (!automationEventDrainPromise) {
+    automationEventDrainPromise = Promise.resolve()
+      .then(drainFolderMonitorFiles)
+      .finally(() => { automationEventDrainPromise = null; });
+  }
+  return automationEventDrainPromise;
 }
 
 // --- Init ---
@@ -2515,10 +2581,6 @@ function suppressPreviewKeysStillSelected(keys) {
 function buildQueuePreview() {
   const hosters = getSelectedHosters();
   queueJobs = queueJobs.filter(j => j.status !== 'preview' || j.automationAdmission === true);
-  const normalizedSettings = automationSettings();
-  let availableSlots = normalizedSettings.queueLimitJobs === 0
-    ? null
-    : Math.max(0, normalizedSettings.queueLimitJobs - window.AutomationControl.countAutomaticQueueJobs(queueJobs));
 
   if (hosters.length > 0) {
     const existingKeys = new Set();
@@ -2532,7 +2594,6 @@ function buildQueuePreview() {
         const key = `${file.path}|${hoster}`;
         return !existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key);
       });
-      if (availableSlots !== null && eligibleHosters.length > availableSlots) continue;
       for (const hoster of eligibleHosters) {
         const key = `${file.path}|${hoster}`;
           const job = {
@@ -2545,7 +2606,6 @@ function buildQueuePreview() {
           queueJobs.push(job);
           existingKeys.add(key);
       }
-      if (availableSlots !== null) availableSlots -= eligibleHosters.length;
     }
   }
 
@@ -6973,7 +7033,7 @@ async function performSaveSettings(options = {}) {
   const normalizedAutomationInputs = window.AutomationControl.normalizeAutomationSettings({
     ...curFm,
     queueLimitJobs: document.getElementById('fmQueueLimitInput')?.value ?? curFm.queueLimitJobs,
-    reconcileIntervalMinutes: document.getElementById('fmReconcileIntervalInput')?.value ?? curFm.reconcileIntervalMinutes
+    reconcileIntervalMinutes: Number(document.getElementById('fmReconcileIntervalInput')?.value ?? curFm.reconcileIntervalMinutes)
   });
 
   const globalSettings = {

@@ -22,9 +22,11 @@ function createWatcherHarness() {
 function createManualTimers() {
   const intervals = new Set();
   const timeouts = new Set();
+  const intervalDelays = [];
   return {
-    setIntervalFn(callback) {
+    setIntervalFn(callback, delay) {
       intervals.add(callback);
+      intervalDelays.push(delay);
       return callback;
     },
     clearIntervalFn(callback) {
@@ -45,7 +47,8 @@ function createManualTimers() {
         timeouts.delete(callback);
         await callback();
       }
-    }
+    },
+    intervalDelays
   };
 }
 
@@ -156,7 +159,7 @@ test('initial scan completion is exposed so the one-time option can be persisted
   assert.equal(completed, 1);
 });
 
-test('dry scan returns matching descriptors without emitting new files', async () => {
+test('dry scan returns every descriptor with a disjoint filter classification without emitting files', async () => {
   const { monitor, events } = createScanHarness({
     files: [
       { path: 'C:\\incoming\\a.mkv', name: 'a.mkv', size: 10, mtimeMs: 1 },
@@ -165,8 +168,116 @@ test('dry scan returns matching descriptors without emitting new files', async (
   });
   monitor.start({ folderPath: 'C:\\incoming', extensions: 'mkv', filterMode: 'include', recursive: true, reconcileIntervalMinutes: 5 });
   const result = await monitor.scan({ emitFiles: false, trigger: 'test' });
-  assert.deepEqual(result.files, [{ path: 'C:\\incoming\\a.mkv', name: 'a.mkv', size: 10, mtimeMs: 1 }]);
+  assert.deepEqual(result.files, [
+    { path: 'C:\\incoming\\a.mkv', name: 'a.mkv', size: 10, mtimeMs: 1, filterMatched: true, filterReason: 'matched' },
+    { path: 'C:\\incoming\\b.txt', name: 'b.txt', size: 10, mtimeMs: 2, filterMatched: false, filterReason: 'extension' }
+  ]);
+  assert.equal(result.files.length, 2);
+  assert.equal(result.files.filter(file => file.filterMatched).length, 1);
   assert.equal(events.newFiles.length, 0);
+});
+
+test('productive full scans emit every classified descriptor without consuming watcher duplicate reservations', async () => {
+  const { monitor, events } = createScanHarness({
+    files: [
+      { path: 'C:\\incoming\\a.mkv', name: 'a.mkv', size: 10, mtimeMs: 1 },
+      { path: 'C:\\incoming\\b.txt', name: 'b.txt', size: 10, mtimeMs: 2 }
+    ]
+  });
+  monitor.start({ folderPath: 'C:\\incoming', extensions: 'mkv', filterMode: 'include', recursive: true, skipDuplicates: true, reconcileIntervalMinutes: 5 });
+
+  await monitor.scan({ emitFiles: true, trigger: 'startup' });
+  await monitor.scan({ emitFiles: true, trigger: 'interval' });
+
+  assert.deepEqual(events.newFiles.map(files => files.map(file => ({ name: file.name, filterMatched: file.filterMatched }))), [
+    [{ name: 'a.mkv', filterMatched: true }, { name: 'b.txt', filterMatched: false }],
+    [{ name: 'a.mkv', filterMatched: true }, { name: 'b.txt', filterMatched: false }]
+  ]);
+  assert.equal(monitor.status().seenCount, 0);
+});
+
+test('reconciliation intervals accept only finite numeric positive-list values', () => {
+  const cases = [
+    [1, 60000],
+    [5, 300000],
+    [15, 900000],
+    [30, 1800000],
+    [60, 3600000],
+    [-1, 300000],
+    [Number.POSITIVE_INFINITY, 300000],
+    ['1', 300000],
+    ['15', 300000],
+    [2, 300000],
+    [undefined, 300000]
+  ];
+
+  for (const [reconcileIntervalMinutes, expectedDelay] of cases) {
+    const timers = createManualTimers();
+    const monitor = new FolderMonitor({ watch: createSilentWatch(), ...timers });
+    monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes });
+    assert.equal(timers.intervalDelays[0], expectedDelay, String(reconcileIntervalMinutes));
+    monitor.stop();
+  }
+});
+
+test('status owns monitoring start and next reconciliation timestamps across pause resume and intervals', async () => {
+  let now = 1000;
+  const timers = createManualTimers();
+  const monitor = new FolderMonitor({
+    watch: createSilentWatch(),
+    access: async () => {},
+    walkFolder: async () => [],
+    stat: async () => ({ mtimeMs: 1 }),
+    now: () => now,
+    ...timers
+  });
+
+  monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  assert.equal(monitor.status().startedAt, 1000);
+  assert.equal(monitor.status().nextReconcileAt, 301000);
+  now = 2000;
+  await monitor.scan({ emitFiles: true, trigger: 'startup' });
+  assert.equal(monitor.status().startedAt, 1000);
+  assert.equal(monitor.status().nextReconcileAt, 301000);
+  await monitor.pause();
+  assert.equal(monitor.status().startedAt, null);
+  assert.equal(monitor.status().nextReconcileAt, null);
+  now = 4000;
+  await monitor.resume({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  assert.equal(monitor.status().startedAt, 4000);
+  assert.equal(monitor.status().nextReconcileAt, 304000);
+  now = 304000;
+  await timers.runInterval();
+  assert.equal(monitor.status().startedAt, 4000);
+  assert.equal(monitor.status().lastScanAt, 304000);
+  assert.equal(monitor.status().nextReconcileAt, 604000);
+});
+
+test('paused configuration keeps watcher and interval closed while allowing a read-only scan', async () => {
+  const timers = createManualTimers();
+  let watcherStarts = 0;
+  const monitor = new FolderMonitor({
+    watch: () => {
+      watcherStarts++;
+      return createSilentWatch()();
+    },
+    access: async () => {},
+    walkFolder: async () => [{ path: 'C:\\watch\\a.mkv', name: 'a.mkv', size: 1 }],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+
+  const result = monitor.configure({ folderPath: 'C:\\watch', extensions: 'mkv', reconcileIntervalMinutes: 5 });
+  const scan = await monitor.scan({ emitFiles: false, trigger: 'test' });
+  const productive = await monitor.scan({ emitFiles: true, trigger: 'manual' });
+
+  assert.deepEqual(result, { includesExisting: false, paused: true });
+  assert.equal(watcherStarts, 0);
+  assert.equal(timers.intervalDelays.length, 0);
+  assert.equal(monitor.status().paused, true);
+  assert.equal(monitor.status().folderPath, 'C:\\watch');
+  assert.deepEqual(scan.files.map(file => file.name), ['a.mkv']);
+  assert.equal(productive.cancelled, true);
 });
 
 test('overlapping reconcile requests serialize and collapse to one follow-up scan', async () => {
@@ -208,6 +319,20 @@ test('pause stops watcher and reconciliation until explicit resume', async () =>
   assert.equal(monitor.status().paused, true);
   await monitor.resume({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
   assert.equal(scanCalls(), 1);
+  assert.equal(monitor.status().paused, false);
+});
+
+test('resume can activate watcher and interval before a separately gated reconciliation', async () => {
+  const { monitor, scanCalls } = createReachabilityHarness(true);
+  const settings = { folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 };
+  monitor.start(settings);
+  await monitor.pause();
+
+  const result = await monitor.resume(settings, { reconcile: false });
+
+  assert.equal(scanCalls(), 0);
+  assert.equal(result.reconciled, false);
+  assert.equal(monitor.status().running, true);
   assert.equal(monitor.status().paused, false);
 });
 
@@ -331,7 +456,7 @@ test('late watcher add callbacks are ignored after pause', async () => {
   assert.deepEqual(newFiles, []);
 });
 
-test('resume preserves session duplicate history', async () => {
+test('resume full scan redelivers candidates while watcher duplicate history remains reserved', async () => {
   const timers = createManualTimers();
   const watchers = [];
   const newFiles = [];
@@ -356,7 +481,10 @@ test('resume preserves session duplicate history', async () => {
   await monitor.resume(settings);
   watchers[1].emit('add', 'C:\\watch\\same.mkv');
   await timers.runTimeouts();
-  assert.deepEqual(newFiles, [['C:\\watch\\same.mkv']]);
+  assert.deepEqual(newFiles.map(files => files.map(file => typeof file === 'string' ? file : file.path)), [
+    ['C:\\watch\\same.mkv'],
+    ['C:\\watch\\same.mkv']
+  ]);
   assert.equal(monitor.status().seenCount, 1);
 });
 
@@ -385,11 +513,11 @@ test('watcher add paused before batch timeout is emitted exactly once by resume 
   await monitor.pause();
   assert.deepEqual(newFiles, []);
   await monitor.resume(settings);
-  assert.deepEqual(newFiles, [[filePath]]);
-  assert.equal(monitor.status().seenCount, 1);
+  assert.deepEqual(newFiles.map(files => files.map(file => typeof file === 'string' ? file : file.path)), [[filePath]]);
+  assert.equal(monitor.status().seenCount, 0);
 });
 
-test('synchronous pause during successful batch emission does not duplicate on resume', async () => {
+test('synchronous pause during watcher delivery keeps its reservation while resume scan redelivers the candidate', async () => {
   const timers = createManualTimers();
   const watchers = [];
   const newFiles = [];
@@ -418,7 +546,7 @@ test('synchronous pause during successful batch emission does not duplicate on r
   await pausePromise;
   assert.deepEqual(newFiles, [[filePath]]);
   await monitor.resume(settings);
-  assert.deepEqual(newFiles, [[filePath]]);
+  assert.deepEqual(newFiles.map(files => files.map(file => typeof file === 'string' ? file : file.path)), [[filePath], [filePath]]);
   assert.equal(monitor.status().seenCount, 1);
 });
 
@@ -452,8 +580,9 @@ test('pause rollback never deletes historical seen state from a dedupe-off batch
   watchers[1].emit('add', filePath);
   assert.deepEqual(newFiles, [[filePath]]);
   await monitor.pause();
-  discoverExisting = true;
   await monitor.resume(dedupeOn);
+  watchers[2].emit('add', filePath);
+  await timers.runTimeouts();
   assert.deepEqual(newFiles, [[filePath]]);
   assert.equal(monitor.status().seenCount, 1);
 });
@@ -551,7 +680,7 @@ test('interval callback contains unexpected scan rejection', async () => {
   assert.equal(statuses.at(-1).error.includes('interval-secret'), false);
 });
 
-test('real temporary folder converges through startup interval capacity recovery and one reconnect', async () => {
+test('real temporary folder recovers a file-atomic deferral with default duplicate protection', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-folder-'));
   const detached = `${root}-detached`;
   const timers = createManualTimers();
@@ -569,12 +698,12 @@ test('real temporary folder converges through startup interval capacity recovery
     fs.utimesSync(fourJobPath, new Date('2020-01-01T00:00:00.000Z'), new Date('2020-01-01T00:00:00.000Z'));
     fs.utimesSync(twoJobPath, new Date('2020-01-02T00:00:00.000Z'), new Date('2020-01-02T00:00:00.000Z'));
     const monitor = new FolderMonitor({ watch: createSilentWatch(), ...timers });
-    monitor.on('new-files', (paths) => {
-      const descriptors = paths.map(filePath => ({
-        path: filePath,
-        name: path.basename(filePath),
-        mtimeMs: fs.statSync(filePath).mtimeMs
-      }));
+    monitor.on('new-files', (files) => {
+      const descriptors = files.map(file => typeof file === 'string' ? {
+        path: file,
+        name: path.basename(file),
+        mtimeMs: fs.statSync(file).mtimeMs
+      } : file).filter(file => file.filterMatched !== false);
       const processed = classifyProcessedCandidates({ candidates: descriptors, queuePaths: [...queuedPaths] });
       const unprocessed = new Set(processed.unprocessedPaths);
       const candidates = descriptors
@@ -595,12 +724,12 @@ test('real temporary folder converges through startup interval capacity recovery
       recursive: true,
       extensions: 'mkv',
       filterMode: 'include',
-      skipDuplicates: false,
+      skipDuplicates: true,
       reconcileIntervalMinutes: 5
     });
 
     const first = await monitor.scan({ emitFiles: true, trigger: 'startup' });
-    assert.deepEqual(first.files.map(file => file.name).sort(), ['four-jobs.mkv', 'two-jobs.mkv']);
+    assert.deepEqual(first.files.filter(file => file.filterMatched).map(file => file.name).sort(), ['four-jobs.mkv', 'two-jobs.mkv']);
     assert.equal(first.files.every((file) => Number.isFinite(file.mtimeMs)), true);
     assert.deepEqual(admissions[0], {
       trigger: 'startup',

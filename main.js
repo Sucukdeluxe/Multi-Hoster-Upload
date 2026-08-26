@@ -30,7 +30,7 @@ const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
 const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
-const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, getLogOpenDirectory } = require('./lib/upload-audit');
+const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, createBufferedInternalLogFlusher, getLogOpenDirectory } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
@@ -39,6 +39,7 @@ const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
+const { normalizeAutomationSettings } = require('./lib/automation-control');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -289,7 +290,9 @@ function restoreClosePreparation(attempt, clearRestart = true) {
   if (closeFolderMonitorWasRunning) {
     closeFolderMonitorWasRunning = false;
     const settings = configStore.load().globalSettings?.folderMonitor;
-    if (settings?.enabled && settings.folderPath) startFolderMonitor(settings);
+    if (settings?.enabled && settings.folderPath) {
+      void startFolderMonitor(settings).catch(error => debugLog(`folder-monitor close recovery failed: ${error.message}`));
+    }
   }
   rejectPendingUpdate(new Error('Das Update wurde nicht gestartet, weil die Einstellungen vor dem Beenden nicht gespeichert werden konnten'));
   return true;
@@ -558,21 +561,16 @@ function getRotLogPath() {
 }
 const _rotLogBuffer = [];
 let _rotLogFlushTimer = null;
-let _rotLogWriting = false;
+const _rotLogFlusher = createBufferedInternalLogFlusher({
+  buffer: _rotLogBuffer,
+  writer: _rotLogWriter,
+  schedule: setImmediate,
+  reportError: (label, error) => debugLog(`${label} append failed: ${error.message}`)
+});
 
 function _flushRotLog() {
-  if (_rotLogWriting || _rotLogBuffer.length === 0) return;
-  const chunk = _rotLogBuffer.join('');
-  _rotLogBuffer.length = 0;
-  _rotLogWriting = true;
-  _rotLogWriter.append(chunk, 'rot-log').then(written => {
-    _rotLogWriting = false;
-    if (!written) debugLog('rot-log append failed: no writable target');
-    if (_rotLogBuffer.length) setImmediate(_flushRotLog);
-  }, error => {
-    _rotLogWriting = false;
-    debugLog(`rot-log append failed: ${error.message}`);
-    if (_rotLogBuffer.length) setImmediate(_flushRotLog);
+  void _rotLogFlusher.flush('rot-log').then(written => {
+    if (written === false) debugLog('rot-log append failed: no writable target');
   });
 }
 
@@ -1686,13 +1684,8 @@ app.whenReady().then(async () => {
   try {
     const launchConfig = configStore.load();
     const fm = launchConfig.globalSettings && launchConfig.globalSettings.folderMonitor;
-    if (fm && fm.enabled && fm.folderPath && fm.paused !== true) {
-      startFolderMonitor(fm);
-      if (!fs.existsSync(fm.folderPath)) {
-        void folderMonitor.scan({ emitFiles: true, trigger: 'startup' }).catch(error => {
-          debugLog(`folder-monitor startup scan failed: ${error.message}`);
-        });
-      }
+    if (fm && fm.enabled && fm.folderPath) {
+      await startFolderMonitor(fm);
     }
   } catch (err) {
     debugLog(`folder-monitor auto-start failed: ${err.message}`);
@@ -1785,7 +1778,7 @@ app.on('will-quit', () => {
   } catch {}
   try {
     if (_rotLogBuffer.length) {
-      _rotLogWriter.flushSync(_rotLogBuffer, 'rot-log');
+      _rotLogFlusher.flushSync('rot-log');
     }
   } catch {}
 });
@@ -2802,7 +2795,7 @@ async function syncImportedRuntime(config) {
   try {
     folderMonitor.stop();
     const folderSettings = config.globalSettings.folderMonitor;
-    if (folderSettings && folderSettings.enabled && folderSettings.folderPath) startFolderMonitor(folderSettings);
+    if (folderSettings && folderSettings.enabled && folderSettings.folderPath) await startFolderMonitor(folderSettings);
   } catch (error) {
     debugLog(`backup folder monitor sync failed: ${error.message}`);
     warnings.push('Ordnerüberwachung');
@@ -3273,14 +3266,15 @@ async function withAutomationStatusSuppressed(operation) {
 
 function automationStatusSnapshot() {
   const settings = configStore.load().globalSettings?.folderMonitor || {};
+  const normalized = normalizeAutomationSettings(settings);
   return Object.freeze({
     ...folderMonitor.status(),
     enabled: settings.enabled === true,
     configured: String(settings.folderPath || '').trim().length > 0,
     paused: settings.paused === true,
     pausedAt: settings.pausedAt ?? null,
-    queueLimitJobs: settings.queueLimitJobs,
-    reconcileIntervalMinutes: settings.reconcileIntervalMinutes
+    queueLimitJobs: normalized.queueLimitJobs,
+    reconcileIntervalMinutes: normalized.reconcileIntervalMinutes
   });
 }
 
@@ -3318,11 +3312,25 @@ function bindFolderMonitorEvents(settings) {
   });
 }
 
-function startFolderMonitor(settings) {
+async function startFolderMonitor(settings) {
   try {
-    folderMonitor.stop();
-    bindFolderMonitorEvents(settings);
-    const result = folderMonitor.start(settings);
+    const persisted = configStore.load().globalSettings?.folderMonitor || {};
+    const normalized = normalizeAutomationSettings(settings);
+    const effectiveSettings = {
+      ...settings,
+      queueLimitJobs: normalized.queueLimitJobs,
+      reconcileIntervalMinutes: normalized.reconcileIntervalMinutes,
+      paused: persisted.paused === true,
+      pausedAt: persisted.paused === true ? (persisted.pausedAt ?? null) : null
+    };
+    bindFolderMonitorEvents(effectiveSettings);
+    if (persisted.paused === true) {
+      folderMonitor.configure(effectiveSettings);
+      debugLog(`folder-monitor configured while paused: ${effectiveSettings.folderPath}`);
+      return { includesExisting: false, paused: true };
+    }
+    const result = folderMonitor.start(effectiveSettings);
+    await folderMonitor.scan({ emitFiles: true, trigger: 'startup' });
     debugLog(`folder-monitor started: ${settings.folderPath}`);
     return result;
   } catch (err) {
@@ -3333,16 +3341,14 @@ function startFolderMonitor(settings) {
 
 async function resumeFolderMonitor(settings) {
   bindFolderMonitorEvents(settings);
-  const result = await folderMonitor.resume(settings);
+  const result = await folderMonitor.resume(settings, { reconcile: false });
   debugLog(`folder-monitor resumed: ${settings.folderPath}`);
   return result;
 }
 
-ipcMain.handle('folder-monitor:start', (_event, settings) => {
-  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
-    return { error: 'Automatik ist pausiert' };
-  }
-  const result = startFolderMonitor(settings);
+ipcMain.handle('folder-monitor:start', async (_event, settings) => {
+  const result = await startFolderMonitor(settings);
+  if (result?.paused === true) return { error: 'Automatik ist pausiert' };
   return { ok: true, includesExisting: result?.includesExisting === true };
 });
 
@@ -3383,21 +3389,50 @@ ipcMain.handle('automation:pause-after-active', () => enqueueAutomationLifecycle
 }));
 
 ipcMain.handle('automation:resume', () => enqueueAutomationLifecycle(async generation => {
+  let result;
   await withAutomationStatusSuppressed(async () => {
     const latest = configStore.load();
     const settings = latest.globalSettings?.folderMonitor || {};
-    const resumedSettings = { ...settings, paused: false, pausedAt: null };
-    await configStore.save({
-      globalSettings: {
-        ...latest.globalSettings,
-        folderMonitor: resumedSettings
+    const normalized = normalizeAutomationSettings(settings);
+    const pausedSettings = {
+      ...settings,
+      queueLimitJobs: normalized.queueLimitJobs,
+      reconcileIntervalMinutes: normalized.reconcileIntervalMinutes,
+      paused: settings.paused === true,
+      pausedAt: settings.pausedAt ?? null
+    };
+    const resumedSettings = { ...pausedSettings, paused: false, pausedAt: null };
+    try {
+      if (resumedSettings.enabled && resumedSettings.folderPath) {
+        await resumeFolderMonitor(resumedSettings);
       }
-    });
-    if (resumedSettings.enabled && resumedSettings.folderPath) {
-      await resumeFolderMonitor(resumedSettings);
+      await configStore.save({
+        globalSettings: {
+          ...latest.globalSettings,
+          folderMonitor: resumedSettings
+        }
+      });
+      if (resumedSettings.enabled && resumedSettings.folderPath) {
+        await folderMonitor.scan({ emitFiles: true, trigger: 'resume' });
+      }
+    } catch {
+      folderMonitor.stop();
+      if (pausedSettings.enabled && pausedSettings.folderPath) {
+        bindFolderMonitorEvents(pausedSettings);
+        folderMonitor.configure(pausedSettings);
+      }
+      try {
+        await configStore.save({
+          globalSettings: {
+            ...latest.globalSettings,
+            folderMonitor: pausedSettings
+          }
+        });
+      } catch {}
+      result = { error: 'Automatik konnte nicht fortgesetzt werden' };
     }
   });
-  return publishAutomationStatus(null, generation);
+  return publishAutomationStatus(result, generation);
 }));
 
 ipcMain.handle('folder-monitor:test-scan', () => {
@@ -3405,6 +3440,9 @@ ipcMain.handle('folder-monitor:test-scan', () => {
 });
 
 ipcMain.handle('folder-monitor:reconcile', () => {
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
+    return { error: 'Automatik ist pausiert' };
+  }
   return folderMonitor.scan({ emitFiles: true, trigger: 'manual' });
 });
 
