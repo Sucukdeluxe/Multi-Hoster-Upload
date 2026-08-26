@@ -374,6 +374,42 @@ test('watcher add paused before batch timeout is emitted exactly once by resume 
   assert.equal(monitor.status().seenCount, 1);
 });
 
+test('pause rollback never deletes historical seen state from a dedupe-off batch', async () => {
+  const timers = createManualTimers();
+  const watchers = [];
+  const newFiles = [];
+  const filePath = 'C:\\watch\\historical.mkv';
+  let discoverExisting = false;
+  const monitor = new FolderMonitor({
+    watch: () => {
+      const watcher = new EventEmitter();
+      watcher.close = async () => {};
+      watchers.push(watcher);
+      return watcher;
+    },
+    access: async () => {},
+    walkFolder: async () => discoverExisting ? [{ path: filePath, name: 'historical.mkv', size: 1 }] : [],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('new-files', (files) => newFiles.push(files));
+  const dedupeOn = { folderPath: 'C:\\watch', extensions: 'mkv', skipDuplicates: true, reconcileIntervalMinutes: 5 };
+  const dedupeOff = { ...dedupeOn, skipDuplicates: false };
+  monitor.start(dedupeOn);
+  watchers[0].emit('add', filePath);
+  await timers.runTimeouts();
+  assert.deepEqual(newFiles, [[filePath]]);
+  await monitor.pause();
+  await monitor.resume(dedupeOff);
+  watchers[1].emit('add', filePath);
+  assert.deepEqual(newFiles, [[filePath]]);
+  await monitor.pause();
+  discoverExisting = true;
+  await monitor.resume(dedupeOn);
+  assert.deepEqual(newFiles, [[filePath]]);
+  assert.equal(monitor.status().seenCount, 1);
+});
+
 test('dry scan leaves the public status byte-identical and does not consume reconnect state', async () => {
   let reachable = false;
   const timers = createManualTimers();
