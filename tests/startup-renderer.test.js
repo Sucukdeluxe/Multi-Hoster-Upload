@@ -68,10 +68,12 @@ let automationProbe = {
   history: [],
   uploadLog: [],
   paused: false,
+  automationStatusSequence: [],
   historyError: '',
   addResult: null,
   addError: '',
   startResult: null,
+  startError: '',
   saveSettingsError: '',
   dryScan: { files: [], reachable: true, trigger: 'test' },
   readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
@@ -164,10 +166,12 @@ contextBridge.exposeInMainWorld('api', {
       history: Array.isArray(value.history) ? value.history : [],
       uploadLog: Array.isArray(value.uploadLog) ? value.uploadLog : [],
       paused: value.paused === true,
+      automationStatusSequence: Array.isArray(value.automationStatusSequence) ? value.automationStatusSequence.map(entry => ({ ...entry })) : [],
       historyError: String(value.historyError || ''),
       addResult: value.addResult || null,
       addError: String(value.addError || ''),
       startResult: value.startResult || null,
+      startError: String(value.startError || ''),
       saveSettingsError: String(value.saveSettingsError || ''),
       dryScan: value.dryScan || { files: [], reachable: true, trigger: 'test' },
       readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
@@ -222,6 +226,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   automationGetStatus() {
     automationProbe.readCalls.status++;
+    if (automationProbe.automationStatusSequence.length > 0) return Promise.resolve(automationProbe.automationStatusSequence.shift());
     return Promise.resolve({ paused: automationProbe.paused });
   },
   folderMonitorTestScan() {
@@ -252,6 +257,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   startUpload(payload) {
     automationProbe.mutationCalls.push(['start', payload?.jobs?.length || 0]);
+    if (automationProbe.startError) return Promise.reject(new Error(automationProbe.startError));
     return Promise.resolve(automationProbe.startResult || { started: true });
   },
   getFolderMonitorProbeCalls() { return folderMonitorProbeCalls; }
@@ -735,6 +741,8 @@ contextBridge.exposeInMainWorld('api', {
       { path: 'C:\\\\watch\\\\b.mkv', name: 'b.mkv', size: 3 * 1024 * 1024, mtimeMs: 2, filterMatched: true }
     ];
     configureAtomicState(14998);
+    selectedFiles = [{ path: 'C:\\\\manual\\\\unplanned.mkv', name: 'unplanned.mkv', size: 1 }];
+    selectedUploadHosters = ['clouddrop.cc'];
     const atomicEvaluation = await evaluateAutomationCandidates(atomicCandidates, { dryRun: false, trigger: 'watcher' });
     const atomicResult = await applyAutomationEvaluation(atomicEvaluation);
     const selectedHostersAfterApply = selectedUploadHosters.slice();
@@ -748,6 +756,7 @@ contextBridge.exposeInMainWorld('api', {
       deferred: config.globalSettings.folderMonitor.telemetry.deferred,
       queued: config.globalSettings.folderMonitor.telemetry.queued,
       currentJobCount: window.AutomationControl.countAutomaticQueueJobs(queueJobs),
+      unplannedJobs: queueJobs.filter(job => job.fileName === 'unplanned.mkv').length,
       selectedHostersAfterApply,
       manualSelectionFilesAfterApply,
       plannedHostsBeforeRebuild,
@@ -908,6 +917,174 @@ contextBridge.exposeInMainWorld('api', {
     uploading = false;
     const mainPauseResponses = { startRace, addRace, selectedStartRace, manualRace };
 
+    const cleanupState = job => ({
+      token: job.sourceCleanupToken,
+      required: clone(job.sourceCleanupRequiredHosters),
+      completed: clone(job.sourceCleanupCompletedHosters),
+      fingerprint: clone(job.sourceCleanupFingerprint)
+    });
+    const runCleanupRollbackCase = async (name, probe) => {
+      configureAtomicState(0);
+      config.globalSettings.deleteSourceAfterSuccessfulUpload = true;
+      const filePath = 'C:\\\\cleanup\\\\' + name + '.mkv';
+      const target = {
+        ...makePauseRaceJob(name + '.mkv'),
+        id: 'cleanup-target-' + name,
+        file: filePath,
+        sourceCleanupToken: 'preview-token-' + name,
+        sourceCleanupRequiredHosters: ['doodstream.com'],
+        sourceCleanupCompletedHosters: [],
+        sourceCleanupFingerprint: { size: 11, mtimeMs: 22 }
+      };
+      const sibling = {
+        ...makePauseRaceJob(name + '-done.mkv'),
+        id: 'cleanup-sibling-' + name,
+        file: filePath,
+        fileName: name + '.mkv',
+        hoster: 'voe.sx',
+        status: 'done',
+        sourceCleanupToken: 'done-token-' + name,
+        sourceCleanupRequiredHosters: ['voe.sx'],
+        sourceCleanupCompletedHosters: ['voe.sx'],
+        sourceCleanupFingerprint: { size: 33, mtimeMs: 44 }
+      };
+      queueJobs = [target, sibling];
+      uploading = true;
+      rebuildJobIndex();
+      window.api.configureAutomationProbe({ paused: false, ...probe });
+      const before = JSON.stringify([cleanupState(target), cleanupState(sibling)]);
+      const result = await startSelectedUpload([target]);
+      const after = JSON.stringify([cleanupState(target), cleanupState(sibling)]);
+      uploading = false;
+      return {
+        cleanupByteIdentical: after === before,
+        targetStatus: target.status,
+        siblingStatus: sibling.status,
+        result
+      };
+    };
+    const cleanupRollback = {
+      paused: await runCleanupRollbackCase('paused', { addResult: { error: 'Automatik ist pausiert', added: 0 } }),
+      error: await runCleanupRollbackCase('error', { addResult: { error: 'token=secret-value', added: 0 } }),
+      exception: await runCleanupRollbackCase('exception', { addError: 'token=secret-value' }),
+      unconfirmed: await runCleanupRollbackCase('unconfirmed', { addResult: { added: 0 } })
+    };
+
+    configureAtomicState(0);
+    selectedFiles = [];
+    config.globalSettings.folderMonitor.autoStart = true;
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.telemetry = { dateKey: new Date().toLocaleDateString('en-CA'), detected: 0, queued: 0, skipped: 0, deferred: 0 };
+    hosterSettings = {};
+    uploading = false;
+    window.api.configureAutomationProbe({
+      paused: false,
+      automationStatusSequence: [{ paused: false }, { paused: true }]
+    });
+    const betweenFile = { path: 'C:\\\\between\\\\paused.mkv', name: 'paused.mkv', size: 1, mtimeMs: 1 };
+    const betweenEvaluation = await evaluateAutomationCandidates([betweenFile], { dryRun: false, trigger: 'watcher' });
+    const betweenResult = await applyAutomationEvaluation(betweenEvaluation);
+    const betweenProbe = await window.api.getAutomationProbeState();
+    const pauseBetweenApplyAndStart = {
+      result: {
+        ok: betweenResult.ok,
+        error: betweenResult.error || null,
+        warning: betweenResult.warning || null,
+        admitted: betweenResult.admittedFiles.map(file => file.name)
+      },
+      status: queueJobs.find(job => job.file === betweenFile.path)?.status || null,
+      queuedTelemetry: config.globalSettings.folderMonitor.telemetry.queued,
+      startCalls: betweenProbe.mutationCalls.filter(call => call[0] === 'start').length
+    };
+    const runStartAcceptanceCase = async (name, probe) => {
+      configureAtomicState(0);
+      selectedFiles = [];
+      selectedUploadHosters = ['doodstream.com'];
+      const job = makePauseRaceJob(name + '.mkv');
+      queueJobs = [job];
+      uploading = false;
+      rebuildJobIndex();
+      window.api.configureAutomationProbe({ paused: false, ...probe });
+      const originalAlert = showAppAlert;
+      showAppAlert = async () => {};
+      const result = await startUpload();
+      showAppAlert = originalAlert;
+      return { result, status: job.status, uploading };
+    };
+    const startAcceptance = {
+      accepted: await runStartAcceptanceCase('accepted', { startResult: { started: true } }),
+      unconfirmed: await runStartAcceptanceCase('unconfirmed', { startResult: { started: false } }),
+      exception: await runStartAcceptanceCase('exception', { startError: 'token=secret-value' })
+    };
+
+    const originalShowCopyToastForAutomation = showCopyToast;
+    const feedbackMessages = [];
+    showCopyToast = message => { feedbackMessages.push(String(message)); };
+    configureAtomicState(0);
+    selectedFiles = [];
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.autoStart = false;
+    hosterSettings = {};
+    window.api.configureAutomationProbe({ paused: false, saveSettingsError: 'token=telemetry-secret' });
+    const watcherWarningResult = await handleFolderMonitorFiles([
+      { path: 'C:\\\\feedback\\\\watcher-warning.mkv', name: 'watcher-warning.mkv', size: 1, mtimeMs: 1 }
+    ]);
+    const watcherWarningFeedback = feedbackMessages.splice(0);
+    failedConfigWriteOperations.length = 0;
+    configureAtomicState(0);
+    selectedFiles = [];
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    config.globalSettings.folderMonitor.autoStart = true;
+    hosterSettings = {};
+    uploading = true;
+    window.api.configureAutomationProbe({ paused: false, addResult: { error: 'token=secret-value', added: 0 } });
+    const watcherErrorResult = await handleFolderMonitorFiles([
+      { path: 'C:\\\\feedback\\\\watcher-error.mkv', name: 'watcher-error.mkv', size: 1, mtimeMs: 1 }
+    ]);
+    const watcherErrorFeedback = feedbackMessages.splice(0);
+    uploading = false;
+    configureAtomicState(0);
+    selectedFiles = [];
+    config.globalSettings.folderMonitor.hosters = [];
+    config.globalSettings.folderMonitor.autoStart = false;
+    hosterSettings = {};
+    const modalWarningFile = { path: 'C:\\\\feedback\\\\modal-warning.mkv', name: 'modal-warning.mkv', size: 1, mtimeMs: 1 };
+    _pendingFiles = [modalWarningFile];
+    _pendingImportInspection = { candidateCount: 1, duplicateCount: 0, unavailableCount: 0, accepted: [modalWarningFile] };
+    _pendingImportInspections = 0;
+    _pendingFolderMonitorAutoStart.clear();
+    _pendingFolderMonitorAutoStart.set(modalWarningFile.path, false);
+    const modalWarningInput = document.createElement('input');
+    modalWarningInput.type = 'checkbox';
+    modalWarningInput.dataset.hosterModal = 'doodstream.com';
+    modalWarningInput.checked = true;
+    document.getElementById('hosterModalList').replaceChildren(modalWarningInput);
+    document.getElementById('hosterModal').style.display = 'flex';
+    window.api.configureAutomationProbe({ paused: false, saveSettingsError: 'token=telemetry-secret' });
+    const modalWarningResult = await applyHosterSelection();
+    const modalWarningFeedback = feedbackMessages.splice(0);
+    failedConfigWriteOperations.length = 0;
+    showCopyToast = originalShowCopyToastForAutomation;
+    const fulfilledFeedback = {
+      watcherWarning: {
+        result: { ok: watcherWarningResult.ok, warning: watcherWarningResult.warning || null, error: watcherWarningResult.error || null },
+        feedback: watcherWarningFeedback
+      },
+      watcherError: {
+        result: { ok: watcherErrorResult.ok, warning: watcherErrorResult.warning || null, error: watcherErrorResult.error || null },
+        feedback: watcherErrorFeedback
+      },
+      modalWarning: {
+        result: modalWarningResult,
+        feedback: modalWarningFeedback,
+        pending: _pendingFiles.length,
+        markers: _pendingFolderMonitorAutoStart.size,
+        modalOpen: document.getElementById('hosterModal').style.display === 'flex',
+        queueStatus: queueJobs.find(job => job.file === modalWarningFile.path)?.status || null
+      },
+      secretExposed: JSON.stringify({ watcherWarningFeedback, watcherErrorFeedback, modalWarningFeedback, modalWarningResult }).includes('secret')
+    };
+
     const runInjectionCase = async (name, probe) => {
       configureAtomicState(0);
       selectedFiles = [];
@@ -985,7 +1162,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const onlineBackupBehaviorScript = `(async () => {
     const ids = {
@@ -1421,8 +1598,9 @@ app.whenReady().then(async () => {
       deferred: 1,
       queued: 1,
       currentJobCount: 15000,
+      unplannedJobs: 0,
       selectedHostersAfterApply: ['clouddrop.cc'],
-      manualSelectionFilesAfterApply: [],
+      manualSelectionFilesAfterApply: ['unplanned.mkv'],
       plannedHostsBeforeRebuild: ['byse.sx', 'vidmoly.me'],
       hostsAfterRebuild: ['byse.sx', 'vidmoly.me']
     });
@@ -1471,6 +1649,79 @@ app.whenReady().then(async () => {
         status: 'preview',
         uploading: true
       }
+    });
+    assert.deepEqual(result.automationPipeline.cleanupRollback, {
+      paused: {
+        cleanupByteIdentical: true,
+        targetStatus: 'preview',
+        siblingStatus: 'done',
+        result: { ok: false, error: 'Automatik ist pausiert' }
+      },
+      error: {
+        cleanupByteIdentical: true,
+        targetStatus: 'preview',
+        siblingStatus: 'done',
+        result: { ok: false, error: 'Jobs konnten nicht hinzugefügt werden.' }
+      },
+      exception: {
+        cleanupByteIdentical: true,
+        targetStatus: 'preview',
+        siblingStatus: 'done',
+        result: { ok: false, error: 'Jobs konnten nicht hinzugefügt werden.' }
+      },
+      unconfirmed: {
+        cleanupByteIdentical: true,
+        targetStatus: 'preview',
+        siblingStatus: 'done',
+        result: { ok: false, error: 'Jobs wurden nicht vollständig hinzugefügt.' }
+      }
+    });
+    assert.deepEqual(result.automationPipeline.pauseBetweenApplyAndStart, {
+      result: {
+        ok: false,
+        error: 'Automatik ist pausiert',
+        warning: null,
+        admitted: []
+      },
+      status: 'preview',
+      queuedTelemetry: 0,
+      startCalls: 0
+    });
+    assert.deepEqual(result.automationPipeline.startAcceptance, {
+      accepted: {
+        result: { ok: true },
+        status: 'queued',
+        uploading: true
+      },
+      unconfirmed: {
+        result: { ok: false, error: 'Upload wurde nicht bestätigt.' },
+        status: 'preview',
+        uploading: false
+      },
+      exception: {
+        result: { ok: false, error: 'Upload konnte nicht gestartet werden.' },
+        status: 'preview',
+        uploading: false
+      }
+    });
+    assert.deepEqual(result.automationPipeline.fulfilledFeedback, {
+      watcherWarning: {
+        result: { ok: false, warning: 'Telemetrie konnte nicht gespeichert werden.', error: null },
+        feedback: ['Telemetrie konnte nicht gespeichert werden.']
+      },
+      watcherError: {
+        result: { ok: false, warning: null, error: 'Jobs konnten nicht hinzugefügt werden.' },
+        feedback: ['Jobs konnten nicht hinzugefügt werden.']
+      },
+      modalWarning: {
+        result: { ok: false, warning: 'Telemetrie konnte nicht gespeichert werden.', error: null },
+        feedback: ['Telemetrie konnte nicht gespeichert werden.'],
+        pending: 0,
+        markers: 0,
+        modalOpen: false,
+        queueStatus: 'preview'
+      },
+      secretExposed: false
     });
     assert.deepEqual(result.automationPipeline.injectionOutcomes, {
       pausedInjection: {

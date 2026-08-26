@@ -730,16 +730,19 @@ async function applyAutomationEvaluation(evaluation) {
         sourceCleanupGroups: cleanupPreparation.groups
       });
       if (result?.error) {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
         return freezeAutomationValue({ ok: false, error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(error), dryRun: false });
       }
       if ((Number(result?.added) || 0) !== newJobs.length) {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         return freezeAutomationValue({ ok: false, error: 'Jobs wurden nicht vollständig hinzugefügt.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
       }
       newJobs.forEach(job => { job.status = 'queued'; });
       _markSkippedJobs(result);
       if (result?.sourceCleanupFingerprints && window.SourceCleanupPolicy) window.SourceCleanupPolicy.applyFingerprints(queueJobs, result.sourceCleanupFingerprints);
     } catch {
+      restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       return freezeAutomationValue({ ok: false, error: 'Jobs konnten nicht hinzugefügt werden.', warning: null, admittedFiles: [], deferredFiles, paused: false, dryRun: false });
     }
     renderQueueTable();
@@ -779,10 +782,19 @@ window.applyAutomationEvaluation = applyAutomationEvaluation;
 window.createAutomationStatusSnapshot = createAutomationStatusSnapshot;
 window.runFolderMonitorTestScan = runFolderMonitorTestScan;
 
+function surfaceAutomationOutcome(result) {
+  if (result?.ok !== false) return '';
+  const message = result.warning || result.error || 'Automatische Aufnahme konnte nicht abgeschlossen werden.';
+  showCopyToast(message, 6500);
+  return message;
+}
+
 async function handleFolderMonitorFiles(files) {
   window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
   const evaluation = await evaluateAutomationCandidates(files, { dryRun: false, trigger: 'watcher' });
-  return applyAutomationEvaluation(evaluation);
+  const result = await applyAutomationEvaluation(evaluation);
+  surfaceAutomationOutcome(result);
+  return result;
 }
 
 // --- Init ---
@@ -1535,6 +1547,7 @@ async function applyHosterSelection() {
       } catch {
         regularInjectionFailure = 'Jobs konnten nicht hinzugefügt werden.';
       }
+      if (regularInjectionFailure) restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       renderQueueTable();
       persistQueueStateSoon(true);
     }
@@ -1546,6 +1559,7 @@ async function applyHosterSelection() {
     return { ok: false, error: regularInjectionFailure };
   }
   const selectedHosters = selectedUploadHosters.slice();
+  let automationOutcome = null;
   if (automationFiles.length > 0) {
     try {
       const evaluation = await evaluateAutomationCandidates(automationFiles, {
@@ -1555,6 +1569,7 @@ async function applyHosterSelection() {
         ownedPendingPaths: automationFiles.map(file => file.path)
       });
       const result = await applyAutomationEvaluation(evaluation);
+      automationOutcome = result;
       const admittedPaths = new Set((result?.admittedFiles || []).map(file => normalizeAutomationPath(file.path)));
       if (result?.error || admittedPaths.size === 0) throw new Error('manual-host-apply-failed');
       _pendingFiles = _pendingFiles.filter(file => !admittedPaths.has(normalizeAutomationPath(file.path)));
@@ -1581,6 +1596,10 @@ async function applyHosterSelection() {
   } else {
     document.getElementById('hosterModal').style.display = 'flex';
     renderImportPlanSummary();
+  }
+  if (automationOutcome?.warning) {
+    surfaceAutomationOutcome(automationOutcome);
+    return { ok: false, warning: automationOutcome.warning, error: null };
   }
   return true;
 }
@@ -2108,6 +2127,10 @@ function suppressPreviewKeysStillSelected(keys) {
 function buildQueuePreview() {
   const hosters = getSelectedHosters();
   queueJobs = queueJobs.filter(j => j.status !== 'preview' || j.automationAdmission === true);
+  const normalizedSettings = automationSettings();
+  let availableSlots = normalizedSettings.queueLimitJobs === 0
+    ? null
+    : Math.max(0, normalizedSettings.queueLimitJobs - window.AutomationControl.countAutomaticQueueJobs(queueJobs));
 
   if (hosters.length > 0) {
     const existingKeys = new Set();
@@ -2116,10 +2139,14 @@ function buildQueuePreview() {
     }
 
     for (const file of selectedFiles) {
-      for (const hoster of hosters) {
-        if (!window.ImportPreflight.isImportPairEligible(file, hoster, hosterSettings)) continue;
+      const eligibleHosters = hosters.filter(hoster => {
+        if (!window.ImportPreflight.isImportPairEligible(file, hoster, hosterSettings)) return false;
         const key = `${file.path}|${hoster}`;
-        if (!existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key)) {
+        return !existingKeys.has(key) && !_completedUploadKeys.has(key) && !_suppressedPreviewKeys.has(key);
+      });
+      if (availableSlots !== null && eligibleHosters.length > availableSlots) continue;
+      for (const hoster of eligibleHosters) {
+        const key = `${file.path}|${hoster}`;
           const job = {
             id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             file: file.path, fileName: file.name, hoster,
@@ -2129,8 +2156,8 @@ function buildQueuePreview() {
           };
           queueJobs.push(job);
           existingKeys.add(key);
-        }
       }
+      if (availableSlots !== null) availableSlots -= eligibleHosters.length;
     }
   }
 
@@ -3694,9 +3721,41 @@ function getSelectedJobLinks() {
 }
 
 // --- Upload ---
+const sourceCleanupFields = [
+  'sourceCleanupToken',
+  'sourceCleanupRequiredHosters',
+  'sourceCleanupCompletedHosters',
+  'sourceCleanupFingerprint'
+];
+
+function cloneSourceCleanupValue(value) {
+  if (!value || typeof value !== 'object') return value;
+  return structuredClone(value);
+}
+
+function captureSourceCleanupStates(jobs) {
+  const paths = new Set((Array.isArray(jobs) ? jobs : []).map(job => normalizeAutomationPath(job?.file)).filter(Boolean));
+  return queueJobs
+    .filter(job => paths.has(normalizeAutomationPath(job?.file)))
+    .map(job => [job, Object.fromEntries(sourceCleanupFields.map(field => [field, {
+      present: Object.prototype.hasOwnProperty.call(job, field),
+      value: cloneSourceCleanupValue(job[field])
+    }]))]);
+}
+
+function restoreSourceCleanupStates(states) {
+  for (const [job, fields] of states || []) {
+    for (const field of sourceCleanupFields) {
+      if (!fields[field].present) delete job[field];
+      else job[field] = cloneSourceCleanupValue(fields[field].value);
+    }
+  }
+}
+
 function prepareSourceCleanup(jobs) {
-  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [] };
-  return window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32');
+  const rollbackStates = captureSourceCleanupStates(jobs);
+  if (!config.globalSettings?.deleteSourceAfterSuccessfulUpload || !window.SourceCleanupPolicy) return { groups: [], rollbackStates };
+  return { ...window.SourceCleanupPolicy.prepareGroups(queueJobs, jobs, () => window.crypto.randomUUID(), 'win32'), rollbackStates };
 }
 
 function serializeUploadJob(job) {
@@ -3731,8 +3790,8 @@ function sanitizeUploadControlError(error, fallback) {
 }
 
 async function startUpload(opts) {
-  if (uploading) return;
-  if (await isAutomationPaused()) return false;
+  if (uploading) return { ok: false, error: 'Upload läuft bereits.' };
+  if (await isAutomationPaused()) return { ok: false, error: 'Automatik ist pausiert' };
   if (!(opts && opts._restoredAutoStart)) cancelStartupQueueAutoStart();
   if (!(opts && opts._autoRetry)) _cancelAutoRetry(true);
   else _cancelAutoRetry(false);
@@ -3746,17 +3805,22 @@ async function startUpload(opts) {
       await showAppAlert('Bitte mindestens einen Hoster auswählen.');
       uploading = false;
       updateQueueActionButtons();
-      return;
+      return { ok: false, error: 'Bitte mindestens einen Hoster auswählen.' };
     }
     buildQueuePreview();
   }
 
   const jobsToStart = queueJobs.filter((job) => isStartableQueueStatus(job.status));
-  if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
+  if (jobsToStart.length === 0) {
+    uploading = false;
+    updateQueueActionButtons();
+    return { ok: false, error: 'Keine startbaren Jobs vorhanden.' };
+  }
   const originalStates = captureUploadJobStates(jobsToStart);
+  let cleanupPreparation = { groups: [], rollbackStates: [] };
 
   try {
-    const cleanupPreparation = prepareSourceCleanup(jobsToStart);
+    cleanupPreparation = prepareSourceCleanup(jobsToStart);
     jobsToStart.forEach(j => {
       j.status = 'queued';
       j.error = null;
@@ -3780,8 +3844,20 @@ async function startUpload(opts) {
     };
     const result = await window.api.startUpload(uploadPayload);
     if (result && result.error) {
+      restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       restoreUploadJobStates(originalStates);
       const error = sanitizeUploadControlError(result.error, 'Upload konnte nicht gestartet werden.');
+      uploading = false;
+      renderQueueTable();
+      updateQueueActionButtons();
+      updateStatusBar();
+      await showAppAlert(error, 'Upload-Start fehlgeschlagen');
+      return { ok: false, error };
+    }
+    if (result?.started !== true) {
+      restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
+      restoreUploadJobStates(originalStates);
+      const error = 'Upload wurde nicht bestätigt.';
       uploading = false;
       renderQueueTable();
       updateQueueActionButtons();
@@ -3797,6 +3873,7 @@ async function startUpload(opts) {
 
     return { ok: true };
   } catch (err) {
+    restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
     restoreUploadJobStates(originalStates);
     uploading = false;
     renderQueueTable();
@@ -3821,7 +3898,7 @@ function _markSkippedJobs(result) {
 }
 
 async function startSelectedUpload(explicitJobs) {
-  if (await isAutomationPaused()) return false;
+  if (await isAutomationPaused()) return { ok: false, error: 'Automatik ist pausiert' };
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();
@@ -3845,6 +3922,7 @@ async function startSelectedUpload(explicitJobs) {
           sourceCleanupGroups: cleanupPreparation.groups
         });
       } catch (err) {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         restoreUploadJobStates(originalStates);
         renderQueueTable();
         const error = sanitizeUploadControlError(err, 'Jobs konnten nicht hinzugefügt werden.');
@@ -3853,6 +3931,7 @@ async function startSelectedUpload(explicitJobs) {
       }
 
       if (result && result.error === 'Kein Upload aktiv') {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         restoreUploadJobStates(originalStates);
         uploading = false;
         updateQueueActionButtons();
@@ -3860,9 +3939,18 @@ async function startSelectedUpload(explicitJobs) {
         return startSelectedUpload(addable);
       }
       if (result && result.error) {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
         restoreUploadJobStates(originalStates);
         renderQueueTable();
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
+        showCopyToast(error);
+        return { ok: false, error };
+      }
+      if ((Number(result?.added) || 0) !== addable.length) {
+        restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
+        restoreUploadJobStates(originalStates);
+        renderQueueTable();
+        const error = 'Jobs wurden nicht vollständig hinzugefügt.';
         showCopyToast(error);
         return { ok: false, error };
       }
@@ -3898,9 +3986,10 @@ async function startSelectedUpload(explicitJobs) {
   const jobsToStart = scopedJobs.filter(job => isStartableQueueStatus(job.status));
   if (jobsToStart.length === 0) { uploading = false; updateQueueActionButtons(); return; }
   const originalStates = captureUploadJobStates(jobsToStart);
+  let cleanupPreparation = { groups: [], rollbackStates: [] };
 
   try {
-    const cleanupPreparation = prepareSourceCleanup(jobsToStart);
+    cleanupPreparation = prepareSourceCleanup(jobsToStart);
     jobsToStart.forEach(j => {
       j.status = 'queued';
       j.error = null;
@@ -3921,6 +4010,7 @@ async function startSelectedUpload(explicitJobs) {
   };
     const result = await window.api.startUpload(uploadPayload);
     if (result && result.error) {
+      restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
       restoreUploadJobStates(originalStates);
       const error = sanitizeUploadControlError(result.error, 'Upload konnte nicht gestartet werden.');
       uploading = false;
@@ -3938,6 +4028,7 @@ async function startSelectedUpload(explicitJobs) {
 
     return { ok: true };
   } catch (err) {
+    restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
     restoreUploadJobStates(originalStates);
     uploading = false;
     renderQueueTable();
