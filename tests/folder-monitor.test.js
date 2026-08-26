@@ -345,6 +345,35 @@ test('resume preserves session duplicate history', async () => {
   assert.equal(monitor.status().seenCount, 1);
 });
 
+test('watcher add paused before batch timeout is emitted exactly once by resume scan', async () => {
+  const timers = createManualTimers();
+  const watchers = [];
+  const newFiles = [];
+  const filePath = 'C:\\watch\\pending.mkv';
+  const monitor = new FolderMonitor({
+    watch: () => {
+      const watcher = new EventEmitter();
+      watcher.close = async () => {};
+      watchers.push(watcher);
+      return watcher;
+    },
+    access: async () => {},
+    walkFolder: async () => [{ path: filePath, name: 'pending.mkv', size: 1 }],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('new-files', (files) => newFiles.push(files));
+  const settings = { folderPath: 'C:\\watch', extensions: 'mkv', skipDuplicates: true, reconcileIntervalMinutes: 5 };
+  monitor.start(settings);
+  watchers[0].emit('add', filePath);
+  assert.deepEqual(newFiles, []);
+  await monitor.pause();
+  assert.deepEqual(newFiles, []);
+  await monitor.resume(settings);
+  assert.deepEqual(newFiles, [[filePath]]);
+  assert.equal(monitor.status().seenCount, 1);
+});
+
 test('dry scan leaves the public status byte-identical and does not consume reconnect state', async () => {
   let reachable = false;
   const timers = createManualTimers();
