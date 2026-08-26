@@ -59,6 +59,13 @@ test('automation settings allow only numeric and trimmed string zero to disable 
   assert.equal(normalizeAutomationSettings({ queueLimitJobs: ' 0 ' }).queueLimitJobs, 0);
 });
 
+test('automation settings clamp positive queue limit fractions to one', () => {
+  assert.deepEqual(
+    [0.5, '0.5', 0.125].map((queueLimitJobs) => normalizeAutomationSettings({ queueLimitJobs }).queueLimitJobs),
+    [1, 1, 1]
+  );
+});
+
 test('capacity counts only executable and running queue jobs', () => {
   const statuses = ['preview', 'queued', 'getting-server', 'uploading', 'retrying', 'done', 'error', 'aborted', 'skipped'];
   assert.equal(countAutomaticQueueJobs(statuses.map((status, index) => ({ id: String(index), status }))), 5);
@@ -142,6 +149,20 @@ test('admission allows only numeric and trimmed string zero to disable the queue
       currentJobCount: 0,
       plannedJobs: 16000,
       availableSlots: null
+    }))
+  );
+});
+
+test('admission keeps positive queue limit fractions bounded to one job', () => {
+  const candidate = { path: 'two-jobs.mkv', mtimeMs: 1, eligibleJobCount: 2 };
+  assert.deepEqual(
+    [0.5, '0.5', 0.125].map((queueLimitJobs) => planAtomicAdmissions({ candidates: [candidate], queueLimitJobs })),
+    [0.5, '0.5', 0.125].map(() => ({
+      admittedPaths: [],
+      deferredPaths: ['two-jobs.mkv'],
+      currentJobCount: 0,
+      plannedJobs: 0,
+      availableSlots: 1
     }))
   );
 });
