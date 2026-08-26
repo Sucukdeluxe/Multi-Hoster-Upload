@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const FolderMonitor = require('../lib/folder-monitor');
+const { classifyProcessedCandidates, planAtomicAdmissions } = require('../lib/automation-control');
 
 function createWatcherHarness() {
   const calls = [];
@@ -208,6 +209,20 @@ test('pause stops watcher and reconciliation until explicit resume', async () =>
   await monitor.resume({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
   assert.equal(scanCalls(), 1);
   assert.equal(monitor.status().paused, false);
+});
+
+test('repeated pause emits one status change and keeps reconciliation stopped', async () => {
+  const { monitor, statusEvents, runInterval, scanCalls } = createReachabilityHarness(true);
+  monitor.start({ folderPath: 'C:\\watch', reconcileIntervalMinutes: 5 });
+  const statusCountBeforePause = statusEvents.length;
+
+  await monitor.pause();
+  await monitor.pause();
+  await runInterval();
+
+  assert.equal(statusEvents.length, statusCountBeforePause + 1);
+  assert.equal(statusEvents.at(-1).paused, true);
+  assert.equal(scanCalls(), 0);
 });
 
 test('stop emits an immutable non-running status snapshot', () => {
@@ -536,26 +551,88 @@ test('interval callback contains unexpected scan rejection', async () => {
   assert.equal(statuses.at(-1).error.includes('interval-secret'), false);
 });
 
-test('real temporary folder scan survives disconnect and reconnect', async () => {
+test('real temporary folder converges through startup interval capacity recovery and one reconnect', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-folder-'));
   const detached = `${root}-detached`;
+  const timers = createManualTimers();
+  const queuedPaths = new Set();
+  const admissions = [];
+  let currentJobCount = 14998;
   try {
     fs.mkdirSync(path.join(root, 'nested'));
-    fs.writeFileSync(path.join(root, 'a.mkv'), Buffer.from('a'));
-    fs.writeFileSync(path.join(root, 'ignored.txt'), Buffer.from('b'));
-    fs.writeFileSync(path.join(root, 'nested', 'c.mkv'), Buffer.from('c'));
-    const monitor = new FolderMonitor();
-    monitor.start({ folderPath: root, recursive: true, extensions: 'mkv', filterMode: 'include', reconcileIntervalMinutes: 5 });
-    const first = await monitor.scan({ emitFiles: false, trigger: 'test' });
-    assert.deepEqual(first.files.map((file) => file.name).sort(), ['a.mkv', 'c.mkv']);
+    const fourJobPath = path.join(root, 'four-jobs.mkv');
+    const twoJobPath = path.join(root, 'nested', 'two-jobs.mkv');
+    fs.writeFileSync(fourJobPath, Buffer.from('four'));
+    fs.writeFileSync(path.join(root, 'ignored.txt'), Buffer.from('ignored'));
+    fs.writeFileSync(twoJobPath, Buffer.from('two'));
+    fs.writeFileSync(path.join(root, 'nested', 'excluded.mp4'), Buffer.from('excluded'));
+    fs.utimesSync(fourJobPath, new Date('2020-01-01T00:00:00.000Z'), new Date('2020-01-01T00:00:00.000Z'));
+    fs.utimesSync(twoJobPath, new Date('2020-01-02T00:00:00.000Z'), new Date('2020-01-02T00:00:00.000Z'));
+    const monitor = new FolderMonitor({ watch: createSilentWatch(), ...timers });
+    monitor.on('new-files', (paths) => {
+      const descriptors = paths.map(filePath => ({
+        path: filePath,
+        name: path.basename(filePath),
+        mtimeMs: fs.statSync(filePath).mtimeMs
+      }));
+      const processed = classifyProcessedCandidates({ candidates: descriptors, queuePaths: [...queuedPaths] });
+      const unprocessed = new Set(processed.unprocessedPaths);
+      const candidates = descriptors
+        .filter(file => unprocessed.has(file.path))
+        .map(file => ({ ...file, eligibleJobCount: file.name === 'four-jobs.mkv' ? 4 : 2 }));
+      const plan = planAtomicAdmissions({ candidates, currentJobCount, queueLimitJobs: 15000 });
+      for (const filePath of plan.admittedPaths) queuedPaths.add(filePath);
+      currentJobCount += plan.plannedJobs;
+      admissions.push({
+        trigger: monitor.status().lastScanTrigger,
+        admittedPaths: plan.admittedPaths,
+        deferredPaths: plan.deferredPaths,
+        currentJobCount
+      });
+    });
+    monitor.start({
+      folderPath: root,
+      recursive: true,
+      extensions: 'mkv',
+      filterMode: 'include',
+      skipDuplicates: false,
+      reconcileIntervalMinutes: 5
+    });
+
+    const first = await monitor.scan({ emitFiles: true, trigger: 'startup' });
+    assert.deepEqual(first.files.map(file => file.name).sort(), ['four-jobs.mkv', 'two-jobs.mkv']);
     assert.equal(first.files.every((file) => Number.isFinite(file.mtimeMs)), true);
+    assert.deepEqual(admissions[0], {
+      trigger: 'startup',
+      admittedPaths: [twoJobPath],
+      deferredPaths: [fourJobPath],
+      currentJobCount: 15000
+    });
+
+    currentJobCount = 14996;
+    await timers.runInterval();
+    assert.deepEqual(admissions[1], {
+      trigger: 'interval',
+      admittedPaths: [fourJobPath],
+      deferredPaths: [],
+      currentJobCount: 15000
+    });
+
     fs.renameSync(root, detached);
-    const disconnected = await monitor.scan({ emitFiles: true, trigger: 'interval' });
-    assert.equal(disconnected.reachable, false);
+    await timers.runInterval();
+    assert.equal(monitor.status().reachable, false);
+    assert.equal(admissions.length, 2);
+
     fs.renameSync(detached, root);
-    const reconnected = await monitor.scan({ emitFiles: true, trigger: 'interval' });
-    assert.equal(reconnected.reachable, true);
-    assert.equal(reconnected.reconnected, true);
+    await timers.runInterval();
+    assert.equal(monitor.status().reachable, true);
+    assert.equal(admissions.at(-1).trigger, 'reconnect');
+    assert.deepEqual(admissions.at(-1).admittedPaths, []);
+
+    await timers.runInterval();
+    assert.equal(admissions.filter(entry => entry.trigger === 'reconnect').length, 1);
+    assert.equal(admissions.at(-1).trigger, 'interval');
+    assert.deepEqual([...queuedPaths].sort(), [fourJobPath, twoJobPath].sort());
     await monitor.pause();
   } finally {
     if (fs.existsSync(detached)) fs.renameSync(detached, root);

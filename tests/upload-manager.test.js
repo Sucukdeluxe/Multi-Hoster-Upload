@@ -618,7 +618,13 @@ describe('UploadManager', () => {
       'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
     });
     const settled = new Map();
-    mgr.on('job-settled', event => settled.set(event.jobId, event.status));
+    const settledEvents = [];
+    const batchDoneEvents = [];
+    mgr.on('job-settled', event => {
+      settled.set(event.jobId, event.status);
+      settledEvents.push({ jobId: event.jobId, status: event.status });
+    });
+    mgr.on('batch-done', event => batchDoneEvents.push(event));
     const batch = mgr.startBatch([
       { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
       { jobId: 'queued', file: '/test/queued.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
@@ -630,12 +636,16 @@ describe('UploadManager', () => {
     assert.equal(typeof releaseActive, 'function');
 
     mgr.finishAfterActive();
+    mgr.finishAfterActive();
     releaseActive();
     await batch;
 
     assert.deepEqual(started, ['/test/active.mp4']);
     assert.equal(settled.get('active'), 'done');
     assert.equal(settled.get('queued'), 'aborted');
+    assert.equal(settledEvents.filter(event => event.jobId === 'active').length, 1);
+    assert.equal(settledEvents.filter(event => event.jobId === 'queued').length, 1);
+    assert.equal(batchDoneEvents.length, 1);
   });
 
   it('_combineSignals propagates abort from either source', () => {

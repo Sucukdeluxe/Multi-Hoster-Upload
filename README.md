@@ -139,10 +139,22 @@ Folder monitoring watches for new files while the application is running. Config
 2. Use an include or exclude extension list such as `mp4,mkv`.
 3. Set a write-completion delay so partially copied files are not queued too early.
 4. Choose whether duplicate file events are ignored during the current monitoring session.
-5. Select the destination hosts and decide whether matching jobs start automatically.
-6. Enable monitoring and save the settings.
+5. Set the maximum automatic queue size. The default is `15,000` jobs; `0` means unlimited.
+6. Select a reconciliation interval of 1, 5, 15, 30, or 60 minutes. The default is 5 minutes.
+7. Select the destination hosts and decide whether matching jobs start automatically.
+8. Enable monitoring and save the settings.
 
-The watcher ignores files that already exist when monitoring starts. New matching files are collected after they have remained stable for the configured delay. If no hosts are preselected, the application asks for destinations instead of starting a batch automatically.
+The status card summarizes the complete automation state. **Inactive** means monitoring is disabled or has no usable path. **Active** means the watcher and reconciliation are running. **Paused** means the persistent manual pause is in effect. **Queue limit reached** means matching files are being deferred until capacity becomes available. **Folder disconnected** means the configured folder is currently missing or unreadable and will be checked again. **Error** reports another monitoring failure. The card also shows reachability, current queue use, today's counters, the latest detected file, reconciliation times, and the latest error when one exists.
+
+**Test folder monitoring** performs a read-only full scan with the current folder, filter, subfolder, destination, size-limit, processed-file, and queue-limit rules. It reports aggregate counts without changing the queue, selected files, telemetry, history, logs, source files, settings, or the one-time existing-file option.
+
+The automatic queue limit counts preview, queued, server-selection, uploading, and retrying jobs. Manual imports remain available and also consume queue capacity. Admission is file-atomic: all eligible destination jobs for one file are admitted together, or the complete file is deferred. A deferred file is reconsidered by a later reconciliation after capacity becomes available. Setting the limit to `0` disables this automatic backpressure.
+
+New matching files are collected after they have remained stable for the configured delay. The optional one-time existing-file scan, live watcher events, interval scans, and reconnect scans use the same filtering and admission path. Reconciliation checks the complete folder at the selected interval. A missing folder keeps its configuration; after it becomes reachable again, exactly one reconnect scan runs before normal interval scans continue. If no hosts are preselected, the application asks for destinations instead of starting a batch automatically.
+
+**Finish and pause** saves the pause before allowing active uploads to finish. While paused, no watcher, reconciliation, queued upload start, automatic start, or active-batch injection can proceed. Manual files can still be imported as preview jobs. The pause survives an application restart. **Resume** explicitly removes it, restarts monitoring, and performs one reconciliation without automatically starting existing preview jobs.
+
+For automation decisions, **already processed** describes current evidence only: exact paths in the current queue, successful history results, and successful entries in the application's upload log. It is not a permanent file registry. A basename-only match is accepted only when it identifies one candidate unambiguously; same-named files from different folders remain eligible unless exact current evidence identifies them.
 
 ## History, retention, links, and export
 
@@ -233,7 +245,9 @@ You can always install manually from the [GitHub releases page](https://github.c
 ### Folder monitoring does not add a file
 
 - Confirm that monitoring is enabled and the selected folder still exists.
-- Remember that existing files are ignored when the watcher starts.
+- Check the status card for a persistent pause, a disconnected folder, an error, or a full automatic queue.
+- Use **Test folder monitoring** to inspect the current read-only classification.
+- Enable the one-time existing-file option when files already present at activation should be considered.
 - Check the include or exclude extension list and the subfolder option.
 - Wait for the configured write-completion delay.
 - Confirm that at least one destination host is selected if automatic start is enabled.

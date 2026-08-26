@@ -53,7 +53,7 @@ test('production startup never forces software compositing', () => {
   }
 });
 
-test('Windows compositor paints the full hidden surface with an RDP session environment', { skip: process.platform !== 'win32' }, () => {
+test('Windows compositor paints the full hidden surface with an RDP session environment', { skip: process.platform !== 'win32' }, (t) => {
   const projectRoot = path.join(__dirname, '..');
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-rdp-compositor-'));
   const probePath = path.join(probeRoot, 'probe.cjs');
@@ -795,6 +795,23 @@ contextBridge.exposeInMainWorld('api', {
       rebuildJobIndex();
       window.api.configureAutomationProbe({ paused: false });
     };
+    configureAtomicState(0);
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    hosterSettings = {};
+    const parallelFile = { path: 'C:\\\\watch\\\\parallel.mkv', name: 'parallel.mkv', size: 1, mtimeMs: 1 };
+    const parallelResults = await Promise.all([
+      handleFolderMonitorFiles([parallelFile, { ...parallelFile, path: 'c:\\\\WATCH\\\\parallel.mkv' }]),
+      handleFolderMonitorFiles([{ ...parallelFile }]),
+      handleFolderMonitorFiles([{ ...parallelFile, path: 'C:\\\\watch\\\\PARALLEL.mkv' }])
+    ]);
+    const parallelAdmission = {
+      admittedFiles: parallelResults.flatMap(result => result.admittedFiles.map(file => file.name)),
+      matchingJobs: queueJobs.filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(parallelFile.path)).length,
+      matchingPaths: [...new Set(queueJobs
+        .filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(parallelFile.path))
+        .map(job => normalizeAutomationPath(job.file)))],
+      queuedTelemetry: config.globalSettings.folderMonitor.telemetry.queued
+    };
     const atomicCandidates = [
       { path: 'C:\\\\watch\\\\a.mkv', name: 'a.mkv', size: 1024 * 1024, mtimeMs: 1, filterMatched: true },
       { path: 'C:\\\\watch\\\\b.mkv', name: 'b.mkv', size: 3 * 1024 * 1024, mtimeMs: 2, filterMatched: true }
@@ -828,6 +845,42 @@ contextBridge.exposeInMainWorld('api', {
       availableSlots: statusSnapshot.availableSlots,
       queueLimited: statusSnapshot.queueLimited,
       frozen: Object.isFrozen(statusSnapshot) && Object.isFrozen(statusSnapshot.telemetry)
+    };
+    const stressStartedAt = performance.now();
+    const stressQueue = Array.from({ length: 14996 }, (_, index) => ({
+      id: 'stress-queue-' + index,
+      file: 'C:\\\\stress\\\\queued-' + index + '.mkv',
+      status: 'queued'
+    }));
+    const stressCandidateCount = 15000;
+    const stressCandidates = Array.from({ length: stressCandidateCount }, (_, index) => ({
+      path: 'C:\\\\stress\\\\candidate-' + String(index).padStart(5, '0') + '.mkv',
+      mtimeMs: index,
+      eligibleJobCount: 4
+    }));
+    const stressCurrentJobCount = window.AutomationControl.countAutomaticQueueJobs(stressQueue);
+    const stressPlan = window.AutomationControl.planAtomicAdmissions({
+      candidates: stressCandidates,
+      currentJobCount: stressCurrentJobCount,
+      queueLimitJobs: Number.POSITIVE_INFINITY
+    });
+    const stressDomRowsBefore = document.querySelectorAll('#queueBody .queue-row').length;
+    queueJobs = stressQueue;
+    config.globalSettings.folderMonitor.queueLimitJobs = Number.POSITIVE_INFINITY;
+    rebuildJobIndex();
+    const stressSnapshot = createAutomationStatusSnapshot();
+    const stressDomRowsAfter = document.querySelectorAll('#queueBody .queue-row').length;
+    const stress = {
+      candidateCount: stressCandidateCount,
+      currentJobCount: stressPlan.currentJobCount,
+      plannedJobs: stressPlan.plannedJobs,
+      deferredPaths: stressPlan.deferredPaths.length,
+      queueLimitJobs: stressSnapshot.queueLimitJobs,
+      snapshotCurrentJobCount: stressSnapshot.currentJobCount,
+      snapshotAvailableSlots: stressSnapshot.availableSlots,
+      domRowsBefore: stressDomRowsBefore,
+      domRowsAfter: stressDomRowsAfter,
+      durationMs: performance.now() - stressStartedAt
     };
 
     configureAtomicState(0);
@@ -1701,11 +1754,12 @@ contextBridge.exposeInMainWorld('api', {
     const paused = {
       uploading,
       statuses: Object.fromEntries(queueJobs.map(job => [job.fileName, job.status])),
+      manualPreviewJobs: queueJobs.filter(job => job.fileName === 'allowed-preview.mkv' && job.status === 'preview').length,
       automaticApplied: pausedAutomaticResult.admittedFiles.length,
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, manualHostTransactional, atomic, status, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, manualHostTransactional, atomic, status, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
   })()`;
   const automationControlCenterScript = `(async () => {
     const waitFor = async predicate => {
@@ -2429,6 +2483,12 @@ app.whenReady().then(async () => {
       pendingAccepted: 1,
       markerPaths: ['c:/pending/overlap.mkv']
     });
+    assert.deepEqual(result.automationPipeline.parallelAdmission, {
+      admittedFiles: ['parallel.mkv'],
+      matchingJobs: 1,
+      matchingPaths: ['c:/watch/parallel.mkv'],
+      queuedTelemetry: 1
+    });
     assert.deepEqual(result.automationPipeline.manualHostTransactional, {
       readFailure: {
         result: { ok: false, error: 'Automatische Aufnahme konnte nicht abgeschlossen werden.' },
@@ -2467,6 +2527,17 @@ app.whenReady().then(async () => {
       queueLimited: true,
       frozen: true
     });
+    assert.equal(result.automationPipeline.stress.candidateCount, 15000);
+    assert.equal(result.automationPipeline.stress.currentJobCount, 14996);
+    assert.equal(result.automationPipeline.stress.plannedJobs, 4);
+    assert.equal(result.automationPipeline.stress.deferredPaths, 14999);
+    assert.equal(result.automationPipeline.stress.queueLimitJobs, 15000);
+    assert.equal(result.automationPipeline.stress.snapshotCurrentJobCount, 14996);
+    assert.equal(result.automationPipeline.stress.snapshotAvailableSlots, 4);
+    assert.equal(result.automationPipeline.stress.domRowsAfter, result.automationPipeline.stress.domRowsBefore);
+    assert.ok(result.automationPipeline.stress.domRowsAfter < 15000);
+    assert.ok(result.automationPipeline.stress.durationMs < 1000, `15,000-job stress took ${result.automationPipeline.stress.durationMs}ms`);
+    t.diagnostic(`automation-stress-duration-ms=${result.automationPipeline.stress.durationMs.toFixed(3)}`);
     assert.deepEqual(result.automationPipeline.persistedQueueExactness, {
       restoredSelectedFiles: [],
       automationMarkers: 2,
@@ -2764,6 +2835,7 @@ app.whenReady().then(async () => {
         'paused-preview.mkv': 'preview',
         'allowed-preview.mkv': 'preview'
       },
+      manualPreviewJobs: 1,
       automaticApplied: 0,
       startCalls: 0,
       injectCalls: 0
@@ -3216,59 +3288,244 @@ app.whenReady().then(async () => {
   }
 });
 
-test('persisted automation pause rejects batch starts through hidden real IPC', { skip: process.platform !== 'win32' }, () => {
+test('persisted automation pause survives runtime restart and resumes one reconciliation without starting previews', { skip: process.platform !== 'win32' }, () => {
   const projectRoot = path.join(__dirname, '..');
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
   const startUploadStart = mainSource.indexOf("ipcMain.handle('start-upload'");
-  const startUploadEnd = mainSource.indexOf('\n// Logged at batch boundaries', startUploadStart);
+  const startUploadEnd = mainSource.indexOf("\nipcMain.handle('cancel-upload'", startUploadStart);
   const addJobsStart = mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'");
   const addJobsEnd = mainSource.indexOf("\nipcMain.handle('finish-after-active'", addJobsStart);
+  const automationStart = mainSource.indexOf('const automationLifecycleQueue = []');
+  const automationEnd = mainSource.indexOf("\nipcMain.handle('folder-monitor:select-folder'", automationStart);
+  const startupStart = mainSource.indexOf('  try {\n    const launchConfig = configStore.load();');
+  const startupEnd = mainSource.indexOf('\n  // Auto-start remote server', startupStart);
   assert.notEqual(startUploadStart, -1);
   assert.notEqual(startUploadEnd, -1);
   assert.notEqual(addJobsStart, -1);
   assert.notEqual(addJobsEnd, -1);
+  assert.notEqual(automationStart, -1);
+  assert.notEqual(automationEnd, -1);
+  assert.notEqual(startupStart, -1);
+  assert.notEqual(startupEnd, -1);
   const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-pause-ipc-'));
   const probePath = path.join(probeRoot, 'probe.cjs');
   const preloadPath = path.join(probeRoot, 'preload.cjs');
   const rendererPath = path.join(probeRoot, 'renderer.html');
   const outputPath = path.join(probeRoot, 'result.json');
   const userDataPath = path.join(probeRoot, 'user-data');
+  const watchPath = path.join(probeRoot, 'watch');
+  fs.mkdirSync(watchPath);
+  fs.writeFileSync(path.join(watchPath, 'manual-preview.mkv'), Buffer.from('preview'));
   fs.writeFileSync(preloadPath, `
 const { contextBridge, ipcRenderer } = require('electron');
-contextBridge.exposeInMainWorld('automationProbe', {
-  start: () => ipcRenderer.invoke('start-upload', { files: [], hosters: [], jobs: [] }),
-  extend: () => ipcRenderer.invoke('add-jobs-to-batch', { jobs: [], sourceCleanupGroups: [] })
+contextBridge.exposeInMainWorld('restartProbe', {
+  status: () => ipcRenderer.invoke('automation:get-status'),
+  startMonitor: settings => ipcRenderer.invoke('folder-monitor:start', settings),
+  reconcile: () => ipcRenderer.invoke('folder-monitor:reconcile'),
+  start: job => ipcRenderer.invoke('start-upload', { files: [], hosters: [], jobs: [job] }),
+  extend: job => ipcRenderer.invoke('add-jobs-to-batch', { jobs: [job], sourceCleanupGroups: [] }),
+  resume: () => ipcRenderer.invoke('automation:resume'),
+  pause: () => ipcRenderer.invoke('automation:pause-after-active'),
+  counters: () => ipcRenderer.invoke('probe:counters'),
+  waitCleanup: () => ipcRenderer.invoke('probe:wait-cleanup'),
+  releaseCleanup: () => ipcRenderer.invoke('probe:release-cleanup')
 });
 `, 'utf8');
   fs.writeFileSync(rendererPath, `<!doctype html><html><body><script>
 (async () => {
-  const start = await window.automationProbe.start();
-  const extend = await window.automationProbe.extend();
-  window.__automationPauseResult = { start, extend };
-})().catch(error => { window.__automationPauseResult = { error: error.message || String(error) }; });
+  const captureFailure = async operation => {
+    try {
+      return { ok: true, value: await operation() };
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  };
+  const preview = {
+    id: 'manual-preview',
+    file: 'C:\\\\manual\\\\preview.mkv',
+    fileName: 'preview.mkv',
+    hoster: 'doodstream.com',
+    status: 'preview'
+  };
+  const initial = await window.restartProbe.status();
+  const monitorStart = await window.restartProbe.startMonitor({ folderPath: 'C:\\\\blocked' });
+  const reconcile = await captureFailure(() => window.restartProbe.reconcile());
+  const start = await window.restartProbe.start(preview);
+  const extend = await window.restartProbe.extend(preview);
+  const beforeResume = await window.restartProbe.counters();
+  const resume = await window.restartProbe.resume();
+  const afterResume = await window.restartProbe.counters();
+  const lateJob = {
+    id: 'late-add',
+    file: 'C:\\\\manual\\\\late-add.mkv',
+    fileName: 'late-add.mkv',
+    hoster: 'doodstream.com',
+    status: 'preview'
+  };
+  const latePromise = window.restartProbe.extend(lateJob);
+  await window.restartProbe.waitCleanup();
+  const pause = await window.restartProbe.pause();
+  await window.restartProbe.releaseCleanup();
+  const late = await latePromise;
+  const final = await window.restartProbe.counters();
+  window.__automationRestartResult = {
+    initial,
+    monitorStart,
+    reconcile,
+    start,
+    extend,
+    previewStatus: preview.status,
+    beforeResume,
+    resume,
+    afterResume,
+    pause,
+    late,
+    final
+  };
+})().catch(error => { window.__automationRestartResult = { error: error.stack || error.message || String(error) }; });
 </script></body></html>`, 'utf8');
   const productionHandlers = `${mainSource.slice(startUploadStart, startUploadEnd)}\n${mainSource.slice(addJobsStart, addJobsEnd)}`;
+  const automationHandlers = mainSource.slice(automationStart, automationEnd);
+  const startupAutomation = mainSource.slice(startupStart, startupEnd);
   const probeSource = `
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
+const path = require('node:path');
 const ConfigStore = require(${JSON.stringify(path.join(projectRoot, 'lib', 'config-store.js'))});
+const FolderMonitor = require(${JSON.stringify(path.join(projectRoot, 'lib', 'folder-monitor.js'))});
 const outputPath = process.env.MHU_AUTOMATION_OUTPUT;
 const rendererPath = process.env.MHU_AUTOMATION_RENDERER;
 const preloadPath = process.env.MHU_AUTOMATION_PRELOAD;
+const watchPath = process.env.MHU_AUTOMATION_WATCH;
 app.setPath('userData', process.env.MHU_AUTOMATION_USER_DATA);
-const configStore = new ConfigStore(app);
+let configStore;
 let closeFlushRequested = false;
 const settingsImportGate = { canStartUpload: () => true };
-let uploadManager = { running: false };
+const sentEvents = [];
+const intervalCallbacks = new Set();
+const timeoutCallbacks = new Set();
+let watcherStarts = 0;
+let watcherCloseCalls = 0;
+let walkCalls = 0;
+let addJobsCalls = 0;
+let startBatchCalls = 0;
+let finishCalls = 0;
+let cleanupRelease;
+let cleanupStartedResolve;
+const cleanupStarted = new Promise(resolve => { cleanupStartedResolve = resolve; });
+const folderMonitor = new FolderMonitor({
+  watch: () => {
+    watcherStarts++;
+    const watcher = new EventEmitter();
+    watcher.close = async () => { watcherCloseCalls++; };
+    return watcher;
+  },
+  access: fs.promises.access,
+  walkFolder: async folderPath => {
+    walkCalls++;
+    const filePath = path.join(folderPath, 'manual-preview.mkv');
+    return [{ path: filePath, name: 'manual-preview.mkv', size: fs.statSync(filePath).size }];
+  },
+  stat: fs.promises.stat,
+  setIntervalFn: callback => {
+    intervalCallbacks.add(callback);
+    return callback;
+  },
+  clearIntervalFn: callback => intervalCallbacks.delete(callback),
+  setTimeoutFn: callback => {
+    timeoutCallbacks.add(callback);
+    return callback;
+  },
+  clearTimeoutFn: callback => timeoutCallbacks.delete(callback)
+});
+const safeSend = (channel, payload) => sentEvents.push({ channel, payload });
+const debugLog = () => {};
+const makeAccountPicker = () => ({});
+const persistRotation = () => {};
+const buildUploadTasksFromJobs = (_config, jobs) => jobs.map(job => ({
+  jobId: job.id,
+  file: job.file,
+  hoster: job.hoster
+}));
+const appendUploadPlanAudit = async () => {};
+const summarizeBatchPlan = ({ jobs = [] } = {}) => ({
+  fileCount: jobs.length,
+  destinationCount: jobs.length,
+  plannedUploadCount: jobs.length
+});
+let uploadManager = {
+  running: true,
+  sourceFileCleanup: {
+    registerGroups: async () => {
+      cleanupStartedResolve();
+      await new Promise(resolve => { cleanupRelease = resolve; });
+      return {};
+    },
+    markSkipped: () => {}
+  },
+  addJobs: tasks => {
+    addJobsCalls++;
+    return { added: tasks.length, alreadyInBatchJobIds: [] };
+  },
+  startBatch: () => {
+    startBatchCalls++;
+    return Promise.resolve();
+  },
+  finishAfterActive: () => { finishCalls++; }
+};
 ${productionHandlers}
+${automationHandlers}
+ipcMain.handle('probe:counters', () => ({
+  watcherStarts,
+  watcherCloseCalls,
+  intervalCount: intervalCallbacks.size,
+  timeoutCount: timeoutCallbacks.size,
+  walkCalls,
+  addJobsCalls,
+  startBatchCalls,
+  finishCalls,
+  newFileEvents: sentEvents.filter(event => event.channel === 'folder-monitor:new-files').length,
+  configPaused: configStore.load().globalSettings.folderMonitor.paused === true,
+  monitor: folderMonitor.status()
+}));
+ipcMain.handle('probe:wait-cleanup', async () => {
+  await cleanupStarted;
+  return true;
+});
+ipcMain.handle('probe:release-cleanup', () => {
+  if (cleanupRelease) cleanupRelease();
+  return true;
+});
 app.whenReady().then(async () => {
-  const current = configStore.load();
-  await configStore.save({
+  const initialStore = new ConfigStore(app);
+  const current = initialStore.load();
+  await initialStore.save({
     globalSettings: {
       ...current.globalSettings,
-      folderMonitor: { ...current.globalSettings.folderMonitor, paused: true, pausedAt: Date.now() }
+      folderMonitor: {
+        ...current.globalSettings.folderMonitor,
+        enabled: true,
+        folderPath: watchPath,
+        recursive: true,
+        extensions: 'mkv',
+        filterMode: 'include',
+        hosters: ['doodstream.com'],
+        paused: true,
+        pausedAt: 1787712000000
+      }
     }
   });
+  configStore = new ConfigStore(app);
+  const restartedSettings = configStore.load().globalSettings.folderMonitor;
+${startupAutomation}
+  const pausedStartup = {
+    configPaused: restartedSettings.paused === true,
+    pausedAt: restartedSettings.pausedAt,
+    watcherStarts,
+    intervalCount: intervalCallbacks.size,
+    walkCalls
+  };
   const window = new BrowserWindow({
     show: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, preload: preloadPath }
@@ -3276,11 +3533,11 @@ app.whenReady().then(async () => {
   await window.loadFile(rendererPath);
   let result = null;
   for (let attempt = 0; attempt < 200; attempt++) {
-    result = await window.webContents.executeJavaScript('window.__automationPauseResult || null');
+    result = await window.webContents.executeJavaScript('window.__automationRestartResult || null');
     if (result) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  fs.writeFileSync(outputPath, JSON.stringify({ hidden: window.isVisible() === false, result }), 'utf8');
+  fs.writeFileSync(outputPath, JSON.stringify({ hidden: window.isVisible() === false, pausedStartup, result }), 'utf8');
   window.destroy();
   app.exit(0);
 }).catch(error => {
@@ -3291,15 +3548,18 @@ app.whenReady().then(async () => {
   fs.writeFileSync(probePath, probeSource, 'utf8');
   try {
     const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const probeEnvironment = {
+      ...process.env,
+      MHU_AUTOMATION_OUTPUT: outputPath,
+      MHU_AUTOMATION_RENDERER: rendererPath,
+      MHU_AUTOMATION_PRELOAD: preloadPath,
+      MHU_AUTOMATION_USER_DATA: userDataPath,
+      MHU_AUTOMATION_WATCH: watchPath
+    };
+    delete probeEnvironment.RUN_UI_SMOKE;
     const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
       cwd: projectRoot,
-      env: {
-        ...process.env,
-        MHU_AUTOMATION_OUTPUT: outputPath,
-        MHU_AUTOMATION_RENDERER: rendererPath,
-        MHU_AUTOMATION_PRELOAD: preloadPath,
-        MHU_AUTOMATION_USER_DATA: userDataPath
-      },
+      env: probeEnvironment,
       encoding: 'utf8',
       windowsHide: true,
       timeout: 30000
@@ -3307,13 +3567,43 @@ app.whenReady().then(async () => {
     assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}`);
     const outcome = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
     assert.equal(outcome.error, undefined);
-    assert.deepEqual(outcome, {
-      hidden: true,
-      result: {
-        start: { error: 'Automatik ist pausiert' },
-        extend: { error: 'Automatik ist pausiert' }
-      }
+    assert.equal(outcome.hidden, true);
+    assert.deepEqual(outcome.pausedStartup, {
+      configPaused: true,
+      pausedAt: 1787712000000,
+      watcherStarts: 0,
+      intervalCount: 0,
+      walkCalls: 0
     });
+    assert.equal(outcome.result.error, undefined);
+    assert.equal(outcome.result.initial.paused, true);
+    assert.deepEqual(outcome.result.monitorStart, { error: 'Automatik ist pausiert' });
+    assert.equal(outcome.result.reconcile.ok, false);
+    assert.deepEqual(outcome.result.start, { error: 'Automatik ist pausiert' });
+    assert.deepEqual(outcome.result.extend, { error: 'Automatik ist pausiert' });
+    assert.equal(outcome.result.previewStatus, 'preview');
+    assert.equal(outcome.result.beforeResume.watcherStarts, 0);
+    assert.equal(outcome.result.beforeResume.intervalCount, 0);
+    assert.equal(outcome.result.beforeResume.walkCalls, 0);
+    assert.equal(outcome.result.resume.paused, false);
+    assert.equal(outcome.result.afterResume.watcherStarts, 1);
+    assert.equal(outcome.result.afterResume.intervalCount, 1);
+    assert.equal(outcome.result.afterResume.walkCalls, 1);
+    assert.equal(outcome.result.afterResume.newFileEvents, 1);
+    assert.equal(outcome.result.afterResume.addJobsCalls, 0);
+    assert.equal(outcome.result.afterResume.startBatchCalls, 0);
+    assert.equal(outcome.result.afterResume.monitor.lastScanTrigger, 'resume');
+    assert.deepEqual(outcome.result.late, { error: 'Automatik ist pausiert' });
+    assert.equal(outcome.result.pause.paused, true);
+    assert.equal(outcome.result.final.addJobsCalls, 0);
+    assert.equal(outcome.result.final.startBatchCalls, 0);
+    assert.equal(outcome.result.final.finishCalls, 1);
+    assert.equal(outcome.result.final.watcherCloseCalls, 1);
+    assert.equal(outcome.result.final.intervalCount, 0);
+    assert.equal(outcome.result.final.walkCalls, 1);
+    assert.equal(outcome.result.final.configPaused, true);
+    assert.equal(outcome.result.final.monitor.paused, true);
+    assert.equal(outcome.result.final.monitor.running, false);
   } finally {
     fs.rmSync(probeRoot, { recursive: true, force: true });
   }
