@@ -374,6 +374,39 @@ test('watcher add paused before batch timeout is emitted exactly once by resume 
   assert.equal(monitor.status().seenCount, 1);
 });
 
+test('synchronous pause during successful batch emission does not duplicate on resume', async () => {
+  const timers = createManualTimers();
+  const watchers = [];
+  const newFiles = [];
+  const filePath = 'C:\\watch\\delivered.mkv';
+  let pausePromise;
+  const monitor = new FolderMonitor({
+    watch: () => {
+      const watcher = new EventEmitter();
+      watcher.close = async () => {};
+      watchers.push(watcher);
+      return watcher;
+    },
+    access: async () => {},
+    walkFolder: async () => [{ path: filePath, name: 'delivered.mkv', size: 1 }],
+    stat: async () => ({ mtimeMs: 1 }),
+    ...timers
+  });
+  monitor.on('new-files', (files) => {
+    newFiles.push(files);
+    pausePromise = monitor.pause();
+  });
+  const settings = { folderPath: 'C:\\watch', extensions: 'mkv', skipDuplicates: true, reconcileIntervalMinutes: 5 };
+  monitor.start(settings);
+  watchers[0].emit('add', filePath);
+  await timers.runTimeouts();
+  await pausePromise;
+  assert.deepEqual(newFiles, [[filePath]]);
+  await monitor.resume(settings);
+  assert.deepEqual(newFiles, [[filePath]]);
+  assert.equal(monitor.status().seenCount, 1);
+});
+
 test('pause rollback never deletes historical seen state from a dedupe-off batch', async () => {
   const timers = createManualTimers();
   const watchers = [];
