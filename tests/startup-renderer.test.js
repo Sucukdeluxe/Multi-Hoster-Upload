@@ -3540,7 +3540,7 @@ app.whenReady().then(async () => {
 
 test('persisted automation pause survives runtime restart and resumes one reconciliation without starting previews', { skip: process.platform !== 'win32' }, () => {
   const projectRoot = path.join(__dirname, '..');
-  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8').replace(/\r\n?/gu, '\n');
   const startUploadStart = mainSource.indexOf("ipcMain.handle('start-upload'");
   const startUploadEnd = mainSource.indexOf("\nipcMain.handle('cancel-upload'", startUploadStart);
   const addJobsStart = mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'");
