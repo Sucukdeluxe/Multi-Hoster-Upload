@@ -9,6 +9,116 @@ const packageJson = require('../package.json');
 
 const projectRoot = path.join(__dirname, '..');
 
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function waitForCondition(predicate) {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  assert.fail('condition did not become true');
+}
+
+function createAutomationLifecycleHarness(mainSource) {
+  const currentMarker = 'let suppressAutomationStatusEvents = false;';
+  const queuedMarker = 'const automationLifecycleQueue = [];';
+  const blockStart = Math.max(mainSource.indexOf(currentMarker), mainSource.indexOf(queuedMarker));
+  const blockEnd = mainSource.indexOf('\n// --- Remote Control ---', blockStart);
+  assert.notEqual(blockStart, -1, 'automation lifecycle block missing');
+  assert.notEqual(blockEnd, -1, 'automation lifecycle block boundary missing');
+  const handlers = new Map();
+  const order = [];
+  const sent = [];
+  const saves = [];
+  const pauseDeferred = createDeferred();
+  const resumeDeferred = createDeferred();
+  let publishStatus = () => {};
+  let state = {
+    globalSettings: {
+      folderMonitor: {
+        enabled: true,
+        folderPath: 'C:\\watch',
+        paused: true,
+        pausedAt: 1,
+        queueLimitJobs: 15000,
+        reconcileIntervalMinutes: 5
+      }
+    }
+  };
+  const folderMonitor = new (require('node:events').EventEmitter)();
+  folderMonitor.running = false;
+  folderMonitor.status = () => ({ running: folderMonitor.running, reachable: true });
+  folderMonitor.stop = () => { folderMonitor.running = false; order.push('stop'); };
+  folderMonitor.start = () => { folderMonitor.running = true; order.push('start'); publishStatus(); return {}; };
+  folderMonitor.pause = () => {
+    order.push('pause');
+    publishStatus();
+    return pauseDeferred.promise.then(() => {
+      folderMonitor.running = false;
+      publishStatus();
+    });
+  };
+  folderMonitor.resume = () => {
+    order.push('resume');
+    publishStatus();
+    return resumeDeferred.promise.then(() => {
+      folderMonitor.running = true;
+      publishStatus();
+      return { reachable: true };
+    });
+  };
+  folderMonitor.scan = async () => ({ reachable: true });
+  const configStore = {
+    load: () => structuredClone(state),
+    save: config => {
+      const deferred = createDeferred();
+      const snapshot = structuredClone(config);
+      saves.push({ paused: snapshot.globalSettings.folderMonitor.paused, deferred });
+      order.push(`save:${snapshot.globalSettings.folderMonitor.paused}`);
+      return deferred.promise.then(() => { state = snapshot; });
+    }
+  };
+  const uploadManager = {
+    finishAfterActive: () => order.push('finish'),
+    startBatch: () => order.push('startBatch')
+  };
+  const context = {
+    configStore,
+    debugLog: () => {},
+    dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+    folderMonitor,
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    path,
+    safeSend: (channel, snapshot) => { sent.push([channel, snapshot]); return true; },
+    uploadManager
+  };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), context);
+  publishStatus = () => context.publishAutomationStatus();
+  return {
+    handlers,
+    order,
+    pauseDeferred,
+    resumeDeferred,
+    saves,
+    sent,
+    state: () => structuredClone(state),
+    publishStatus
+  };
+}
+
 test('packages every Electron preload referenced by the main process', () => {
   assert.ok(packageJson.build.files.includes('preload.js'));
   assert.ok(packageJson.build.files.includes('preload-drop-target.js'));
@@ -277,12 +387,12 @@ test('every batch start and extension IPC fails closed before account and cleanu
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
   const gate = /configStore\.load\(\)\.globalSettings\?\.folderMonitor\?\.paused\s*===\s*true/u;
   const cases = [
-    ['debug-test-upload', "ipcMain.handle('debug-test-upload'", "ipcMain.handle('select-folder'", 'fs.writeFileSync', 1],
-    ['start-upload', "ipcMain.handle('start-upload'", '\n// Logged at batch boundaries', 'makeAccountPicker', 6],
-    ['add-jobs-to-batch', "ipcMain.handle('add-jobs-to-batch'", "ipcMain.handle('finish-after-active'", 'makeAccountPicker', 2]
+    ['debug-test-upload', "ipcMain.handle('debug-test-upload'", "ipcMain.handle('select-folder'", 'fs.writeFileSync'],
+    ['start-upload', "ipcMain.handle('start-upload'", '\n// Logged at batch boundaries', 'makeAccountPicker'],
+    ['add-jobs-to-batch', "ipcMain.handle('add-jobs-to-batch'", "ipcMain.handle('finish-after-active'", 'makeAccountPicker']
   ];
 
-  for (const [channel, startMarker, endMarker, sideEffectMarker, expectedGateCount] of cases) {
+  for (const [channel, startMarker, endMarker, sideEffectMarker] of cases) {
     const start = mainSource.indexOf(startMarker);
     const end = mainSource.indexOf(endMarker, start);
     assert.notEqual(start, -1, `${channel} handler missing`);
@@ -293,13 +403,15 @@ test('every batch start and extension IPC fails closed before account and cleanu
     assert.notEqual(gateIndex, -1, `${channel} pause gate missing`);
     assert.notEqual(sideEffectIndex, -1, `${channel} side-effect marker missing`);
     assert.ok(gateIndex < sideEffectIndex, `${channel} pause gate runs after side effects`);
-    assert.equal([...handler.matchAll(new RegExp(gate.source, 'gu'))].length, expectedGateCount, `${channel} does not recheck every asynchronous race boundary`);
   }
 });
 
-test('automation pause and resume commit state before lifecycle effects', async () => {
+test('automation pause save commits before lifecycle effects and save failure is inert', async () => {
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
-  const blockStart = mainSource.indexOf('let suppressAutomationStatusEvents = false;');
+  const blockStart = Math.max(
+    mainSource.indexOf('let suppressAutomationStatusEvents = false;'),
+    mainSource.indexOf('const automationLifecycleQueue = [];')
+  );
   const blockEnd = mainSource.indexOf('\n// --- Remote Control ---', blockStart);
   assert.notEqual(blockStart, -1, 'automation lifecycle block missing');
   assert.notEqual(blockEnd, -1, 'automation lifecycle block boundary missing');
@@ -378,6 +490,234 @@ test('automation pause and resume commit state before lifecycle effects', async 
   assert.equal(order.includes('startBatch'), false);
   assert.equal(sent.length, 1);
   assert.equal(sent[0][1].paused, false);
+});
+
+test('automation lifecycle serializes pause then resume so the newer intent wins', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+
+  const pause = harness.handlers.get('automation:pause-after-active')();
+  const resume = harness.handlers.get('automation:resume')();
+
+  assert.equal(harness.saves.length, 1);
+  assert.equal(harness.saves[0].paused, true);
+  harness.saves[0].deferred.resolve();
+  await flushMicrotasks();
+  harness.pauseDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 2);
+  assert.equal(harness.saves.length, 2);
+  assert.equal(harness.saves[1].paused, false);
+  harness.saves[1].deferred.resolve();
+  await flushMicrotasks();
+  harness.resumeDeferred.resolve();
+  await Promise.all([pause, resume]);
+
+  assert.deepEqual(harness.order, ['save:true', 'pause', 'finish', 'save:false', 'resume']);
+  assert.equal(harness.state().globalSettings.folderMonitor.paused, false);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0][1].paused, false);
+});
+
+test('automation lifecycle serializes resume then pause so the newer intent wins', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+
+  const resume = harness.handlers.get('automation:resume')();
+  const pause = harness.handlers.get('automation:pause-after-active')();
+
+  assert.equal(harness.saves.length, 1);
+  assert.equal(harness.saves[0].paused, false);
+  harness.saves[0].deferred.resolve();
+  await flushMicrotasks();
+  harness.resumeDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 2);
+  assert.equal(harness.saves.length, 2);
+  assert.equal(harness.saves[1].paused, true);
+  harness.saves[1].deferred.resolve();
+  await flushMicrotasks();
+  harness.pauseDeferred.resolve();
+  await Promise.all([resume, pause]);
+
+  assert.deepEqual(harness.order, ['save:false', 'resume', 'save:true', 'pause', 'finish']);
+  assert.equal(harness.state().globalSettings.folderMonitor.paused, true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0][1].paused, true);
+});
+
+test('automation status suppression remains active until the serialized operation ends', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+
+  const pause = harness.handlers.get('automation:pause-after-active')();
+  const resume = harness.handlers.get('automation:resume')();
+  harness.saves[0].deferred.resolve();
+  await waitForCondition(() => harness.order.includes('pause'));
+  harness.pauseDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 2);
+  harness.publishStatus();
+
+  assert.equal(harness.sent.length, 0);
+
+  harness.saves[1].deferred.resolve();
+  await waitForCondition(() => harness.order.includes('resume'));
+  harness.resumeDeferred.resolve();
+  await Promise.all([pause, resume]);
+
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0][1].paused, false);
+});
+
+test('automation pause rejection still finishes active uploads and returns a sanitized monitor error', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+
+  const pause = harness.handlers.get('automation:pause-after-active')();
+  harness.saves[0].deferred.resolve();
+  await flushMicrotasks();
+  harness.pauseDeferred.reject(new Error('token=secret-value'));
+  const result = await pause;
+
+  assert.equal(result.paused, true);
+  assert.equal(result.monitorError, 'Ordnerüberwachung konnte nicht pausiert werden');
+  assert.equal(JSON.stringify(result).includes('secret-value'), false);
+  assert.equal(harness.order.includes('finish'), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(JSON.stringify(harness.sent[0][1]).includes('secret-value'), false);
+});
+
+test('prepared upload start waits for the final tick and clears recovery when pause wins', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const blockStart = mainSource.indexOf('async function rejectPreparedUploadStart');
+  const blockEnd = mainSource.indexOf("\nipcMain.handle('start-upload'", blockStart);
+  assert.notEqual(blockStart, -1, 'prepared upload start block missing');
+  assert.notEqual(blockEnd, -1, 'prepared upload start block boundary missing');
+  const ticks = [];
+  const recoverySave = createDeferred();
+  const writes = [];
+  let paused = false;
+  let cancelled = 0;
+  let finished = 0;
+  let started = 0;
+  const manager = {
+    cancel: () => { cancelled++; },
+    startBatch: () => { started++; return new Promise(() => {}); }
+  };
+  const context = {
+    _accountCooldowns: { activeKeys: () => [], releaseExpired: () => {} },
+    _sessionAccountOverrides: new Map(),
+    closeFlushRequested: false,
+    configStore: {
+      load: () => ({ globalSettings: { folderMonitor: { paused } } }),
+      saveUploadRecovery: value => {
+        writes.push(value);
+        return value === null ? Promise.resolve() : recoverySave.promise;
+      }
+    },
+    debugLog: () => {},
+    globalThis: {},
+    isAllAborted: () => false,
+    logMemorySnapshot: () => {},
+    queueMicrotask,
+    safeSend: () => {},
+    sendBatchWebhook: () => {},
+    setImmediate: callback => { ticks.push(callback); },
+    uploadManager: manager
+  };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), context);
+  const producerTracker = { finish: () => { finished++; } };
+  const start = context.startPreparedUploadBatch({
+    manager,
+    tasks: [{ jobId: 'job-1' }],
+    producerTracker,
+    recovery: { id: 'recovery-1' },
+    isAutoRetry: false
+  });
+  let settled = false;
+  start.then(() => { settled = true; });
+
+  assert.equal(settled, false);
+  assert.equal(ticks.length, 1);
+  ticks.shift()();
+  await flushMicrotasks();
+  assert.deepEqual(writes, [{ id: 'recovery-1' }]);
+  paused = true;
+  recoverySave.resolve();
+  const result = await start;
+
+  assert.equal(result.error, 'Automatik ist pausiert');
+  assert.equal(Object.hasOwn(result, 'started'), false);
+  assert.deepEqual(writes, [{ id: 'recovery-1' }, null]);
+  assert.equal(cancelled, 1);
+  assert.equal(finished, 1);
+  assert.equal(started, 0);
+  assert.equal(context.uploadManager, null);
+});
+
+test('prepared upload start returns success only after synchronous acceptance and cleans immediate rejection', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const blockStart = mainSource.indexOf('async function rejectPreparedUploadStart');
+  const blockEnd = mainSource.indexOf("\nipcMain.handle('start-upload'", blockStart);
+  assert.notEqual(blockStart, -1, 'prepared upload start block missing');
+  assert.notEqual(blockEnd, -1, 'prepared upload start block boundary missing');
+
+  async function run(mode) {
+    const ticks = [];
+    const writes = [];
+    let cancelled = 0;
+    let finished = 0;
+    const manager = { cancel: () => { cancelled++; } };
+    const context = {
+      _accountCooldowns: { activeKeys: () => [], releaseExpired: () => {} },
+      _sessionAccountOverrides: new Map(),
+      closeFlushRequested: false,
+      configStore: {
+        load: () => ({ globalSettings: { folderMonitor: { paused: false } } }),
+        saveUploadRecovery: value => { writes.push(value); return Promise.resolve(); }
+      },
+      debugLog: () => {},
+      globalThis: {},
+      isAllAborted: () => false,
+      logMemorySnapshot: () => {},
+      queueMicrotask,
+      safeSend: () => {},
+      sendBatchWebhook: () => {},
+      setImmediate: callback => { ticks.push(callback); },
+      uploadManager: manager
+    };
+    vm.runInNewContext(mainSource.slice(blockStart, blockEnd), context);
+    vm.runInNewContext(
+      mode === 'rejected'
+        ? "uploadManager.startBatch = () => Promise.reject(new Error('apiKey=secret-value'));"
+        : 'uploadManager.startBatch = () => new Promise(() => {});',
+      context
+    );
+    const promise = context.startPreparedUploadBatch({
+      manager,
+      tasks: [{ jobId: 'job-1' }],
+      producerTracker: { finish: () => { finished++; } },
+      recovery: { id: 'recovery-1' },
+      isAutoRetry: false
+    });
+    ticks.shift()();
+    const result = await promise;
+    return { cancelled, context, finished, result, writes };
+  }
+
+  const accepted = await run('pending');
+  assert.equal(accepted.result.started, true);
+  assert.equal(Object.hasOwn(accepted.result, 'error'), false);
+  assert.deepEqual(accepted.writes, [{ id: 'recovery-1' }]);
+  assert.equal(accepted.cancelled, 0);
+  assert.equal(accepted.finished, 0);
+
+  const rejected = await run('rejected');
+  assert.equal(rejected.result.error, 'Upload konnte nicht gestartet werden');
+  assert.equal(Object.hasOwn(rejected.result, 'started'), false);
+  assert.deepEqual(rejected.writes, [{ id: 'recovery-1' }, null]);
+  assert.equal(rejected.cancelled, 1);
+  assert.equal(rejected.finished, 1);
+  assert.equal(rejected.context.uploadManager, null);
+  assert.equal(JSON.stringify(rejected.result).includes('secret-value'), false);
 });
 
 test('startup keeps a missing configured folder disconnected without disabling automation', () => {

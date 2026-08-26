@@ -2113,6 +2113,97 @@ ipcMain.handle('inspect-import-files', async (_event, payload) => {
   });
 });
 
+async function rejectPreparedUploadStart(manager, producerTracker, error, clearRecovery) {
+  try { manager.cancel(); } catch {}
+  if (uploadManager === manager) {
+    uploadManager = null;
+    globalThis._mhuUploadManagerRef = null;
+  }
+  producerTracker.finish();
+  if (clearRecovery) {
+    try { await configStore.saveUploadRecovery(null); } catch (cleanupError) {
+      debugLog(`upload recovery state could not be cleared after rejected start: ${cleanupError.message}`);
+    }
+  }
+  return { error };
+}
+
+function preparedUploadStartGate(manager) {
+  if (uploadManager !== manager) return 'Upload-Start wurde verworfen';
+  if (closeFlushRequested) return 'Die Anwendung wird gerade beendet';
+  if (configStore.load().globalSettings?.folderMonitor?.paused === true) return 'Automatik ist pausiert';
+  return '';
+}
+
+function observePreparedUploadAcceptance(batchPromise) {
+  const settled = batchPromise && typeof batchPromise.then === 'function'
+    ? batchPromise.then(
+      () => ({ settled: true }),
+      error => ({ rejected: true, error })
+    )
+    : Promise.resolve({ settled: true });
+  return Promise.race([
+    settled,
+    new Promise(resolve => queueMicrotask(() => resolve({ accepted: true })))
+  ]);
+}
+
+function startPreparedUploadBatch({ manager, tasks, producerTracker, recovery, isAutoRetry }) {
+  return new Promise(resolve => {
+    setImmediate(() => {
+      void (async () => {
+        let gateError = preparedUploadStartGate(manager);
+        if (gateError) return rejectPreparedUploadStart(manager, producerTracker, gateError, false);
+        try {
+          await configStore.saveUploadRecovery(recovery);
+        } catch {
+          return rejectPreparedUploadStart(manager, producerTracker, 'Upload-Wiederherstellung konnte nicht vorbereitet werden', true);
+        }
+        gateError = preparedUploadStartGate(manager);
+        if (gateError) return rejectPreparedUploadStart(manager, producerTracker, gateError, true);
+        _accountCooldowns.releaseExpired();
+        const pausedAccounts = _accountCooldowns.activeKeys();
+        let batchPromise;
+        try {
+          batchPromise = manager.startBatch(tasks, {
+            primeFailedAccounts: pausedAccounts,
+            primeOverrides: Array.from(_sessionAccountOverrides.entries())
+          });
+        } catch {
+          return rejectPreparedUploadStart(manager, producerTracker, 'Upload konnte nicht gestartet werden', true);
+        }
+        const acceptance = await observePreparedUploadAcceptance(batchPromise);
+        if (acceptance.rejected) {
+          return rejectPreparedUploadStart(manager, producerTracker, 'Upload konnte nicht gestartet werden', true);
+        }
+        if (acceptance.accepted) {
+          Promise.resolve(batchPromise).catch((err) => {
+            debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
+            const errorSummary = {
+              id: 'error',
+              timestamp: new Date().toISOString(),
+              total: tasks.length,
+              succeeded: 0,
+              failed: tasks.length,
+              files: [],
+              error: err ? err.message : 'Unbekannter Fehler'
+            };
+            safeSend('upload-batch-done', errorSummary);
+            configStore.saveUploadRecovery(null).catch(error => debugLog(`upload recovery state could not be cleared after start failure: ${error.message}`));
+            producerTracker.finish();
+            if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
+            if (uploadManager === manager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
+          });
+        }
+        logMemorySnapshot('batch-start');
+        return { started: true };
+      })().then(resolve, async () => {
+        resolve(await rejectPreparedUploadStart(manager, producerTracker, 'Upload konnte nicht gestartet werden', true));
+      });
+    });
+  });
+}
+
 ipcMain.handle('start-upload', async (_event, payload) => {
   if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
     return { error: 'Automatik ist pausiert' };
@@ -2191,12 +2282,6 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     startedAt: new Date().toISOString(),
     jobIds: tasks.map(task => task.jobId).filter(Boolean)
   };
-  try { await configStore.saveUploadRecovery(recovery); } catch (error) { debugLog(`upload recovery state could not be saved: ${error.message}`); }
-  if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
-    if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
-    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared after automation pause: ${error.message}`); }
-    return { error: 'Automatik ist pausiert' };
-  }
 
   // Pre-resolve a fallback for every hoster that has one. Lets the upload
   // manager break out of the retry loop after a single generic failure and
@@ -2425,55 +2510,16 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     else debugLog('batch-done: skipping uploadManager null-out — a newer manager replaced this one mid-await');
   });
 
-  // Defer startBatch to next tick so the IPC response is sent first.
-  // This ensures webContents.send() calls from upload events
-  // are not interleaved with the handle() response.
-  setImmediate(() => {
-    if (uploadManager !== _thisManager) {
-      debugLog('setImmediate: uploadManager was replaced before startBatch');
-      _producerTracker.finish();
-      return;
-    }
-    if (closeFlushRequested) {
-      try { _thisManager.cancel(); } catch {}
-      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
-      _producerTracker.finish();
-      return;
-    }
-    if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
-      try { _thisManager.cancel(); } catch {}
-      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
-      _producerTracker.finish();
-      return;
-    }
-    _accountCooldowns.releaseExpired();
-    const pausedAccounts = _accountCooldowns.activeKeys();
-    debugLog(`setImmediate: calling startBatch now (priming ${pausedAccounts.length} failed accounts, ${_sessionAccountOverrides.size} overrides from session)`);
-    _thisManager.startBatch(tasks, {
-      primeFailedAccounts: pausedAccounts,
-      primeOverrides: Array.from(_sessionAccountOverrides.entries())
-    }).catch((err) => {
-      debugLog(`startBatch REJECTED: ${err && err.stack ? err.stack : err}`);
-      const errorSummary = {
-        id: 'error',
-        timestamp: new Date().toISOString(),
-        total: tasks.length,
-        succeeded: 0,
-        failed: tasks.length,
-        files: [],
-        error: err ? err.message : 'Unbekannter Fehler'
-      };
-      safeSend('upload-batch-done', errorSummary);
-      configStore.saveUploadRecovery(null).catch(error => debugLog(`upload recovery state could not be cleared after start failure: ${error.message}`));
-      _producerTracker.finish();
-      if (!isAutoRetry) sendBatchWebhook(errorSummary, 0);
-      if (uploadManager === _thisManager) { uploadManager = null; globalThis._mhuUploadManagerRef = null; }
-    });
+  const startResult = await startPreparedUploadBatch({
+    manager: _thisManager,
+    tasks,
+    producerTracker: _producerTracker,
+    recovery,
+    isAutoRetry
   });
-
-  logMemorySnapshot('batch-start');
-  debugLog(`start-upload returning started=true (startBatch deferred to nextTick)`);
-  return { started: true, taskCount: tasks.length, skippedJobs, sourceCleanupFingerprints };
+  if (!startResult.started) return startResult;
+  debugLog('start-upload returning started=true after startBatch acceptance');
+  return { ...startResult, taskCount: tasks.length, skippedJobs, sourceCleanupFingerprints };
 });
 
 // Logged at batch boundaries so we can spot memory growth between batches
@@ -3190,7 +3236,44 @@ function _sweepOrphanConfigTmps() {
   } catch {}
 }
 
-let suppressAutomationStatusEvents = false;
+const automationLifecycleQueue = [];
+let automationLifecycleRunning = false;
+let automationLifecycleGeneration = 0;
+let automationStatusSuppressionDepth = 0;
+
+function drainAutomationLifecycleQueue() {
+  if (automationLifecycleRunning) return;
+  const next = automationLifecycleQueue.shift();
+  if (!next) return;
+  automationLifecycleRunning = true;
+  let result;
+  try {
+    result = next.operation(next.generation);
+  } catch (error) {
+    result = Promise.reject(error);
+  }
+  Promise.resolve(result).then(next.resolve, next.reject).finally(() => {
+    automationLifecycleRunning = false;
+    drainAutomationLifecycleQueue();
+  });
+}
+
+function enqueueAutomationLifecycle(operation) {
+  const generation = ++automationLifecycleGeneration;
+  return new Promise((resolve, reject) => {
+    automationLifecycleQueue.push({ generation, operation, resolve, reject });
+    drainAutomationLifecycleQueue();
+  });
+}
+
+async function withAutomationStatusSuppressed(operation) {
+  automationStatusSuppressionDepth++;
+  try {
+    return await operation();
+  } finally {
+    automationStatusSuppressionDepth--;
+  }
+}
 
 function automationStatusSnapshot() {
   const settings = configStore.load().globalSettings?.folderMonitor || {};
@@ -3205,9 +3288,10 @@ function automationStatusSnapshot() {
   });
 }
 
-function publishAutomationStatus() {
-  const snapshot = automationStatusSnapshot();
-  if (!suppressAutomationStatusEvents) safeSend('automation:status', snapshot);
+function publishAutomationStatus(extra = null, generation = null) {
+  const snapshot = Object.freeze({ ...automationStatusSnapshot(), ...(extra || {}) });
+  const currentGeneration = generation === null || generation === automationLifecycleGeneration;
+  if (automationStatusSuppressionDepth === 0 && currentGeneration) safeSend('automation:status', snapshot);
   return snapshot;
 }
 
@@ -3220,7 +3304,7 @@ function bindFolderMonitorEvents(settings) {
   folderMonitor.on('error', (err) => {
     debugLog(`folder-monitor error: ${err.message}`);
   });
-  folderMonitor.on('status', publishAutomationStatus);
+  folderMonitor.on('status', () => publishAutomationStatus());
   folderMonitor.on('initial-scan-complete', async () => {
     try {
       const latest = configStore.load();
@@ -3280,45 +3364,45 @@ ipcMain.handle('automation:get-status', () => {
   return automationStatusSnapshot();
 });
 
-ipcMain.handle('automation:pause-after-active', async () => {
-  const latest = configStore.load();
-  const settings = latest.globalSettings?.folderMonitor || {};
-  await configStore.save({
-    globalSettings: {
-      ...latest.globalSettings,
-      folderMonitor: { ...settings, paused: true, pausedAt: Date.now() }
+ipcMain.handle('automation:pause-after-active', () => enqueueAutomationLifecycle(async generation => {
+  let monitorError = '';
+  await withAutomationStatusSuppressed(async () => {
+    const latest = configStore.load();
+    const settings = latest.globalSettings?.folderMonitor || {};
+    await configStore.save({
+      globalSettings: {
+        ...latest.globalSettings,
+        folderMonitor: { ...settings, paused: true, pausedAt: Date.now() }
+      }
+    });
+    try {
+      await folderMonitor.pause();
+    } catch {
+      monitorError = 'Ordnerüberwachung konnte nicht pausiert werden';
+    } finally {
+      if (uploadManager) uploadManager.finishAfterActive();
     }
   });
-  suppressAutomationStatusEvents = true;
-  try {
-    await folderMonitor.pause();
-  } finally {
-    suppressAutomationStatusEvents = false;
-  }
-  if (uploadManager) uploadManager.finishAfterActive();
-  return publishAutomationStatus();
-});
+  return publishAutomationStatus(monitorError ? { monitorError } : null, generation);
+}));
 
-ipcMain.handle('automation:resume', async () => {
-  const latest = configStore.load();
-  const settings = latest.globalSettings?.folderMonitor || {};
-  const resumedSettings = { ...settings, paused: false, pausedAt: null };
-  await configStore.save({
-    globalSettings: {
-      ...latest.globalSettings,
-      folderMonitor: resumedSettings
-    }
-  });
-  suppressAutomationStatusEvents = true;
-  try {
+ipcMain.handle('automation:resume', () => enqueueAutomationLifecycle(async generation => {
+  await withAutomationStatusSuppressed(async () => {
+    const latest = configStore.load();
+    const settings = latest.globalSettings?.folderMonitor || {};
+    const resumedSettings = { ...settings, paused: false, pausedAt: null };
+    await configStore.save({
+      globalSettings: {
+        ...latest.globalSettings,
+        folderMonitor: resumedSettings
+      }
+    });
     if (resumedSettings.enabled && resumedSettings.folderPath) {
       await resumeFolderMonitor(resumedSettings);
     }
-  } finally {
-    suppressAutomationStatusEvents = false;
-  }
-  return publishAutomationStatus();
-});
+  });
+  return publishAutomationStatus(null, generation);
+}));
 
 ipcMain.handle('folder-monitor:test-scan', () => {
   return folderMonitor.scan({ emitFiles: false, trigger: 'test' });
