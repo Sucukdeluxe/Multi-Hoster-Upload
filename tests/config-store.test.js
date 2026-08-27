@@ -355,6 +355,96 @@ describe('ConfigStore', () => {
     assert.equal(config.globalSettings.alwaysOnTop, true);
   });
 
+  it('savePendingQueue does not block the event loop on slow synchronous filesystem methods', async () => {
+    await store.save({
+      hosters: { 'byse.sx': [{ id: 'non-blocking-account', enabled: true, authType: 'api', apiKey: 'test-key' }] },
+      globalSettings: { alwaysOnTop: true }
+    });
+    store.load();
+
+    const syncMethods = ['openSync', 'writeSync', 'fsyncSync', 'readFileSync', 'writeFileSync', 'renameSync'];
+    const originals = new Map(syncMethods.map(name => [name, fs[name]]));
+    const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+    const stallMs = 35;
+    let eventLoopDelayMs;
+
+    for (const name of syncMethods) {
+      fs[name] = (...args) => {
+        Atomics.wait(waitBuffer, 0, 0, stallMs);
+        return originals.get(name)(...args);
+      };
+    }
+
+    try {
+      const startedAt = performance.now();
+      const eventLoopTick = new Promise(resolve => {
+        setTimeout(() => {
+          eventLoopDelayMs = performance.now() - startedAt;
+          resolve();
+        }, 0);
+      });
+      const save = store.savePendingQueue({ savedAt: 5, queueJobs: [{ id: 'non-blocking' }] });
+
+      await eventLoopTick;
+      await save;
+    } finally {
+      for (const [name, original] of originals) fs[name] = original;
+    }
+
+    assert.ok(
+      eventLoopDelayMs < stallMs * 3,
+      `queue save blocked the event loop for ${eventLoopDelayMs.toFixed(1)} ms`
+    );
+  });
+
+  it('folder monitor runtime saves preserve a concurrently queued pending queue snapshot', async () => {
+    const pendingQueue = {
+      savedAt: 1787712000000,
+      queueJobs: [{ id: 'paused-job', automationPaused: true }]
+    };
+
+    const queueSave = store.savePendingQueue(pendingQueue);
+    const runtimeSave = store.saveFolderMonitorRuntimeState({ paused: false, pausedAt: null });
+    await Promise.all([queueSave, runtimeSave]);
+
+    const current = store.load().globalSettings;
+    assert.deepEqual(current.pendingQueue, pendingQueue);
+    assert.equal(current.folderMonitor.paused, false);
+    assert.equal(current.folderMonitor.pausedAt, null);
+  });
+
+  it('folder monitor runtime saves cannot revert concurrently queued monitor settings', async () => {
+    const stale = store.load().globalSettings.folderMonitor;
+    const currentSettings = {
+      ...stale,
+      folderPath: 'D:\\new-watch',
+      hosters: ['byse.sx'],
+      filterMode: 'exclude',
+      autoStart: false
+    };
+
+    const settingsSave = store.save({
+      globalSettings: {
+        ...store.load().globalSettings,
+        folderMonitor: currentSettings
+      }
+    });
+    const runtimeSave = store.saveFolderMonitorRuntimeState({
+      ...stale,
+      paused: true,
+      pausedAt: 1787712000000
+    });
+    await Promise.all([settingsSave, runtimeSave]);
+
+    const folderMonitor = store.load().globalSettings.folderMonitor;
+    assert.equal(folderMonitor.folderPath, 'D:\\new-watch');
+    assert.deepEqual(folderMonitor.hosters, ['byse.sx']);
+    assert.equal(folderMonitor.filterMode, 'exclude');
+    assert.equal(folderMonitor.autoStart, false);
+    assert.equal(folderMonitor.paused, true);
+    assert.equal(folderMonitor.pausedAt, 1787712000000);
+  });
+
   it('drainWrites waits for config and history writes appended while draining', async () => {
     assert.equal(typeof store.drainWrites, 'function');
     await store.save({ globalSettings: { alwaysOnTop: false } });

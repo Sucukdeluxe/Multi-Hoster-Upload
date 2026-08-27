@@ -648,6 +648,231 @@ describe('UploadManager', () => {
     assert.equal(batchDoneEvents.length, 1);
   });
 
+  it('addJobs rejects new work while stopping and accepts it after resume', async () => {
+    let releaseActive;
+    const started = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    });
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+
+    mgr.finishAfterActive();
+    const stopping = typeof mgr.isStoppingAfterActive === 'function'
+      ? mgr.isStoppingAfterActive()
+      : undefined;
+    const result = mgr.addJobs([
+      { jobId: 'rejected', file: '/test/rejected.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+    await mgr.resumeAfterActive();
+    const resumedResult = mgr.addJobs([
+      { jobId: 'resumed', file: '/test/resumed.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    releaseActive();
+    await batch;
+
+    assert.equal(stopping, true);
+    assert.deepEqual(result, { added: 0, alreadyInBatchJobIds: [] });
+    assert.deepEqual(resumedResult, { added: 1, alreadyInBatchJobIds: [] });
+    assert.equal(mgr.isStoppingAfterActive(), false);
+    assert.deepEqual(started, ['/test/active.mp4', '/test/resumed.mp4']);
+  });
+
+  it('finishAfterActive bypasses queued interval waits', async () => {
+    let releaseActive;
+    const started = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 1, maxSizeMb: 0 }
+    });
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'queued-1', file: '/test/queued-1.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'queued-2', file: '/test/queued-2.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'queued-3', file: '/test/queued-3.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+
+    mgr.finishAfterActive();
+    const stoppedAt = Date.now();
+    releaseActive();
+    await batch;
+
+    assert.ok(Date.now() - stoppedAt < 500, `queued jobs took ${Date.now() - stoppedAt} ms to stop`);
+    assert.deepEqual(started, ['/test/active.mp4']);
+  });
+
+  it('finishAfterActive interrupts a job already waiting inside the upload interval', async () => {
+    let releaseActive;
+    let intervalEnteredResolve;
+    const intervalEntered = new Promise(resolve => { intervalEnteredResolve = resolve; });
+    let intervalCalls = 0;
+    const started = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 2, maxSizeMb: 0 }
+    });
+    mgr._waitForInterval = (hoster, intervalMs, signal) => new Promise((resolve, reject) => {
+      intervalCalls++;
+      if (intervalCalls === 1) {
+        resolve();
+        return;
+      }
+      intervalEnteredResolve();
+      if (signal.aborted) reject(new Error('Aborted'));
+      else signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+    });
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+    assert.deepEqual(mgr.addJobs([
+      { jobId: 'interval-waiter', file: '/test/interval-waiter.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]), { added: 1, alreadyInBatchJobIds: [] });
+    await intervalEntered;
+
+    const stoppedAt = Date.now();
+    mgr.finishAfterActive();
+    releaseActive();
+    await batch;
+
+    assert.ok(Date.now() - stoppedAt < 500, `interval waiter took ${Date.now() - stoppedAt} ms to stop`);
+    assert.deepEqual(started, ['/test/active.mp4']);
+  });
+
+  it('finishAfterActive interrupts a job already waiting for the global upload slot', async () => {
+    let releaseActive;
+    const started = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 },
+      'byse.sx': { retries: 0, parallelCount: 1, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 0, maxSizeMb: 0 }
+    }, { parallelUploadCount: 1 });
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+    assert.deepEqual(mgr.addJobs([
+      { jobId: 'global-waiter', file: '/test/global-waiter.mp4', hoster: 'byse.sx', apiKey: 'key2' }
+    ]), { added: 1, alreadyInBatchJobIds: [] });
+    for (let attempt = 0; attempt < 50 && mgr.globalSemaphore.pending === 0; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(mgr.globalSemaphore.pending, 1);
+
+    const stoppedAt = Date.now();
+    mgr.finishAfterActive();
+    releaseActive();
+    await batch;
+
+    assert.ok(Date.now() - stoppedAt < 500, `global waiter took ${Date.now() - stoppedAt} ms to stop`);
+    assert.deepEqual(started, ['/test/active.mp4']);
+  });
+
+  it('resumeAfterActive waits for stopped admission jobs before reopening the queue', async () => {
+    let releaseActive;
+    let intervalEnteredResolve;
+    const intervalEntered = new Promise(resolve => { intervalEnteredResolve = resolve; });
+    let intervalCalls = 0;
+    const started = [];
+    const terminal = [];
+    mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+      started.push(filePath);
+      if (filePath.endsWith('/active.mp4')) {
+        await new Promise(resolve => { releaseActive = resolve; });
+      }
+      if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+      return { download_url: `https://${hoster}/d/ok123`, embed_url: null, file_code: 'ok123' };
+    });
+    const mgr = new UploadManager({
+      'doodstream.com': { retries: 0, parallelCount: 2, maxSpeedKbs: 0, restartBelowKbs: 0, timeIntervalSec: 2, maxSizeMb: 0 }
+    });
+    mgr._waitForInterval = (hoster, intervalMs, signal) => new Promise((resolve, reject) => {
+      intervalCalls++;
+      if (intervalCalls === 1) {
+        resolve();
+        return;
+      }
+      intervalEnteredResolve();
+      if (signal.aborted) reject(new Error('Aborted'));
+      else signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+    });
+    mgr.on('progress', value => {
+      if (value.jobId === 'interval-waiter' && ['aborted', 'error'].includes(value.status)) terminal.push(value.status);
+    });
+    const batch = mgr.startBatch([
+      { jobId: 'active', file: '/test/active.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]);
+
+    for (let attempt = 0; attempt < 50 && !releaseActive; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(typeof releaseActive, 'function');
+    assert.deepEqual(mgr.addJobs([
+      { jobId: 'interval-waiter', file: '/test/interval-waiter.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+    ]), { added: 1, alreadyInBatchJobIds: [] });
+    await intervalEntered;
+
+    const resumedAt = Date.now();
+    mgr.finishAfterActive();
+    await mgr.resumeAfterActive();
+
+    assert.ok(Date.now() - resumedAt < 500, `resume waited ${Date.now() - resumedAt} ms for admission shutdown`);
+    assert.equal(mgr.isStoppingAfterActive(), false);
+    assert.deepEqual(terminal, ['aborted']);
+    releaseActive();
+    await batch;
+    assert.deepEqual(started, ['/test/active.mp4']);
+  });
+
   it('_combineSignals propagates abort from either source', () => {
     const mgr = new UploadManager({});
     const ac1 = new AbortController();

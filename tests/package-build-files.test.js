@@ -48,6 +48,7 @@ function createAutomationLifecycleHarness(mainSource) {
   const resumeDeferred = createDeferred();
   const configuredSettings = [];
   const startedSettings = [];
+  let scanError = null;
   let publishStatus = () => {};
   let state = {
     globalSettings: {
@@ -98,13 +99,23 @@ function createAutomationLifecycleHarness(mainSource) {
   };
   folderMonitor.scan = async options => {
     order.push(`scan:${options.trigger}:${options.emitFiles}`);
+    if (scanError) throw scanError;
     return { reachable: true, trigger: options.trigger };
   };
   const configStore = {
     load: () => structuredClone(state),
-    save: config => {
+    saveFolderMonitorRuntimeState: folderMonitor => {
       const deferred = createDeferred();
-      const snapshot = structuredClone(config);
+      const snapshot = structuredClone({
+        ...state,
+        globalSettings: {
+          ...state.globalSettings,
+          folderMonitor: {
+            ...state.globalSettings.folderMonitor,
+            ...folderMonitor
+          }
+        }
+      });
       saves.push({ paused: snapshot.globalSettings.folderMonitor.paused, deferred });
       order.push(`save:${snapshot.globalSettings.folderMonitor.paused}`);
       return deferred.promise.then(() => { state = snapshot; });
@@ -112,6 +123,7 @@ function createAutomationLifecycleHarness(mainSource) {
   };
   const uploadManager = {
     finishAfterActive: () => order.push('finish'),
+    resumeAfterActive: () => order.push('resume-manager'),
     startBatch: () => order.push('startBatch')
   };
   const webContents = {};
@@ -155,6 +167,9 @@ function createAutomationLifecycleHarness(mainSource) {
     resumeDeferred,
     saves,
     sent,
+    setScanError(error) {
+      scanError = error;
+    },
     setFolderMonitorState(value) {
       state.globalSettings.folderMonitor = { ...state.globalSettings.folderMonitor, ...value };
     },
@@ -163,6 +178,41 @@ function createAutomationLifecycleHarness(mainSource) {
     webContents,
     publishStatus
   };
+}
+
+function createAddJobsToBatchHarness(mainSource) {
+  const blockStart = mainSource.indexOf("ipcMain.handle('add-jobs-to-batch'");
+  const blockEnd = mainSource.indexOf("\nipcMain.handle('finish-after-active'", blockStart);
+  assert.notEqual(blockStart, -1, 'add-jobs-to-batch handler missing');
+  assert.notEqual(blockEnd, -1, 'add-jobs-to-batch handler boundary missing');
+  const handlers = new Map();
+  const effects = [];
+  const uploadManager = {
+    running: true,
+    isStoppingAfterActive: () => true,
+    sourceFileCleanup: {
+      registerGroups: async () => { effects.push('sourceCleanup'); return {}; },
+      markSkipped: () => effects.push('markSkipped')
+    },
+    addJobs: tasks => { effects.push('addJobs'); return { added: tasks.length, alreadyInBatchJobIds: [] }; }
+  };
+  const config = { globalSettings: { folderMonitor: { paused: false } } };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), {
+    appendUploadPlanAudit: async () => effects.push('audit'),
+    buildUploadTasksFromJobs: (_config, jobs) => {
+      effects.push('buildUploadTasks');
+      return jobs.map(job => ({ ...job, jobId: job.id }));
+    },
+    closeFlushRequested: false,
+    configStore: { load: () => config },
+    debugLog: () => effects.push('debugLog'),
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    makeAccountPicker: () => { effects.push('makeAccountPicker'); return {}; },
+    persistRotation: () => effects.push('persistRotation'),
+    summarizeBatchPlan: value => value,
+    uploadManager
+  });
+  return { effects, handlers };
 }
 
 test('packages every Electron preload referenced by the main process', () => {
@@ -571,6 +621,47 @@ test('every batch start and extension IPC fails closed before account and cleanu
   }
 });
 
+test('add-jobs-to-batch rejects a stopping manager before account and cleanup side effects', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAddJobsToBatchHarness(mainSource);
+
+  const result = await harness.handlers.get('add-jobs-to-batch')(null, {
+    jobs: [{ id: 'job-1', file: 'C:\\watch\\video.mp4', hoster: 'doodstream.com' }],
+    sourceCleanupGroups: [{ id: 'group-1' }]
+  });
+
+  assert.deepEqual({ ...result }, { error: 'Warteschlange angehalten' });
+  assert.deepEqual(harness.effects, []);
+});
+
+test('start-upload waits for a finalizing manager to release before deciding availability', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const helperStart = mainSource.indexOf('async function waitForUploadManagerRelease');
+  const helperEnd = mainSource.indexOf('\nfunction requestUploadFinalization', helperStart);
+  const handlerStart = mainSource.indexOf("ipcMain.handle('start-upload'");
+  const configLoad = mainSource.indexOf('  const config = configStore.load();', handlerStart);
+  const waitCall = mainSource.indexOf('await waitForUploadManagerRelease(existingManager)', handlerStart);
+  assert.notEqual(helperStart, -1);
+  assert.notEqual(helperEnd, -1);
+  assert.notEqual(handlerStart, -1);
+  assert.ok(waitCall > handlerStart && waitCall < configLoad);
+
+  const context = { manager: { running: false }, setTimeout, Date };
+  vm.runInNewContext(`
+let uploadManager = manager;
+${mainSource.slice(helperStart, helperEnd)}
+globalThis.waitForRelease = timeout => waitForUploadManagerRelease(manager, timeout);
+globalThis.release = () => { uploadManager = null; };
+`, context);
+
+  const released = context.waitForRelease(500);
+  setTimeout(context.release, 20);
+  assert.equal(await released, true);
+
+  vm.runInNewContext('uploadManager = manager;', context);
+  assert.equal(await context.waitForRelease(10), false);
+});
+
 test('automation pause save commits before lifecycle effects and save failure is inert', async () => {
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
   const blockStart = Math.max(
@@ -607,15 +698,19 @@ test('automation pause save commits before lifecycle effects and save failure is
   let rejectSave = false;
   const configStore = {
     load: () => structuredClone(state),
-    save: async config => {
-      const paused = config.globalSettings.folderMonitor.paused;
+    saveFolderMonitorRuntimeState: async folderMonitor => {
+      const paused = folderMonitor.paused;
       order.push(`save:${paused}`);
       if (rejectSave) throw new Error('save failed');
-      state = structuredClone(config);
+      state.globalSettings.folderMonitor = {
+        ...state.globalSettings.folderMonitor,
+        ...structuredClone(folderMonitor)
+      };
     }
   };
   const uploadManager = {
     finishAfterActive: () => order.push('finish'),
+    resumeAfterActive: () => order.push('resume-manager'),
     startBatch: () => order.push('startBatch')
   };
   vm.runInNewContext(mainSource.slice(blockStart, blockEnd), {
@@ -658,7 +753,7 @@ test('automation pause save commits before lifecycle effects and save failure is
   state.globalSettings.folderMonitor.pausedAt = 1;
   folderMonitor.running = false;
   await handlers.get('automation:resume')();
-  assert.deepEqual(order, ['resume', 'save:false', 'scan:resume:true']);
+  assert.deepEqual(order, ['resume', 'save:false', 'resume-manager', 'scan:resume:true']);
   assert.equal(order.includes('startBatch'), false);
   assert.equal(sent.length, 1);
   assert.equal(sent[0][1].paused, false);
@@ -684,7 +779,7 @@ test('automation lifecycle serializes pause then resume so the newer intent wins
   harness.saves[1].deferred.resolve();
   await Promise.all([pause, resume]);
 
-  assert.deepEqual(harness.order, ['save:true', 'pause', 'finish', 'resume', 'save:false', 'scan:resume:true']);
+  assert.deepEqual(harness.order, ['save:true', 'pause', 'finish', 'resume', 'save:false', 'resume-manager', 'scan:resume:true']);
   assert.equal(harness.state().globalSettings.folderMonitor.paused, false);
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0][1].paused, false);
@@ -711,7 +806,7 @@ test('automation lifecycle serializes resume then pause so the newer intent wins
   harness.pauseDeferred.resolve();
   await Promise.all([resume, pause]);
 
-  assert.deepEqual(harness.order, ['resume', 'save:false', 'scan:resume:true', 'save:true', 'pause', 'finish']);
+  assert.deepEqual(harness.order, ['resume', 'save:false', 'resume-manager', 'scan:resume:true', 'save:true', 'pause', 'finish']);
   assert.equal(harness.state().globalSettings.folderMonitor.paused, true);
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.sent[0][1].paused, true);
@@ -808,10 +903,37 @@ test('resume keeps pause authoritative until monitor success and restores the pr
   assert.equal(result.value.paused, true);
   assert.equal(result.value.pausedAt, 1);
   assert.deepEqual(harness.saves.map(save => save.paused), [true]);
-  assert.deepEqual(harness.order, ['resume', 'stop', 'configure', 'save:true']);
+  assert.deepEqual(harness.order, ['resume', 'finish', 'stop', 'configure', 'save:true']);
   assert.equal(harness.state().globalSettings.folderMonitor.paused, true);
   assert.equal(harness.state().globalSettings.folderMonitor.pausedAt, 1);
   assert.equal(JSON.stringify(result.value).includes('resume-secret'), false);
+});
+
+test('resume reopens the manager before scanning and relatches it when the scan fails', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const harness = createAutomationLifecycleHarness(mainSource);
+  harness.setScanError(new Error('scan failed'));
+
+  const resume = harness.handlers.get('automation:resume')();
+  harness.resumeDeferred.resolve();
+  await waitForCondition(() => harness.saves.length === 1);
+  harness.saves[0].deferred.resolve();
+  await waitForCondition(() => harness.saves.length === 2);
+  harness.saves[1].deferred.resolve();
+  const result = await resume;
+
+  assert.deepEqual(harness.order, [
+    'resume',
+    'save:false',
+    'resume-manager',
+    'scan:resume:true',
+    'finish',
+    'stop',
+    'configure',
+    'save:true'
+  ]);
+  assert.equal(result.error, 'Automatik konnte nicht fortgesetzt werden');
+  assert.equal(result.paused, true);
 });
 
 test('prepared upload start waits for the final tick and clears recovery when pause wins', async () => {

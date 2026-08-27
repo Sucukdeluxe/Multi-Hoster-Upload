@@ -656,6 +656,7 @@
     ['Download hängt — seit 45 s keine Daten (Netzwerk/Server überlastet). Bitte laufende Uploads stoppen und erneut versuchen.', 'The download stalled because no data was received for 45 seconds. Stop active uploads and try again.'],
     ['Datei nicht gefunden', 'File not found'],
     ['Netzwerkfehler', 'Network error'],
+    ['Warteschlange angehalten', 'Queue paused'],
     ['Bekanntes Größen-Limit auf diesem Account (frühere verdächtige Ablehnung)', 'Known size limit on this account (previous suspicious rejection)'],
     ['Ablehnung verdächtig - Versuch auf anderem Account', 'Suspicious rejection - trying another account'],
     ['Vidmoly: /api/upload/config lieferte kein JSON — evtl. nicht eingeloggt?', 'Vidmoly: /api/upload/config did not return JSON — you may not be signed in'],

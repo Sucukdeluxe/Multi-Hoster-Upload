@@ -197,6 +197,10 @@ contextBridge.exposeInMainWorld('api', {
       savedSettings: []
     };
   },
+  setAutomationEvidence(value = {}) {
+    if (Array.isArray(value.history)) automationProbe.history = value.history;
+    if (Array.isArray(value.uploadLog)) automationProbe.uploadLog = value.uploadLog;
+  },
   getAutomationProbeState() {
     return {
       readCalls: { ...automationProbe.readCalls },
@@ -327,7 +331,7 @@ contextBridge.exposeInMainWorld('api', {
     return Promise.resolve(automationProbe.addResult || { added: payload?.jobs?.length || 0 });
   },
   startUpload(payload) {
-    automationProbe.mutationCalls.push(['start', payload?.jobs?.length || 0]);
+    automationProbe.mutationCalls.push(['start', payload?.jobs?.length || 0, (payload?.jobs || []).map(job => job.id)]);
     if (automationProbe.startError) return Promise.reject(new Error(automationProbe.startError));
     return Promise.resolve(automationProbe.startResult || { started: true });
   },
@@ -823,6 +827,73 @@ contextBridge.exposeInMainWorld('api', {
         .filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(parallelFile.path))
         .map(job => normalizeAutomationPath(job.file)))],
       queuedTelemetry: config.globalSettings.folderMonitor.telemetry.queued
+    };
+    configureAtomicState(0);
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    hosterSettings = {};
+    handleBatchDone({ files: [] });
+    const evidenceSnapshotFiles = Array.from({ length: 66 }, (_, index) => ({
+      path: 'C:\\\\evidence-snapshot\\\\file-' + String(index).padStart(2, '0') + '.mkv',
+      name: 'file-' + String(index).padStart(2, '0') + '.mkv',
+      size: 1,
+      mtimeMs: index
+    }));
+    await handleFolderMonitorFiles(evidenceSnapshotFiles);
+    const evidenceSnapshotProbe = await window.api.getAutomationProbeState();
+    const evidenceSnapshotDrain = {
+      historyCalls: evidenceSnapshotProbe.readCalls.history,
+      uploadLogCalls: evidenceSnapshotProbe.readCalls.uploadLog,
+      inspectCalls: evidenceSnapshotProbe.readCalls.inspect,
+      batchSizes: evidenceSnapshotProbe.logs
+        .filter(message => message.startsWith('folder-monitor: received '))
+        .map(message => Number(message.split(' ')[2] || 0)),
+      queuedFiles: new Set(queueJobs.filter(job => job.file.startsWith('C:\\\\evidence-snapshot\\\\')).map(job => job.file)).size
+    };
+    configureAtomicState(0);
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com'];
+    hosterSettings = {};
+    handleBatchDone({ files: [] });
+    const separatedEventFiles = Array.from({ length: 66 }, (_, index) => ({
+      path: 'C:\\\\separated-events\\\\file-' + String(index).padStart(2, '0') + '.mkv',
+      name: 'file-' + String(index).padStart(2, '0') + '.mkv',
+      size: 1,
+      mtimeMs: index
+    }));
+    for (const file of separatedEventFiles) {
+      await handleFolderMonitorFiles([file]);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    const separatedBurstProbe = await window.api.getAutomationProbeState();
+    const invalidatedEvidenceFile = { path: 'C:\\\\separated-events\\\\invalidated.mkv', name: 'invalidated.mkv', size: 1, mtimeMs: 100 };
+    window.api.setAutomationEvidence({
+      history: [{ files: [{ ...invalidatedEvidenceFile, results: [{ hoster: 'doodstream.com', status: 'done' }] }] }]
+    });
+    handleBatchDone({ files: [] });
+    await handleFolderMonitorFiles([invalidatedEvidenceFile]);
+    const invalidatedProbe = await window.api.getAutomationProbeState();
+    const expiredEvidenceFile = { path: 'C:\\\\separated-events\\\\expired.mkv', name: 'expired.mkv', size: 1, mtimeMs: 101 };
+    window.api.setAutomationEvidence({
+      history: [{ files: [{ ...expiredEvidenceFile, results: [{ hoster: 'doodstream.com', status: 'done' }] }] }]
+    });
+    automationEvidenceSnapshotCache.expiresAt = 0;
+    await handleFolderMonitorFiles([expiredEvidenceFile]);
+    const expiredProbe = await window.api.getAutomationProbeState();
+    const separatedEventEvidence = {
+      afterBurst: {
+        historyCalls: separatedBurstProbe.readCalls.history,
+        uploadLogCalls: separatedBurstProbe.readCalls.uploadLog,
+        queuedFiles: new Set(queueJobs.filter(job => job.file.startsWith('C:\\\\separated-events\\\\file-')).map(job => job.file)).size
+      },
+      afterInvalidation: {
+        historyCalls: invalidatedProbe.readCalls.history,
+        uploadLogCalls: invalidatedProbe.readCalls.uploadLog,
+        queued: queueJobs.some(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(invalidatedEvidenceFile.path))
+      },
+      afterExpiry: {
+        historyCalls: expiredProbe.readCalls.history,
+        uploadLogCalls: expiredProbe.readCalls.uploadLog,
+        queued: queueJobs.some(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(expiredEvidenceFile.path))
+      }
     };
     configureAtomicState(18);
     config.globalSettings.folderMonitor.queueLimitJobs = 20;
@@ -1839,6 +1910,76 @@ contextBridge.exposeInMainWorld('api', {
     };
 
     configureAtomicState(0);
+    const pauseMarkerJob = makePauseRaceJob('pause-marker.mkv');
+    pauseMarkerJob.status = 'queued';
+    queueJobs = [pauseMarkerJob];
+    uploading = true;
+    rebuildJobIndex();
+    window.api.configureAutomationProbe({ paused: false });
+    applyAutomationRuntimeStatus({ paused: false });
+    await toggleAutomationPauseResume();
+    const pauseMarkerPersisted = buildPersistedQueueState()?.queueJobs.find(entry => entry.id === pauseMarkerJob.id);
+    const pauseMarker = {
+      marked: pauseMarkerJob.automationPaused === true,
+      persisted: pauseMarkerPersisted?.automationPaused === true,
+      persistedStatus: pauseMarkerPersisted?.status || null
+    };
+
+    const runResumeQueueCase = async ({ active, resumeError = '' }) => {
+      configureAtomicState(0);
+      const job = makePauseRaceJob(active ? 'resume-active.mkv' : 'resume-idle.mkv');
+      job.id = active ? 'resume-active' : 'resume-idle';
+      job.status = 'aborted';
+      job.error = 'Warteschlange angehalten';
+      job.automationPaused = true;
+      queueJobs = [
+        job,
+        { ...makePauseRaceJob('manual-preview.mkv'), id: 'manual-preview', status: 'preview' },
+        { ...makePauseRaceJob('manual-queued.mkv'), id: 'manual-queued', status: 'queued' },
+        { ...makePauseRaceJob('manual-error.mkv'), id: 'manual-error', status: 'error' },
+        { ...makePauseRaceJob('manual-skipped.mkv'), id: 'manual-skipped', status: 'skipped' }
+      ];
+      selectedFiles = [];
+      selectedUploadHosters = ['doodstream.com'];
+      config.globalSettings.folderMonitor.paused = true;
+      uploading = active;
+      rebuildJobIndex();
+      window.api.configureAutomationProbe({
+        paused: true,
+        runtimeStatus: resumeError ? { error: resumeError } : {},
+        addResult: { added: 1 },
+        startResult: { started: true }
+      });
+      applyAutomationRuntimeStatus({ paused: true });
+      await toggleAutomationPauseResume();
+      const probe = await window.api.getAutomationProbeState();
+      const acceptedStatus = job.status;
+      const persistedJob = buildPersistedQueueState()?.queueJobs.find(entry => entry.id === job.id);
+      if (!resumeError) {
+        handleProgress({
+          jobId: job.id,
+          fileName: job.fileName,
+          hoster: job.hoster,
+          status: 'getting-server',
+          bytesUploaded: 0,
+          bytesTotal: job.bytesTotal
+        });
+      }
+      return {
+        status: acceptedStatus,
+        uploading,
+        markerPersisted: persistedJob?.automationPaused === true,
+        markerAfterProgress: job.automationPaused === true,
+        mutations: probe.mutationCalls.map(call => ({ kind: call[0], count: call[1] || 0, ids: call[2] || [] }))
+      };
+    };
+    const resumeQueue = {
+      active: await runResumeQueueCase({ active: true }),
+      idle: await runResumeQueueCase({ active: false }),
+      rollback: await runResumeQueueCase({ active: false, resumeError: 'Automatik konnte nicht fortgesetzt werden.' })
+    };
+
+    configureAtomicState(0);
     config.globalSettings.folderMonitor.paused = true;
     window.api.configureAutomationProbe({ paused: true });
     const pausedJob = {
@@ -1879,7 +2020,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, distinctParallel, disjointClassification, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, paused };
+    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, evidenceSnapshotDrain, separatedEventEvidence, distinctParallel, disjointClassification, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, pauseMarker, resumeQueue, paused };
   })()`;
   const automationControlCenterScript = `(async () => {
     const waitFor = async predicate => {
@@ -2669,6 +2810,52 @@ app.whenReady().then(async () => {
       matchingJobs: 1,
       matchingPaths: ['c:/watch/parallel.mkv'],
       queuedTelemetry: 1
+    });
+    assert.deepEqual(result.automationPipeline.evidenceSnapshotDrain, {
+      historyCalls: 1,
+      uploadLogCalls: 1,
+      inspectCalls: 9,
+      batchSizes: [8, 8, 8, 8, 8, 8, 8, 8, 2],
+      queuedFiles: 66
+    });
+    assert.deepEqual(result.automationPipeline.separatedEventEvidence, {
+      afterBurst: { historyCalls: 1, uploadLogCalls: 1, queuedFiles: 66 },
+      afterInvalidation: { historyCalls: 2, uploadLogCalls: 2, queued: false },
+      afterExpiry: { historyCalls: 3, uploadLogCalls: 3, queued: false }
+    });
+    assert.deepEqual(result.automationPipeline.resumeQueue, {
+      active: {
+        status: 'queued',
+        uploading: true,
+        markerPersisted: true,
+        markerAfterProgress: false,
+        mutations: [
+          { kind: 'resume', count: 0, ids: [] },
+          { kind: 'inject', count: 1, ids: ['resume-active'] }
+        ]
+      },
+      idle: {
+        status: 'queued',
+        uploading: true,
+        markerPersisted: true,
+        markerAfterProgress: false,
+        mutations: [
+          { kind: 'resume', count: 0, ids: [] },
+          { kind: 'start', count: 1, ids: ['resume-idle'] }
+        ]
+      },
+      rollback: {
+        status: 'aborted',
+        uploading: false,
+        markerPersisted: true,
+        markerAfterProgress: true,
+        mutations: [{ kind: 'resume', count: 0, ids: [] }]
+      }
+    });
+    assert.deepEqual(result.automationPipeline.pauseMarker, {
+      marked: true,
+      persisted: true,
+      persistedStatus: 'queued'
     });
     assert.deepEqual(result.automationPipeline.distinctParallel, {
       inspectCalls: 3,
@@ -3670,6 +3857,7 @@ let walkCalls = 0;
 let addJobsCalls = 0;
 let startBatchCalls = 0;
 let finishCalls = 0;
+let stoppingAfterActive = true;
 let cleanupRelease;
 let cleanupStartedResolve;
 const cleanupStarted = new Promise(resolve => { cleanupStartedResolve = resolve; });
@@ -3727,11 +3915,16 @@ let uploadManager = {
     addJobsCalls++;
     return { added: tasks.length, alreadyInBatchJobIds: [] };
   },
+  isStoppingAfterActive: () => stoppingAfterActive,
+  resumeAfterActive: () => { stoppingAfterActive = false; },
   startBatch: () => {
     startBatchCalls++;
     return Promise.resolve();
   },
-  finishAfterActive: () => { finishCalls++; }
+  finishAfterActive: () => {
+    finishCalls++;
+    stoppingAfterActive = true;
+  }
 };
 ${productionHandlers}
 ${automationHandlers}

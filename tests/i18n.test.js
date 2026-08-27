@@ -175,6 +175,7 @@ test('runtime queue, account, toast, and shutdown copy translates completely', (
   const cases = [
     ['Wartet', 'Waiting'],
     ['Abgebrochen', 'Canceled'],
+    ['Warteschlange angehalten', 'Queue paused'],
     ['Fehlgeschlagen: Verbindung verloren', 'Failed: Connection lost'],
     ['Retry 2/3 · Primär nicht verfügbar', 'Retry 2/3 · Primary unavailable'],
     ['Link kopiert', 'Link copied'],

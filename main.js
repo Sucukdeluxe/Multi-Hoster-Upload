@@ -144,6 +144,15 @@ let lastSessionSummary = null;
 let sourceDeleteJournal = null;
 const pendingUploadFinalizations = new Map();
 
+async function waitForUploadManagerRelease(manager, timeoutMs = 300000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (uploadManager !== manager) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
 function requestUploadFinalization(summary) {
   const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return new Promise((resolve) => {
@@ -2220,7 +2229,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   }
   if (closeFlushRequested) return { error: 'Die Anwendung wird gerade beendet' };
   if (!settingsImportGate.canStartUpload()) return { error: 'Einstellungen werden gerade importiert' };
-  if (uploadManager) return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
+  if (uploadManager) {
+    const existingManager = uploadManager;
+    if (existingManager.running || !(await waitForUploadManagerRelease(existingManager)) || uploadManager) {
+      return { error: 'Ein Upload wird bereits ausgeführt oder abgeschlossen' };
+    }
+  }
   const config = configStore.load();
   const files = payload && Array.isArray(payload.files) ? payload.files : [];
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
@@ -2566,6 +2580,9 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     return { error: 'Kein Upload aktiv' };
   }
   const batchManager = uploadManager;
+  if (batchManager.isStoppingAfterActive()) {
+    return { error: 'Warteschlange angehalten' };
+  }
   const config = configStore.load();
   const jobs = payload && Array.isArray(payload.jobs) ? payload.jobs : [];
   const sourceCleanupGroups = payload && Array.isArray(payload.sourceCleanupGroups) ? payload.sourceCleanupGroups : [];
@@ -2584,6 +2601,9 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
   }
   if (uploadManager !== batchManager || !batchManager.running) {
     return { error: 'Kein Upload aktiv' };
+  }
+  if (batchManager.isStoppingAfterActive()) {
+    return { error: 'Warteschlange angehalten' };
   }
   if (batchManager.sourceFileCleanup) {
     for (const skipped of skippedJobs) batchManager.sourceFileCleanup.markSkipped(skipped.jobId);
@@ -3439,12 +3459,7 @@ ipcMain.handle('automation:pause-after-active', () => enqueueAutomationLifecycle
   await withAutomationStatusSuppressed(async () => {
     const latest = configStore.load();
     const settings = latest.globalSettings?.folderMonitor || {};
-    await configStore.save({
-      globalSettings: {
-        ...latest.globalSettings,
-        folderMonitor: { ...settings, paused: true, pausedAt: Date.now() }
-      }
-    });
+    await configStore.saveFolderMonitorRuntimeState({ ...settings, paused: true, pausedAt: Date.now() });
     invalidateFolderMonitorLifecycle();
     try {
       await folderMonitor.pause();
@@ -3475,28 +3490,20 @@ ipcMain.handle('automation:resume', () => enqueueAutomationLifecycle(async gener
       if (resumedSettings.enabled && resumedSettings.folderPath) {
         await resumeFolderMonitor(resumedSettings);
       }
-      await configStore.save({
-        globalSettings: {
-          ...latest.globalSettings,
-          folderMonitor: resumedSettings
-        }
-      });
+      await configStore.saveFolderMonitorRuntimeState(resumedSettings);
+      if (uploadManager) await uploadManager.resumeAfterActive();
       if (resumedSettings.enabled && resumedSettings.folderPath) {
         await folderMonitor.scan({ emitFiles: true, trigger: 'resume' });
       }
     } catch {
+      if (uploadManager) uploadManager.finishAfterActive();
       stopFolderMonitor();
       if (pausedSettings.enabled && pausedSettings.folderPath) {
         bindFolderMonitorEvents(pausedSettings);
         folderMonitor.configure(pausedSettings);
       }
       try {
-        await configStore.save({
-          globalSettings: {
-            ...latest.globalSettings,
-            folderMonitor: pausedSettings
-          }
-        });
+        await configStore.saveFolderMonitorRuntimeState(pausedSettings);
       } catch {}
       result = { error: 'Automatik konnte nicht fortgesetzt werden' };
     }

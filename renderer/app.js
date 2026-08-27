@@ -73,9 +73,12 @@ let automationTestReturnFocus = null;
 let automationTestInertState = [];
 let automationTestViewState = Object.freeze({ loading: false, summary: null, error: '' });
 const automationEventBatchSize = 8;
+const automationEvidenceReuseMs = 5000;
 const automationEventQueue = new Map();
 const automationEventInFlight = new Set();
 let automationEventDrainPromise = null;
+let automationEvidenceSnapshotCache = null;
+let automationEvidenceSnapshotGeneration = 0;
 let managedOnlineBackups = [];
 let managedOnlineBackupsAuthoritative = false;
 let managedOnlineBackupMutationGeneration = 0;
@@ -552,6 +555,31 @@ function createAutomationStatusSnapshot() {
   return freezeAutomationValue(snapshot);
 }
 
+async function loadAutomationEvidenceSnapshot() {
+  const [history, uploadLog] = await Promise.all([
+    window.api.getHistory(),
+    window.api.readOwnUploadLog()
+  ]);
+  return { history, uploadLog };
+}
+
+function invalidateAutomationEvidenceSnapshot() {
+  automationEvidenceSnapshotGeneration++;
+  automationEvidenceSnapshotCache = null;
+}
+
+async function loadReusableAutomationEvidenceSnapshot() {
+  const now = performance.now();
+  if (automationEvidenceSnapshotCache?.expiresAt > now) return automationEvidenceSnapshotCache.value;
+  while (true) {
+    const generation = automationEvidenceSnapshotGeneration;
+    const value = await loadAutomationEvidenceSnapshot();
+    if (generation !== automationEvidenceSnapshotGeneration) continue;
+    automationEvidenceSnapshotCache = { value, expiresAt: performance.now() + automationEvidenceReuseMs };
+    return value;
+  }
+}
+
 async function evaluateAutomationCandidates(files, options = {}) {
   const source = Array.isArray(files) ? files : [];
   const normalizedCandidates = source.map(normalizeAutomationCandidate);
@@ -570,10 +598,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
   const selectedHosters = Array.from(new Set((Array.isArray(options.selectedHosters) ? options.selectedHosters : folderSettings.hosters || [])
     .map(value => String(value || '').trim())
     .filter(Boolean)));
-  const [history, uploadLog] = await Promise.all([
-    window.api.getHistory(),
-    window.api.readOwnUploadLog()
-  ]);
+  const { history, uploadLog } = options.evidenceSnapshot || await loadAutomationEvidenceSnapshot();
   const processed = window.AutomationControl.classifyProcessedCandidates({
     candidates: matched,
     queuePaths: [...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)],
@@ -1171,6 +1196,11 @@ async function toggleAutomationPauseResume() {
   if (automationPauseResumeBusy) return;
   const snapshot = createAutomationStatusSnapshot();
   const resume = snapshot.paused === true;
+  const pausingJobIds = resume
+    ? null
+    : new Set(queueJobs
+      .filter(job => ['queued', 'getting-server', 'uploading', 'retrying'].includes(job.status))
+      .map(job => job.id));
   automationPauseResumeBusy = true;
   updateQueueActionButtons(snapshot);
   try {
@@ -1179,9 +1209,27 @@ async function toggleAutomationPauseResume() {
       : await window.api.automationPauseAfterActive();
     if (result?.error) throw new Error(result.error);
     applyAutomationRuntimeStatus({ ...result, paused: resume ? false : true });
-    if (!resume && uploading) {
-      lastUploadStats.state = 'stopping';
-      updateStatusBar();
+    if (resume) {
+      const resumableJobs = queueJobs.filter(job => job.automationPaused === true && (
+        job.status === 'queued'
+        || (job.status === 'aborted' && job.error === 'Warteschlange angehalten')
+      ));
+      if (resumableJobs.length > 0) {
+        if (uploading) await startSelectedUpload(resumableJobs);
+        else await startSelectedUpload(resumableJobs);
+      }
+    } else {
+      for (const job of queueJobs) {
+        if (pausingJobIds.has(job.id) && ['queued', 'getting-server', 'uploading', 'retrying'].includes(job.status)) {
+          job.automationPaused = true;
+        }
+      }
+      queuePersistThrottle.cancel();
+      await persistQueueStateNow();
+      if (uploading) {
+        lastUploadStats.state = 'stopping';
+        updateStatusBar();
+      }
     }
   } catch {
     showCopyToast(localizeUiText(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.'));
@@ -1204,9 +1252,9 @@ function surfaceAutomationOutcome(result) {
   return localized;
 }
 
-async function processFolderMonitorFiles(files) {
+async function processFolderMonitorFiles(files, evidenceSnapshot) {
   window.api.debugLog('folder-monitor: received ' + files.length + ' file(s)');
-  const evaluation = await evaluateAutomationCandidates(files, { dryRun: false, trigger: 'watcher' });
+  const evaluation = await evaluateAutomationCandidates(files, { dryRun: false, trigger: 'watcher', evidenceSnapshot });
   const result = await applyAutomationEvaluation(evaluation);
   surfaceAutomationOutcome(result);
   return result;
@@ -1215,13 +1263,14 @@ async function processFolderMonitorFiles(files) {
 async function drainFolderMonitorFiles() {
   let result = freezeAutomationValue({ admittedFiles: [], deferredFiles: [], paused: false, dryRun: false });
   while (automationEventQueue.size > 0) {
+    const evidenceSnapshot = await loadReusableAutomationEvidenceSnapshot();
     const entries = [...automationEventQueue.entries()].slice(0, automationEventBatchSize);
     for (const [key] of entries) {
       automationEventQueue.delete(key);
       automationEventInFlight.add(key);
     }
     try {
-      result = await processFolderMonitorFiles(entries.map(([, file]) => file));
+      result = await processFolderMonitorFiles(entries.map(([, file]) => file), evidenceSnapshot);
     } finally {
       for (const [key] of entries) automationEventInFlight.delete(key);
     }
@@ -2124,6 +2173,7 @@ function restoreQueueStateFromConfig() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        ...(job.automationPaused === true ? { automationPaused: true } : {}),
         attempt: 0,
         maxAttempts: job.maxAttempts || 0,
         link: '',
@@ -2187,12 +2237,13 @@ function buildPersistedQueueState() {
     suppressedKeys,
     queueJobs: queueJobs.map(job => {
       const isTerminal = TERMINAL.has(job.status);
+      const automationPaused = job.automationPaused === true;
       return {
         id: job.id,
         file: job.file,
         fileName: job.fileName,
         hoster: job.hoster,
-        status: isTerminal ? job.status : 'preview',
+        status: automationPaused ? 'queued' : (isTerminal ? job.status : 'preview'),
         bytesTotal: job.bytesTotal || 0,
         error: isTerminal ? (job.error || null) : null,
         failureDetails: isTerminal ? (job.failureDetails || null) : null,
@@ -2202,6 +2253,7 @@ function buildPersistedQueueState() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        ...(automationPaused ? { automationPaused: true } : {}),
         maxAttempts: job.maxAttempts || 0
       };
     })
@@ -4640,6 +4692,7 @@ async function cancelUpload() {
   uploading = false;
   // Reset all non-finished jobs back to queued state
   for (const job of queueJobs) {
+    delete job.automationPaused;
     if (!['done', 'error', 'skipped'].includes(job.status)) {
       job.status = 'queued';
       job.progress = 0;
@@ -4701,6 +4754,8 @@ function _handleProgressImpl(data) {
 
   // Update job state
   job.status = data.status;
+  if (data.status === 'aborted' && data.error === 'Warteschlange angehalten') job.automationPaused = true;
+  else if (data.status !== 'queued') delete job.automationPaused;
   if (data.status !== 'preview') job.interrupted = false;
   job.bytesUploaded = data.bytesUploaded || 0;
   job.bytesTotal = data.bytesTotal || job.bytesTotal;
@@ -4774,6 +4829,7 @@ function _handleProgressImpl(data) {
 }
 
 function handleBatchDone(summary) {
+  invalidateAutomationEvidenceSnapshot();
   uploading = false;
   applySummaryResults(summary);
   _deletedJobIds.clear(); // Free memory — stale IDs no longer needed after batch completes
@@ -8345,6 +8401,7 @@ async function confirmHistoryClear() {
   cancelButton.disabled = true;
   try {
     await runConfigWrite(() => window.api.clearHistory());
+    invalidateAutomationEvidenceSnapshot();
     await loadHistory();
     closeHistoryClearModal();
   } catch (error) {
