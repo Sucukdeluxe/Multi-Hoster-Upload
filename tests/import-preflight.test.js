@@ -13,7 +13,7 @@ test('inspects duplicates, unavailable files, accepted files, and configured siz
   ], {
     existingPaths: ['C:\\queue\\duplicate.mkv'],
     inspectPath: async filePath => {
-      if (filePath.endsWith('accepted.mkv')) return { exists: true, readable: true, size: 2 * 1024 * 1024 };
+      if (filePath.endsWith('accepted.mkv')) return { exists: true, readable: true, size: 2 * 1024 * 1024, mtimeMs: 1787828400123 };
       if (filePath.endsWith('empty.mkv')) return { exists: true, readable: true, size: 0 };
       return { exists: false };
     }
@@ -42,6 +42,7 @@ test('inspects duplicates, unavailable files, accepted files, and configured siz
     jobCount: 1,
     sizeLimitedJobCount: 1
   });
+  assert.equal(inspection.accepted[0].mtimeMs, 1787828400123);
 });
 
 test('connects the import preflight through the main process, preload, renderer, and hoster dialog', () => {

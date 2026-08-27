@@ -105,6 +105,12 @@ test('classifyErrorCategory: aborted is its own bucket (not retryable)', () => {
   assert.strictEqual(isRetryableCategory('aborted'), false);
 });
 
+test('automation completion persistence failures are never retried as uploads', () => {
+  const category = classifyErrorCategory('Automatik-Abschlussnachweis konnte nicht gespeichert werden');
+  assert.strictEqual(category, 'local-persistence');
+  assert.strictEqual(isRetryableCategory(category), false);
+});
+
 test('classifyErrorCategory: unknown for everything else', () => {
   assert.strictEqual(classifyErrorCategory(''), 'unknown');
   assert.strictEqual(classifyErrorCategory(null), 'unknown');
@@ -176,4 +182,5 @@ test('isRetryableCategory: only transient + network + unknown retry-worthy', () 
   assert.strictEqual(isRetryableCategory('file-rejected'), false);
   assert.strictEqual(isRetryableCategory('account-error'), false);
   assert.strictEqual(isRetryableCategory('aborted'), false);
+  assert.strictEqual(isRetryableCategory('local-persistence'), false);
 });

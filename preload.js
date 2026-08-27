@@ -110,6 +110,8 @@ contextBridge.exposeInMainWorld('api', {
   folderMonitorTestScan: () => ipcRenderer.invoke('folder-monitor:test-scan'),
   folderMonitorReconcile: () => ipcRenderer.invoke('folder-monitor:reconcile'),
   automationGetStatus: () => ipcRenderer.invoke('automation:get-status'),
+  getAutomationCompletions: () => ipcRenderer.invoke('automation:get-completions'),
+  recordAutomationCompletions: (entries) => ipcRenderer.invoke('automation:record-completions', entries),
   automationPauseAfterActive: () => ipcRenderer.invoke('automation:pause-after-active'),
   automationResume: () => ipcRenderer.invoke('automation:resume'),
   onFolderMonitorNewFiles: (callback) => {

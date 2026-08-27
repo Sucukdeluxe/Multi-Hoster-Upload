@@ -92,8 +92,11 @@ test('managed upload-log discovery includes session logs and excludes unrelated 
   assert.equal(typeof isManagedUploadLogFileName, 'function');
   const options = { baseName: 'fileuploader', ext: '.log' };
   assert.equal(isManagedUploadLogFileName('fileuploader.log', options), true);
+  assert.equal(isManagedUploadLogFileName('fileuploader.1.log', options), true);
   assert.equal(isManagedUploadLogFileName('fileuploader-2026-08-27.log', options), true);
+  assert.equal(isManagedUploadLogFileName('fileuploader-2026-08-27.2.log', options), true);
   assert.equal(isManagedUploadLogFileName('fileuploader-session-2026-08-27_05-40-59-1234.log', options), true);
+  assert.equal(isManagedUploadLogFileName('27-08-2026-mdu-session-05-40-111111.3.log', options), true);
   assert.equal(isManagedUploadLogFileName('27-08-2026-mdu-session-05-40-599797.log', options), true);
   assert.equal(isManagedUploadLogFileName('FILEUPLOADER-2026-08-27.LOG', options), true);
   assert.equal(isManagedUploadLogFileName('27-08-2026-MDU-SESSION-05-40-599797.LOG', options), true);

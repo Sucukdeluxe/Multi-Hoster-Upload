@@ -224,7 +224,7 @@ test('packages every Electron preload referenced by the main process', () => {
 
 test('read-own-upload-log discovers base daily session and both fallback directories without synchronous reads', async () => {
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
-  const blockStart = mainSource.indexOf("ipcMain.handle('read-own-upload-log'");
+  const blockStart = mainSource.indexOf('let _uploadLogEvidenceCache');
   const blockEnd = mainSource.indexOf("\nipcMain.handle('import-upload-log'", blockStart);
   assert.notEqual(blockStart, -1);
   assert.notEqual(blockEnd, -1);
@@ -233,9 +233,9 @@ test('read-own-upload-log discovers base daily session and both fallback directo
   const desktop = 'C:\\desktop';
   const userData = 'C:\\user-data';
   const entriesByDirectory = new Map([
-    [configured, ['custom.txt', 'custom-2026-08-27.txt', '27-08-2026-mdu-session-05-40-111111.txt', 'upload-audit.log']],
-    [desktop, ['FILEUPLOADER-2026-08-26.LOG', '26-08-2026-MDU-SESSION-05-40-222222.LOG', 'account-rotation.log']],
-    [userData, ['fileuploader-2026-08-25.log', '25-08-2026-mdu-session-05-40-333333.log', 'upload-debug.log']]
+    [configured, ['custom.txt', 'custom-2026-08-27.txt', 'custom.1.txt', '27-08-2026-mdu-session-05-40-111111.txt', 'upload-audit.log']],
+    [desktop, ['FILEUPLOADER-2026-08-26.LOG', 'FILEUPLOADER-2026-08-26.2.LOG', '26-08-2026-MDU-SESSION-05-40-222222.LOG', 'account-rotation.log']],
+    [userData, ['fileuploader-2026-08-25.log', 'fileuploader.3.log', '25-08-2026-mdu-session-05-40-333333.log', 'upload-debug.log']]
   ]);
   const fileNames = new Map();
   for (const [directory, names] of entriesByDirectory) {
@@ -244,33 +244,84 @@ test('read-own-upload-log discovers base daily session and both fallback directo
       fileNames.set(path.win32.join(directory, name), `${name}.mkv`);
     }
   }
+  let streamReads = 0;
+  let failedPath = '';
+  let scanLabel = '';
+  let holdNextRead = false;
+  let heldRead = null;
   const fakeFs = {
-    readdirSync: directory => entriesByDirectory.get(directory) || [],
-    existsSync: filePath => fileNames.has(filePath),
+    readdirSync: () => { throw new Error('synchronous enumeration forbidden'); },
+    existsSync: () => { throw new Error('synchronous existence check forbidden'); },
     readFileSync: () => { throw new Error('synchronous read forbidden'); },
     promises: {
-      readFile: async filePath => require('../lib/upload-log').formatUploadLogLine(
-        new Date(2026, 7, 27, 5, 40, 0),
-        'voe.sx',
-        'https://voe.sx/e/test',
-        fileNames.get(filePath)
-      )
+      readdir: async () => { throw new Error('materialized directory read forbidden'); },
+      opendir: async directory => ({
+        async *[Symbol.asyncIterator]() {
+          for (const name of entriesByDirectory.get(directory) || []) yield { name };
+        }
+      }),
+      readFile: async () => { throw new Error('full-file read forbidden'); }
     }
   };
-  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), {
-    _resolveUploadLogTarget: () => ({ path: path.win32.join(configured, '27-08-2026-mdu-session-05-40-111111.txt') }),
+  const context = {
+    _activeLogPath: path.win32.join(configured, '27-08-2026-mdu-session-05-40-111111.txt'),
+    _resolveUploadLogTarget: () => { throw new Error('write-target resolution forbidden'); },
     app: { getPath: name => name === 'desktop' ? desktop : userData },
     fs: fakeFs,
     getBaseLogFilePath: () => path.win32.join(configured, 'custom.txt'),
-    getSafeDesktopDir: () => desktop,
+    getSafeDesktopDir: () => { throw new Error('synchronous desktop probe forbidden'); },
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     isManagedUploadLogFileName: require('../lib/log-mode').isManagedUploadLogFileName,
-    parseUploadLogLine: require('../lib/upload-log').parseUploadLogLine,
+    iterateUploadLogEntries: async function* (filePath) {
+      streamReads++;
+      const label = scanLabel;
+      if (filePath === failedPath) {
+        const error = new Error('managed log denied');
+        error.code = 'EACCES';
+        throw error;
+      }
+      if (holdNextRead) {
+        holdNextRead = false;
+        heldRead = createDeferred();
+        await heldRead.promise;
+      }
+      yield require('../lib/upload-log').parseUploadLogLine(require('../lib/upload-log').formatUploadLogLine(
+        new Date(2026, 7, 27, 5, 40, 0),
+        'voe.sx',
+        'https://voe.sx/e/test',
+        `${fileNames.get(filePath)}${label}`
+      ));
+    },
     path: path.win32
-  });
+  };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), context);
 
-  const entries = await handlers.get('read-own-upload-log')();
-  assert.deepEqual([...entries.map(entry => entry.fileName)].sort(), [...fileNames.values()].sort());
+  const handler = handlers.get('read-own-upload-log');
+  const [first, concurrent] = await Promise.all([handler(), handler()]);
+  const cached = await handler();
+  const expected = [...fileNames.values()].sort();
+  assert.deepEqual([...first.map(entry => entry.fileName)].sort(), expected);
+  assert.deepEqual([...concurrent.map(entry => entry.fileName)].sort(), expected);
+  assert.deepEqual([...cached.map(entry => entry.fileName)].sort(), expected);
+  assert.equal(streamReads, fileNames.size);
+  vm.runInNewContext('_invalidateUploadLogEvidenceCache()', context);
+  failedPath = [...fileNames.keys()][0];
+  await assert.rejects(handler(), /managed log denied/);
+  failedPath = '';
+  vm.runInNewContext('_invalidateUploadLogEvidenceCache()', context);
+  holdNextRead = true;
+  scanLabel = '.old';
+  const staleScan = handler();
+  while (!heldRead) await new Promise(resolve => setImmediate(resolve));
+  vm.runInNewContext('_invalidateUploadLogEvidenceCache()', context);
+  scanLabel = '.new';
+  const freshScan = handler();
+  heldRead.resolve();
+  const [staleEntries, freshEntries] = await Promise.all([staleScan, freshScan]);
+  const cachedFreshEntries = await handler();
+  assert.equal(staleEntries.some(entry => entry.fileName.endsWith('.old')), true);
+  assert.equal(freshEntries.every(entry => entry.fileName.endsWith('.new')), true);
+  assert.equal(cachedFreshEntries.every(entry => entry.fileName.endsWith('.new')), true);
 });
 
 test('exposes managed online backup operations through narrow IPC boundaries', () => {
@@ -633,20 +684,47 @@ test('preload exposes account cooldown snapshots and removes their listener duri
 test('exposes persistent automation controls and status through narrow IPC boundaries', () => {
   const preloadSource = fs.readFileSync(path.join(projectRoot, 'preload.js'), 'utf8');
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const rendererSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
 
   assert.match(mainSource, /ipcMain\.handle\('automation:get-status'/u);
+  assert.match(mainSource, /ipcMain\.handle\('automation:get-completions'/u);
+  assert.match(mainSource, /ipcMain\.handle\('automation:record-completions'/u);
   assert.match(mainSource, /ipcMain\.handle\('automation:pause-after-active'/u);
   assert.match(mainSource, /ipcMain\.handle\('automation:resume'/u);
   assert.match(mainSource, /ipcMain\.handle\('folder-monitor:test-scan'/u);
   assert.match(mainSource, /ipcMain\.handle\('folder-monitor:reconcile'/u);
   assert.match(mainSource, /safeSend\('automation:status'/u);
   assert.match(preloadSource, /automationGetStatus:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:get-status'\)/u);
+  assert.match(preloadSource, /getAutomationCompletions:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:get-completions'\)/u);
+  assert.match(preloadSource, /recordAutomationCompletions:\s*\(entries\)\s*=>\s*ipcRenderer\.invoke\('automation:record-completions',\s*entries\)/u);
   assert.match(preloadSource, /automationPauseAfterActive:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:pause-after-active'\)/u);
   assert.match(preloadSource, /automationResume:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('automation:resume'\)/u);
   assert.match(preloadSource, /folderMonitorTestScan:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('folder-monitor:test-scan'\)/u);
   assert.match(preloadSource, /folderMonitorReconcile:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('folder-monitor:reconcile'\)/u);
   assert.match(preloadSource, /onAutomationStatus:\s*\(callback\)\s*=>\s*\{[\s\S]*?ipcRenderer\.on\('automation:status'/u);
   assert.match(preloadSource, /ipcRenderer\.removeAllListeners\('automation:status'\)/u);
+  assert.match(mainSource, /async function registerAutomationCompletionJobs/u);
+  assert.match(mainSource, /await fs\.promises\.stat\(job\.file\)/u);
+  assert.match(mainSource, /await registerAutomationCompletionJobs\(_thisManager,\s*jobs\)/u);
+  assert.match(mainSource, /await registerAutomationCompletionJobs\(batchManager,\s*jobs\)/u);
+  assert.match(mainSource, /_automationCompletionProgress\.set\(automationCompletionKey\(entry\),\s*data\)/u);
+  assert.match(mainSource, /_automationCompletionWriter\.add\(entry\)/u);
+  assert.match(mainSource, /await _thisManager\._automationCompletionWriter\?\.flush\(\)/u);
+  assert.match(mainSource, /requestUploadFinalization\(summary,\s*!automationCompletionsPersisted\)/u);
+  assert.match(rendererSource, /data\.preserveQueue\s*===\s*true\s*\|\|\s*queueJobs\.some/u);
+  assert.match(rendererSource, /await window\.api\.recordAutomationCompletions\(completionRows\)/u);
+  const serializerStart = rendererSource.indexOf('function serializeUploadJob');
+  const serializerEnd = rendererSource.indexOf('\n}', serializerStart);
+  const serializer = rendererSource.slice(serializerStart, serializerEnd);
+  assert.match(serializer, /automationAdmission:\s*job\.automationAdmission\s*===\s*true/u);
+  assert.match(serializer, /automationMtimeMs:\s*job\.automationMtimeMs/u);
+  assert.match(serializer, /automationSize:\s*job\.automationSize/u);
+  assert.match(serializer, /sourceMtimeMs:\s*job\.sourceMtimeMs/u);
+  assert.match(serializer, /sourceSize:\s*job\.sourceSize/u);
+  const syncStart = rendererSource.indexOf('function syncSelectedFilesFromQueue');
+  const syncEnd = rendererSource.indexOf('\n}', syncStart);
+  const syncSelected = rendererSource.slice(syncStart, syncEnd);
+  assert.match(syncSelected, /mtimeMs:\s*job\.sourceMtimeMs\s*\?\?\s*job\.automationMtimeMs/u);
 });
 
 test('every batch start and extension IPC fails closed before account and cleanup side effects', () => {

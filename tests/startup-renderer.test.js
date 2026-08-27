@@ -69,6 +69,8 @@ let pendingAutomationTestScan = null;
 let automationProbe = {
   history: [],
   uploadLog: [],
+  completionRows: [],
+  completionError: '',
   paused: false,
   runtimeStatus: {},
   automationStatusSequence: [],
@@ -85,7 +87,7 @@ let automationProbe = {
   activeInspections: 0,
   maxConcurrentInspections: 0,
   dryScan: { files: [], reachable: true, trigger: 'test' },
-  readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
+  readCalls: { history: 0, uploadLog: 0, completions: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
   mutationCalls: [],
   logs: [],
   savedSettings: []
@@ -175,6 +177,8 @@ contextBridge.exposeInMainWorld('api', {
     automationProbe = {
       history: Array.isArray(value.history) ? value.history : [],
       uploadLog: Array.isArray(value.uploadLog) ? value.uploadLog : [],
+      completionRows: Array.isArray(value.completionRows) ? value.completionRows : [],
+      completionError: String(value.completionError || ''),
       paused: value.paused === true,
       runtimeStatus: value.runtimeStatus && typeof value.runtimeStatus === 'object' ? { ...value.runtimeStatus } : {},
       automationStatusSequence: Array.isArray(value.automationStatusSequence) ? value.automationStatusSequence.map(entry => ({ ...entry })) : [],
@@ -191,7 +195,7 @@ contextBridge.exposeInMainWorld('api', {
       activeInspections: 0,
       maxConcurrentInspections: 0,
       dryScan: value.dryScan || { files: [], reachable: true, trigger: 'test' },
-      readCalls: { history: 0, uploadLog: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
+      readCalls: { history: 0, uploadLog: 0, completions: 0, inspect: 0, status: 0, testScan: 0, reconcile: 0 },
       mutationCalls: [],
       logs: [],
       savedSettings: []
@@ -200,6 +204,7 @@ contextBridge.exposeInMainWorld('api', {
   setAutomationEvidence(value = {}) {
     if (Array.isArray(value.history)) automationProbe.history = value.history;
     if (Array.isArray(value.uploadLog)) automationProbe.uploadLog = value.uploadLog;
+    if (Array.isArray(value.completionRows)) automationProbe.completionRows = value.completionRows;
   },
   getAutomationProbeState() {
     return {
@@ -250,6 +255,15 @@ contextBridge.exposeInMainWorld('api', {
   readOwnUploadLog() {
     automationProbe.readCalls.uploadLog++;
     return Promise.resolve(automationProbe.uploadLog);
+  },
+  getAutomationCompletions() {
+    automationProbe.readCalls.completions++;
+    if (automationProbe.completionError) return Promise.reject(new Error(automationProbe.completionError));
+    return Promise.resolve(automationProbe.completionRows);
+  },
+  clearAutomationCompletions(removals) {
+    automationProbe.mutationCalls.push(['clear-completions', JSON.parse(JSON.stringify(removals || []))]);
+    return Promise.resolve(true);
   },
   automationGetStatus() {
     automationProbe.readCalls.status++;
@@ -686,7 +700,7 @@ contextBridge.exposeInMainWorld('api', {
       resultingJobs: historyEvaluation.summary.resultingJobs
     };
     _completedUploadKeys.clear();
-    const completedFile = { path: 'C:\\history\\completed-in-session.mkv', name: 'completed-in-session.mkv', size: 1 };
+    const completedFile = { path: 'C:\\history\\completed-in-session.mkv', name: 'completed-in-session.mkv', size: 1, mtimeMs: 1787828400123 };
     config.globalSettings.removeFromQueueOnDone = true;
     config.globalSettings.folderMonitor = {
       enabled: true,
@@ -703,6 +717,7 @@ contextBridge.exposeInMainWorld('api', {
       hoster: 'doodstream.com',
       status: 'queued',
       bytesTotal: 1,
+      automationMtimeMs: completedFile.mtimeMs,
       automationAdmission: true
     };
     queueJobs = [completedJob];
@@ -721,18 +736,127 @@ contextBridge.exposeInMainWorld('api', {
       result: { download_url: 'https://doodstream.com/d/completed-in-session' }
     });
     _doneRemovalCoalescer?.drainSync();
+    window.api.setAutomationEvidence({
+      completionRows: [{
+        path: completedFile.path,
+        size: completedFile.size,
+        mtimeMs: completedFile.mtimeMs,
+        hoster: completedJob.hoster,
+        completedAt: 1787828500000
+      }]
+    });
     automationEvidenceSnapshotGeneration++;
     automationEvidenceSnapshotCache = null;
     const removedAfterDone = !queueJobs.some(job => job.id === completedJob.id);
     const completedKeyPresent = _completedUploadKeys.has(completedFile.path + '|doodstream.com');
     const completedResult = await handleFolderMonitorFiles([completedFile]);
     const completedProbe = await window.api.getAutomationProbeState();
+    _completedUploadKeys.clear();
+    queueJobs = [];
+    rebuildJobIndex();
+    window.api.configureAutomationProbe({
+      paused: false,
+      history: [],
+      uploadLog: [],
+      completionRows: [{
+        path: completedFile.path,
+        size: completedFile.size,
+        mtimeMs: completedFile.mtimeMs,
+        hoster: 'doodstream.com',
+        completedAt: 1787828500000
+      }]
+    });
+    automationEvidenceSnapshotGeneration++;
+    automationEvidenceSnapshotCache = null;
+    const durableEvaluation = await evaluateAutomationCandidates([completedFile], { dryRun: true, trigger: 'startup' });
+    _completedUploadKeys.add(completedFile.path + '|doodstream.com');
+    automationEvidenceSnapshotGeneration++;
+    automationEvidenceSnapshotCache = null;
+    const changedEvaluation = await evaluateAutomationCandidates([{ ...completedFile, mtimeMs: completedFile.mtimeMs + 1 }], { dryRun: true, trigger: 'startup' });
+    const partialFile = { path: 'C:\\history\\partial-in-session.mkv', name: 'partial-in-session.mkv', size: 2, mtimeMs: 1787828400456 };
+    config.globalSettings.folderMonitor.hosters = ['doodstream.com', 'voe.sx'];
+    window.api.configureAutomationProbe({
+      paused: false,
+      history: [],
+      uploadLog: [{ fileName: partialFile.name, hoster: 'doodstream.com' }],
+      completionRows: [{
+        path: partialFile.path,
+        size: partialFile.size,
+        mtimeMs: partialFile.mtimeMs,
+        hoster: 'doodstream.com',
+        completedAt: 1787828500001
+      }]
+    });
+    automationEvidenceSnapshotGeneration++;
+    automationEvidenceSnapshotCache = null;
+    const partialEvaluation = await evaluateAutomationCandidates([partialFile], { dryRun: true, trigger: 'startup' });
+    const restoredFile = { path: 'C:\\history\\restored-after-ledger.mkv', name: 'restored-after-ledger.mkv', size: 3, mtimeMs: 1787828400789 };
+    const restoredJob = {
+      id: 'restored-after-ledger',
+      file: restoredFile.path,
+      fileName: restoredFile.name,
+      hoster: 'doodstream.com',
+      status: 'preview',
+      bytesTotal: restoredFile.size,
+      sourceSize: restoredFile.size,
+      sourceMtimeMs: restoredFile.mtimeMs,
+      automationAdmission: true
+    };
+    queueJobs = [restoredJob];
+    selectedFiles = [];
+    rebuildJobIndex();
+    _completedUploadKeys.clear();
+    window.api.configureAutomationProbe({
+      paused: false,
+      history: [],
+      uploadLog: [],
+      completionRows: [{
+        path: restoredFile.path,
+        size: restoredFile.size,
+        mtimeMs: restoredFile.mtimeMs,
+        hoster: restoredJob.hoster,
+        completedAt: 1787828500002
+      }]
+    });
+    await _autoDeduplicateFromLog();
+    queueJobs = [{
+      id: 'blocked-restored-evidence',
+      file: 'C:\\history\\blocked-restored-evidence.mkv',
+      fileName: 'blocked-restored-evidence.mkv',
+      hoster: 'doodstream.com',
+      status: 'preview',
+      bytesTotal: 4
+    }];
+    selectedFiles = [];
+    rebuildJobIndex();
+    config.globalSettings.autoStartRestoredQueue = true;
+    _startupAutoResumeController = null;
+    window.api.configureAutomationProbe({ paused: false, completionError: 'ledger unavailable' });
+    const failedEvidenceResult = await _autoDeduplicateFromLog();
+    scheduleRestoredQueueAutoStart();
+    const failedEvidence = {
+      result: failedEvidenceResult,
+      available: typeof _startupQueueEvidenceAvailable === 'undefined' ? null : _startupQueueEvidenceAvailable,
+      controllerCreated: _startupAutoResumeController !== null
+    };
+    cancelStartupQueueAutoStart();
+    config.globalSettings.autoStartRestoredQueue = false;
     const completedEvidence = {
       removedAfterDone,
       completedKeyPresent,
       admittedFiles: completedResult.admittedFiles.length,
       matchingQueueJobs: queueJobs.filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(completedFile.path)).length,
-      startOrInjectCalls: completedProbe.mutationCalls.filter(call => call[0] === 'start' || call[0] === 'inject').length
+      startOrInjectCalls: completedProbe.mutationCalls.filter(call => call[0] === 'start' || call[0] === 'inject').length,
+      durableAlreadyProcessed: durableEvaluation.summary.alreadyProcessed,
+      durableResultingJobs: durableEvaluation.summary.resultingJobs,
+      changedAlreadyProcessed: changedEvaluation.summary.alreadyProcessed,
+      changedResultingJobs: changedEvaluation.summary.resultingJobs,
+      partialAlreadyProcessed: partialEvaluation.summary.alreadyProcessed,
+      partialResultingJobs: partialEvaluation.summary.resultingJobs,
+      partialHosters: partialEvaluation.candidates[0]?.eligibleHosters || [],
+      restoredQueueRemoved: !queueJobs.some(job => job.id === restoredJob.id),
+      restoredCompletionKey: _completedUploadKeys.has(restoredJob.file + '|' + restoredJob.hoster),
+      failedEvidence
     };
     _completedUploadKeys.clear();
     config.globalSettings.removeFromQueueOnDone = false;
@@ -2827,7 +2951,7 @@ app.whenReady().then(async () => {
         deferredFiles: 70
       },
       frozen: true,
-      reads: { history: 1, uploadLog: 1, inspect: 1, status: 0, testScan: 0, reconcile: 0 }
+      reads: { history: 1, uploadLog: 1, completions: 1, inspect: 1, status: 0, testScan: 0, reconcile: 0 }
     });
     assert.deepEqual(result.automationPipeline.manualTest, {
       fingerprintEqual: true,
@@ -2843,7 +2967,7 @@ app.whenReady().then(async () => {
         availableSlots: 1200,
         deferredFiles: 0
       },
-      reads: { history: 1, uploadLog: 1, inspect: 1, status: 0, testScan: 1, reconcile: 0 }
+      reads: { history: 1, uploadLog: 1, completions: 1, inspect: 1, status: 0, testScan: 1, reconcile: 0 }
     });
     assert.deepEqual(result.automationPipeline.historyEvidence, {
       alreadyProcessed: 2,
@@ -2855,7 +2979,17 @@ app.whenReady().then(async () => {
       completedKeyPresent: true,
       admittedFiles: 0,
       matchingQueueJobs: 0,
-      startOrInjectCalls: 0
+      startOrInjectCalls: 0,
+      durableAlreadyProcessed: 1,
+      durableResultingJobs: 0,
+      changedAlreadyProcessed: 0,
+      changedResultingJobs: 1,
+      partialAlreadyProcessed: 0,
+      partialResultingJobs: 1,
+      partialHosters: ['voe.sx'],
+      restoredQueueRemoved: true,
+      restoredCompletionKey: true,
+      failedEvidence: { result: false, available: false, controllerCreated: false }
     });
     assert.deepEqual(result.automationPipeline.pendingDedup, {
       evaluatedNames: ['new.mkv'],

@@ -3,6 +3,8 @@ const assert = require('node:assert');
 const {
   formatUploadLogLine,
   parseUploadLogLine,
+  iterateUploadLogEntries,
+  readUploadLogEntries,
   summarizeBatchPlan,
   formatUploadPlanLogLine
 } = require('../lib/upload-log');
@@ -102,6 +104,11 @@ test('parseUploadLogLine skips comments, blanks and malformed lines', () => {
   assert.equal(parseUploadLogLine(42), null);
 });
 
+test('parser distinguishes confirmed uploads from filename-only rows', () => {
+  assert.equal(parseUploadLogLine('2026-08-27 05:40:00|voe.sx|||episode.mkv|').confirmed, false);
+  assert.equal(parseUploadLogLine('2026-08-27 05:40:00|voe.sx|https://voe.sx/e/code||episode.mkv|').confirmed, true);
+});
+
 test('parseUploadLogLine: missing/garbage timestamp yields ts=undefined (legacy lines still match by name)', () => {
   const parsed = parseUploadLogLine('|voe.sx|link||a.mkv|');
   assert.equal(parsed.hoster, 'voe.sx');
@@ -135,4 +142,79 @@ test('SEAM: a leading-space filename round-trips and the gate still drops its gh
   const job = { status: 'preview', fileName: ' spaced.mp4', hoster: 'voe.sx', file: 'C:/dl/ spaced.mp4' };
   const { removed } = partitionRestoredJobsByLog([job], [parsed], savedAt);
   assert.equal(removed.length, 1, 'leading-space filename now matches end-to-end (was a mismatch before)');
+});
+
+test('stream reader parses large logs incrementally and yields between bounded line batches', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'upload-log-stream-'));
+  const filePath = path.join(directory, 'fileuploader.log');
+  const lines = Array.from({ length: 2505 }, (_, index) => formatUploadLogLine(
+    new Date(2026, 7, 27, 5, 40, index % 60),
+    index % 2 === 0 ? 'voe.sx' : 'doodstream.com',
+    `https://example.invalid/${index}`,
+    `episode-${index}.mkv`
+  )).join('');
+  fs.writeFileSync(filePath, lines, 'utf8');
+  let yields = 0;
+  try {
+    const entries = await readUploadLogEntries(filePath, {
+      yieldEvery: 500,
+      yieldFn: async () => { yields++; }
+    });
+    assert.equal(entries.length, 2505);
+    assert.equal(entries[0].fileName, 'episode-0.mkv');
+    assert.equal(entries.at(-1).fileName, 'episode-2504.mkv');
+    assert.equal(yields, 5);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('upload-log iterator is lazy and rejects oversized lines', async () => {
+  let produced = 0;
+  async function* source() {
+    produced++;
+    yield formatUploadLogLine(new Date(2026, 7, 27, 5, 40, 0), 'voe.sx', 'https://example.invalid/1', 'one.mkv').trimEnd();
+    produced++;
+    yield formatUploadLogLine(new Date(2026, 7, 27, 5, 40, 1), 'voe.sx', 'https://example.invalid/2', 'two.mkv').trimEnd();
+  }
+  const iterator = iterateUploadLogEntries('', { lines: source(), maxLineLength: 65536 });
+  assert.deepEqual(await iterator.next(), {
+    done: false,
+    value: { hoster: 'voe.sx', fileName: 'one.mkv', ts: new Date(2026, 7, 27, 5, 40, 0).getTime(), confirmed: true }
+  });
+  assert.equal(produced, 1);
+  await iterator.return();
+
+  const oversized = iterateUploadLogEntries('', {
+    lines: (async function* () { yield 'x'.repeat(11); })(),
+    maxLineLength: 10
+  });
+  await assert.rejects(async () => { for await (const entry of oversized) void entry; }, /Zeile ist zu lang/);
+
+  let destroyed = 0;
+  const input = {
+    async *[Symbol.asyncIterator]() { yield 'x'.repeat(11); },
+    destroy: () => { destroyed++; }
+  };
+  const leaking = iterateUploadLogEntries('ignored.log', {
+    fs: { createReadStream: () => input },
+    maxLineLength: 10
+  });
+  await assert.rejects(async () => { for await (const entry of leaking) void entry; }, /Zeile ist zu lang/);
+  assert.equal(destroyed, 1);
+
+  const oversizedStream = iterateUploadLogEntries('ignored.log', {
+    fs: {
+      createReadStream: () => ({
+        async *[Symbol.asyncIterator]() { yield 'x'.repeat(11); },
+        destroy() {}
+      })
+    },
+    maxBytes: 10,
+    maxLineLength: 100
+  });
+  await assert.rejects(async () => { for await (const entry of oversizedStream) void entry; }, /Leselimit/);
 });

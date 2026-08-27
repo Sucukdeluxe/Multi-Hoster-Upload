@@ -7,7 +7,12 @@ const {
   rollDailyTelemetry,
   applyTelemetryDelta,
   deriveAutomationState,
-  classifyProcessedCandidates
+  isPathWithinAutomationFolder,
+  classifyProcessedCandidates,
+  classifyAutomationCompletionLedger,
+  createAutomationCompletionWriter,
+  mergeAutomationCompletions,
+  removeAutomationCompletions
 } = require('../lib/automation-control');
 
 test('automation defaults use 15000 jobs and a five minute reconciliation interval', () => {
@@ -284,6 +289,14 @@ test('automation state follows inactive disconnected error queue-limited and act
   assert.equal(deriveAutomationState(null), 'inactive');
 });
 
+test('watched-folder membership respects Windows casing and recursive scope', () => {
+  assert.equal(isPathWithinAutomationFolder('C:\\Watch\\episode.mkv', 'c:/watch', false), true);
+  assert.equal(isPathWithinAutomationFolder('C:\\Watch\\Season 1\\episode.mkv', 'c:/watch', false), false);
+  assert.equal(isPathWithinAutomationFolder('C:\\Watch\\Season 1\\episode.mkv', 'c:/watch', true), true);
+  assert.equal(isPathWithinAutomationFolder('C:\\Watcher\\episode.mkv', 'c:/watch', true), false);
+  assert.equal(isPathWithinAutomationFolder('', 'c:/watch', true), false);
+});
+
 test('exact queue and history paths mark candidates processed case-insensitively', () => {
   const result = classifyProcessedCandidates({
     candidates: [
@@ -344,4 +357,97 @@ test('processed classification tolerates malformed collections and does not muta
     ambiguousPaths: [],
     unprocessedPaths: []
   });
+});
+
+test('durable completion ledger excludes only unchanged completed hosters', () => {
+  const candidate = {
+    path: 'C:\\Watch\\Episode.mkv',
+    size: 1048576,
+    mtimeMs: 1787828400123.75,
+    eligibleHosters: ['doodstream.com', 'voe.sx', 'byse.sx']
+  };
+  const completionRows = [
+    { path: 'c:/watch/episode.mkv', size: 1048576, mtimeMs: 1787828400123, hoster: 'DOODSTREAM.COM', completedAt: 10 },
+    { path: 'C:\\WATCH\\EPISODE.MKV', size: 1048576, mtimeMs: 1787828400123.9, hoster: 'voe.sx', completedAt: 20 }
+  ];
+
+  assert.deepEqual(classifyAutomationCompletionLedger({ candidates: [candidate], completionRows }), {
+    processedPaths: [],
+    completedByPath: [{ path: candidate.path, hosters: ['doodstream.com', 'voe.sx'] }],
+    remainingByPath: [{ path: candidate.path, hosters: ['byse.sx'] }]
+  });
+
+  const complete = classifyAutomationCompletionLedger({
+    candidates: [candidate],
+    completionRows: completionRows.concat({
+      path: candidate.path,
+      size: candidate.size,
+      mtimeMs: candidate.mtimeMs,
+      hoster: 'byse.sx',
+      completedAt: 30
+    })
+  });
+  assert.deepEqual(complete.processedPaths, [candidate.path]);
+  assert.deepEqual(complete.remainingByPath, [{ path: candidate.path, hosters: [] }]);
+
+  const changed = classifyAutomationCompletionLedger({
+    candidates: [{ ...candidate, mtimeMs: candidate.mtimeMs + 1 }],
+    completionRows
+  });
+  assert.deepEqual(changed.completedByPath, [{ path: candidate.path, hosters: [] }]);
+  assert.deepEqual(changed.remainingByPath, [{ path: candidate.path, hosters: candidate.eligibleHosters }]);
+});
+
+test('completion ledger replaces only the same path and hoster without evicting unrelated entries', () => {
+  const existing = [
+    { path: 'C:\\watch\\a.mkv', size: 1, mtimeMs: 1, hoster: 'voe.sx', completedAt: 10 },
+    { path: 'C:\\watch\\b.mkv', size: 2, mtimeMs: 2, hoster: 'voe.sx', completedAt: 20 }
+  ];
+  const merged = mergeAutomationCompletions(existing, [
+    { path: 'c:/WATCH/a.mkv', size: 3, mtimeMs: 3, hoster: 'VOE.SX', completedAt: 30 },
+    { path: 'C:\\watch\\c.mkv', size: 4, mtimeMs: 4, hoster: 'byse.sx', completedAt: 40 }
+  ]);
+
+  assert.deepEqual(merged, [
+    { path: 'C:\\watch\\b.mkv', size: 2, mtimeMs: 2, hoster: 'voe.sx', completedAt: 20 },
+    { path: 'c:/WATCH/a.mkv', size: 3, mtimeMs: 3, hoster: 'voe.sx', completedAt: 30 },
+    { path: 'C:\\watch\\c.mkv', size: 4, mtimeMs: 4, hoster: 'byse.sx', completedAt: 40 }
+  ]);
+  assert.deepEqual(removeAutomationCompletions(merged, [{ path: 'C:\\WATCH\\A.MKV', hoster: 'voe.sx' }]), [merged[0], merged[2]]);
+  assert.deepEqual(removeAutomationCompletions(merged, [{ path: 'c:/watch/c.mkv' }]), [merged[0], merged[1]]);
+  assert.throws(() => mergeAutomationCompletions(existing, [
+    { path: 'C:\\watch\\c.mkv', size: 4, mtimeMs: 4, hoster: 'byse.sx', completedAt: 40 }
+  ], 2), /zu viele Einträge/);
+});
+
+test('completion writer coalesces successful jobs and retains a failed batch for retry', async () => {
+  const scheduled = [];
+  const writes = [];
+  const persisted = [];
+  const failures = [];
+  let fail = true;
+  const writer = createAutomationCompletionWriter({
+    schedule: callback => scheduled.push(callback),
+    onPersisted: entries => persisted.push(structuredClone(entries)),
+    onError: (error, entries) => failures.push({ message: error.message, entries: structuredClone(entries) }),
+    save: async entries => {
+      if (fail) throw new Error('disk unavailable');
+      writes.push(structuredClone(entries));
+    }
+  });
+  const first = { path: 'C:\\watch\\episode.mkv', size: 1, mtimeMs: 2, hoster: 'voe.sx', completedAt: 3 };
+  const newer = { ...first, completedAt: 4 };
+
+  writer.add(first);
+  writer.add(newer);
+  assert.equal(scheduled.length, 1);
+  await assert.rejects(writer.flush(), /disk unavailable/);
+  assert.deepEqual(persisted, []);
+  assert.deepEqual(failures, [{ message: 'disk unavailable', entries: [newer] }]);
+
+  fail = false;
+  await writer.flush();
+  assert.deepEqual(writes, [[newer]]);
+  assert.deepEqual(persisted, [[newer]]);
+  assert.equal(writer.pendingCount(), 0);
 });

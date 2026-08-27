@@ -151,8 +151,8 @@ describe('UploadManager', () => {
     mgr.on('batch-done', (s) => { summary = s; });
 
     await mgr.startBatch([
-      { file: '/test/video1.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
-      { file: '/test/video2.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
+      { jobId: 'summary-1', file: '/test/video1.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { jobId: 'summary-2', file: '/test/video2.mp4', hoster: 'doodstream.com', apiKey: 'key1' }
     ]);
 
     assert.ok(summary);
@@ -160,6 +160,7 @@ describe('UploadManager', () => {
     assert.equal(summary.succeeded, 2);
     assert.equal(summary.failed, 0);
     assert.equal(summary.files.length, 2);
+    assert.deepEqual(summary.files.map(file => file.results[0].jobId).sort(), ['summary-1', 'summary-2']);
   });
 
   it('emits a final idle stats snapshot after a normal batch', async () => {

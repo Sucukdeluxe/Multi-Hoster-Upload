@@ -29,7 +29,7 @@ const { walkFolderAsync } = require('./lib/file-discovery');
 const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
-const { formatUploadLogLine, parseUploadLogLine, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
+const { formatUploadLogLine, iterateUploadLogEntries, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
 const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, createBufferedInternalLogFlusher, getLogOpenDirectory } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
@@ -39,7 +39,7 @@ const { createCollectors } = require('./lib/diagnostics-collectors');
 const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
-const { normalizeAutomationSettings } = require('./lib/automation-control');
+const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion } = require('./lib/automation-control');
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -125,8 +125,10 @@ const updateAnnouncementState = createUpdateAnnouncementState();
 let _lastImportPath = null;
 let dropTargetWindow = null;
 let tray = null;
+let _cachedLogSettings = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
+_setLogSettingsSnapshot((configStore.load() || {}).globalSettings);
 const onlineBackupKeyring = createOnlineBackupKeyring({
   filePath: path.join(app.getPath('userData'), 'online-backup-keys.json')
 });
@@ -153,7 +155,7 @@ async function waitForUploadManagerRelease(manager, timeoutMs = 300000) {
   }
 }
 
-function requestUploadFinalization(summary) {
+function requestUploadFinalization(summary, preserveQueue = false) {
   const finalizationId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -167,7 +169,7 @@ function requestUploadFinalization(summary) {
         resolve(value);
       }
     });
-    safeSend('upload-batch-done', { summary, finalizationId });
+    safeSend('upload-batch-done', { summary, finalizationId, preserveQueue });
   });
 }
 const activeUploadProducerTrackers = new Set();
@@ -181,6 +183,7 @@ function assertConfigWriteAllowed() {
 
 async function waitForConfigStoreWrites() {
   await configStore.drainWrites();
+  await configStore.drainAutomationCompletionWrites();
 }
 
 const ONLINE_BACKUP_RENDERER_URL = pathToFileURL(path.join(__dirname, 'renderer', 'index.html'));
@@ -790,18 +793,20 @@ function getDefaultLogFilePath() {
 // (incl. an 8 MB+ history) on every flush — a major long-running main-thread
 // drag. logFilePath/logMode change only when the user saves settings, so cache
 // the two strings and invalidate on those saves (see _invalidateLogSettings).
-let _cachedLogSettings = null;
-function _getLogSettings() {
-  if (!_cachedLogSettings) {
-    const gs = (configStore.load() || {}).globalSettings || {};
-    _cachedLogSettings = {
-      logFilePath: String(gs.logFilePath || '').trim(),
-      logMode: gs.logMode || 'single'
-    };
-  }
-  return _cachedLogSettings;
+function _setLogSettingsSnapshot(globalSettings) {
+  const settings = globalSettings || {};
+  _cachedLogSettings = {
+    logFilePath: String(settings.logFilePath || '').trim(),
+    logMode: settings.logMode || 'single'
+  };
 }
-function _invalidateLogSettings() { _cachedLogSettings = null; }
+function _getLogSettings() {
+  return _cachedLogSettings || { logFilePath: '', logMode: 'single' };
+}
+function _invalidateLogSettings(globalSettings) {
+  _setLogSettingsSnapshot(globalSettings);
+  _invalidateUploadLogEvidenceCache();
+}
 
 function getBaseLogFilePath() {
   const customPath = _getLogSettings().logFilePath;
@@ -958,13 +963,16 @@ function _flushUploadLog() {
           _flushUploadLog();
         }, 1000);
       }
-    } else if (target.isFallback && !_uploadLogFallbackWarned) {
-      _uploadLogFallbackWarned = true;
-      // Auto-persist the working fallback into the user's config so the
-      // next session writes here directly (no more fallback ladder) and
-      // the Settings input reflects reality.
-      _persistFallbackLogPath(target.path);
-      safeSend('upload-log-fallback', { fallbackPath: target.path });
+    } else {
+      _invalidateUploadLogEvidenceCache();
+      if (target.isFallback && !_uploadLogFallbackWarned) {
+        _uploadLogFallbackWarned = true;
+        // Auto-persist the working fallback into the user's config so the
+        // next session writes here directly (no more fallback ladder) and
+        // the Settings input reflects reality.
+        _persistFallbackLogPath(target.path);
+        safeSend('upload-log-fallback', { fallbackPath: target.path });
+      }
     }
     if (_uploadLogBuffer.length && !_uploadLogFlushTimer) setImmediate(_flushUploadLog);
   });
@@ -993,7 +1001,7 @@ async function _persistFallbackLogPath(workingPath) {
     cfg.globalSettings = gs;
     await configStore.save({ globalSettings: gs });
     _invalidateUploadLogTargetCache();
-    _invalidateLogSettings();
+    _invalidateLogSettings(gs);
     safeSend('log-path-auto-updated', { logFilePath: toSave });
     return true;
   } catch (err) {
@@ -1223,6 +1231,42 @@ function buildUploadTasksFromJobs(config, jobs, pick) {
     }));
   }
   return tasks;
+}
+
+async function registerAutomationCompletionJobs(manager, jobs) {
+  if (!manager || !Array.isArray(jobs)) return;
+  if (!manager._automationCompletionMetadata) manager._automationCompletionMetadata = new Map();
+  const folderSettings = configStore.load().globalSettings?.folderMonitor || {};
+  const candidates = jobs.filter(job => {
+    const monitoredManualJob = folderSettings.enabled === true && isPathWithinAutomationFolder(job?.file, folderSettings.folderPath, folderSettings.recursive === true);
+    return (job?.automationAdmission === true || monitoredManualJob) && job.id && job.file && job.hoster;
+  });
+  let cursor = 0;
+  const hasFiniteMetadata = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
+  async function worker() {
+    while (cursor < candidates.length) {
+      const job = candidates[cursor++];
+      const sourceSize = job.sourceSize ?? job.automationSize ?? job.bytesTotal;
+      const sourceMtimeMs = job.sourceMtimeMs ?? job.automationMtimeMs;
+      let size = hasFiniteMetadata(sourceSize) ? Number(sourceSize) : Number.NaN;
+      let mtimeMs = hasFiniteMetadata(sourceMtimeMs) ? Number(sourceMtimeMs) : Number.NaN;
+      if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) {
+        try {
+          const stat = await fs.promises.stat(job.file);
+          size = Number(stat.size);
+          mtimeMs = Number(stat.mtimeMs);
+        } catch {}
+      }
+      if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) continue;
+      manager._automationCompletionMetadata.set(job.id, {
+        path: job.file,
+        size,
+        mtimeMs,
+        hoster: job.hoster
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(16, candidates.length) }, worker));
 }
 
 async function checkDoodstreamHealth(hosterConfig, otp) {
@@ -1828,7 +1872,7 @@ ipcMain.handle('get-config', () => {
 ipcMain.handle('save-config', async (_event, config) => {
   assertConfigWriteAllowed();
   await configStore.save(config);
-  if (config && config.globalSettings) _invalidateLogSettings();
+  if (config && config.globalSettings) _invalidateLogSettings(config.globalSettings);
   try {
     if (config && config.globalSettings && Object.prototype.hasOwnProperty.call(config.globalSettings, 'logVerbose')) {
       setLogVerbose(!!config.globalSettings.logVerbose);
@@ -2294,6 +2338,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
+  await registerAutomationCompletionJobs(_thisManager, jobs);
 
   await appendUploadPlanAudit(batchPlan, 'start');
   if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
@@ -2379,6 +2424,35 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     }, PROGRESS_BATCH_INTERVAL_MS);
   }
 
+  function _queueProgressForRenderer(data) {
+    const isTerminal = data.status === 'done' || data.status === 'error' || data.status === 'aborted' || data.status === 'skipped';
+    if (isTerminal) {
+      if (data.jobId) _progressByJob.delete(data.jobId);
+      _progressTerminalQueue.push(data);
+    } else if (data.jobId) {
+      _progressByJob.set(data.jobId, data);
+    } else {
+      _progressTerminalQueue.push(data);
+    }
+    _scheduleProgressFlush();
+  }
+
+  _thisManager._automationCompletionProgress = new Map();
+  _thisManager._automationCompletionWriter = createAutomationCompletionWriter({
+    schedule: callback => setTimeout(callback, 100),
+    save: entries => configStore.saveAutomationCompletions(entries),
+    onPersisted: entries => {
+      for (const entry of entries) {
+        const key = automationCompletionKey(entry);
+        const progress = _thisManager._automationCompletionProgress.get(key);
+        if (!progress) continue;
+        _thisManager._automationCompletionProgress.delete(key);
+        _queueProgressForRenderer(progress);
+      }
+    },
+    onError: error => debugLog(`automation completion ledger failed: ${error.message}`)
+  });
+
   uploadManager.on('progress', (data) => {
     if (data.status !== 'uploading') {
       debugLog(`progress: ${data.fileName} ${data.hoster} ${data.status} ${data.error || ''}`);
@@ -2389,6 +2463,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       });
     }
     if (data.status === 'done' && data.result) {
+      _invalidateUploadLogEvidenceCache();
       const link = data.result.download_url || data.result.embed_url || data.result.file_code || '';
       if (link) {
         if (shouldLogHosterToFile(data.hoster)) {
@@ -2400,16 +2475,16 @@ ipcMain.handle('start-upload', async (_event, payload) => {
         debugLog(`WARNING: done but no link for ${data.fileName} @ ${data.hoster}: ${JSON.stringify(data.result)}`);
       }
     }
-    const isTerminal = data.status === 'done' || data.status === 'error' || data.status === 'aborted' || data.status === 'skipped';
-    if (isTerminal) {
-      if (data.jobId) _progressByJob.delete(data.jobId);
-      _progressTerminalQueue.push(data);
-    } else if (data.jobId) {
-      _progressByJob.set(data.jobId, data);
-    } else {
-      _progressTerminalQueue.push(data);
+    if (data.status === 'done' && data.jobId) {
+      const completion = _thisManager._automationCompletionMetadata?.get(data.jobId);
+      if (completion) {
+        const entry = { ...completion, completedAt: Date.now() };
+        _thisManager._automationCompletionProgress.set(automationCompletionKey(entry), data);
+        _thisManager._automationCompletionWriter.add(entry);
+        return;
+      }
     }
-    _scheduleProgressFlush();
+    _queueProgressForRenderer(data);
   });
 
   uploadManager.on('stats', (data) => {
@@ -2493,6 +2568,34 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
     summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
+    let automationCompletionsPersisted = true;
+    try { await _thisManager._automationCompletionWriter?.flush(); } catch (error) {
+      automationCompletionsPersisted = false;
+      debugLog(`automation completion ledger failed: ${error.message}`);
+    }
+    if (!automationCompletionsPersisted) {
+      const failedJobIds = new Set();
+      for (const progress of _thisManager._automationCompletionProgress.values()) {
+        if (progress.jobId) failedJobIds.add(progress.jobId);
+        _queueProgressForRenderer({
+          ...progress,
+          status: 'error',
+          error: 'Automatik-Abschlussnachweis konnte nicht gespeichert werden'
+        });
+      }
+      _thisManager._automationCompletionProgress.clear();
+      let changed = 0;
+      for (const file of summary.files || []) {
+        for (const result of file.results || []) {
+          if (!failedJobIds.has(result.jobId)) continue;
+          result.status = 'error';
+          result.error = 'Automatik-Abschlussnachweis konnte nicht gespeichert werden';
+          changed++;
+        }
+      }
+      summary.succeeded = Math.max(0, Number(summary.succeeded) - changed);
+      summary.failed = Math.max(0, Number(summary.failed) + changed);
+    }
     lastSessionSummary = summary;
     debugLog(`batch-done: total=${summary.total} ok=${summary.succeeded} fail=${summary.failed}`);
     logMarker('BATCH END', { total: summary.total, ok: summary.succeeded, fail: summary.failed });
@@ -2513,10 +2616,13 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     for (const value of _progressByJob.values()) finalProgressBatch.push(value);
     _progressByJob.clear();
     if (finalProgressBatch.length) safeSend('upload-progress-batch', finalProgressBatch);
-    const queuePersisted = await requestUploadFinalization(summary);
-    try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
-    if (!queuePersisted) debugLog('upload finalization blocked: renderer queue acknowledgement missing');
-    await sourceCleanup.finishBatch({ historyPersisted, queuePersisted });
+    const queuePersisted = await requestUploadFinalization(summary, !automationCompletionsPersisted);
+    const finalizationPersisted = queuePersisted && automationCompletionsPersisted;
+    if (finalizationPersisted) {
+      try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
+    }
+    if (!finalizationPersisted) debugLog('upload finalization blocked: queue or automation completion evidence was not persisted');
+    await sourceCleanup.finishBatch({ historyPersisted, queuePersisted: finalizationPersisted });
     _producerTracker.finish();
 
     const fullyAborted = isAllAborted(summary);
@@ -2615,12 +2721,12 @@ ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
     return { added: 0, skippedJobs, alreadyInBatchJobIds: [], sourceCleanupFingerprints };
   }
 
+  await registerAutomationCompletionJobs(batchManager, jobs);
   const addResult = batchManager.addJobs(tasks);
   const added = typeof addResult === 'number' ? addResult : (addResult && addResult.added) || 0;
   const alreadyInBatchJobIds = (addResult && Array.isArray(addResult.alreadyInBatchJobIds))
     ? addResult.alreadyInBatchJobIds
     : [];
-
   debugLog(
     `add-jobs-to-batch: ${added} of ${tasks.length} tasks added (${alreadyInBatchJobIds.length} already in batch, ${skippedJobs.length} skipped)`
   );
@@ -2883,8 +2989,8 @@ async function applyImportedSettings(imported) {
     _rotationCursors = {};
     _accountCooldowns.clear();
     _sessionAccountOverrides.clear();
-    _invalidateLogSettings();
     const config = configStore.load();
+    _invalidateLogSettings(config.globalSettings);
     const warnings = await syncImportedRuntime(config);
     return { config, warnings };
   } finally {
@@ -3015,23 +3121,37 @@ ipcMain.handle('online-backup:restore', async (_event, key) => {
   }
 });
 
-ipcMain.handle('read-own-upload-log', async () => {
+let _uploadLogEvidenceCache = null;
+let _uploadLogEvidenceInFlight = null;
+let _uploadLogEvidenceGeneration = 0;
+
+function _invalidateUploadLogEvidenceCache() {
+  _uploadLogEvidenceCache = null;
+  _uploadLogEvidenceGeneration++;
+}
+
+async function _scanOwnUploadLog() {
   const entries = new Map();
   const basePath = getBaseLogFilePath();
   const dir = path.dirname(basePath);
   const ext = path.extname(basePath);
   const name = path.basename(basePath, ext);
-
-  const activeTarget = _resolveUploadLogTarget();
   const directories = new Set([dir]);
-  if (activeTarget?.path) directories.add(path.dirname(activeTarget.path));
-  const desktop = getSafeDesktopDir();
-  if (desktop) directories.add(desktop);
+  if (_activeLogPath) directories.add(path.dirname(_activeLogPath));
+  try {
+    const desktop = app.getPath('desktop');
+    if (desktop) directories.add(desktop);
+  } catch {}
   try { directories.add(app.getPath('userData')); } catch {}
   const logFiles = new Set();
   for (const directory of directories) {
     try {
-      for (const file of fs.readdirSync(directory)) {
+      const directoryHandle = await fs.promises.opendir(directory);
+      let directoryEntries = 0;
+      for await (const entry of directoryHandle) {
+        directoryEntries++;
+        if (directoryEntries > 50000) throw new Error('Upload-Log-Verzeichnis enthält zu viele Einträge');
+        const file = entry.name;
         if (
           isManagedUploadLogFileName(file, { baseName: name, ext })
           || isManagedUploadLogFileName(file, { baseName: 'fileuploader', ext: '.log' })
@@ -3039,26 +3159,63 @@ ipcMain.handle('read-own-upload-log', async () => {
           logFiles.add(path.join(directory, file));
         }
       }
-    } catch {}
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
-  if (activeTarget?.path && fs.existsSync(activeTarget.path)) logFiles.add(activeTarget.path);
-  if (fs.existsSync(basePath)) logFiles.add(basePath);
+  if (_activeLogPath) logFiles.add(_activeLogPath);
+  logFiles.add(basePath);
+  if (logFiles.size > 256) throw new Error('Zu viele verwaltete Upload-Logs');
 
-  for (const logPath of logFiles) {
+  let expectedBytes = 0;
+  let actualBytes = 0;
+  for (const logPath of [...logFiles].sort()) {
     try {
-      const content = await fs.promises.readFile(logPath, 'utf-8');
-      for (const line of content.split('\n')) {
-        const parsed = parseUploadLogLine(line);
-        if (!parsed) continue;
+      if (typeof fs.promises.stat === 'function') {
+        const stat = await fs.promises.stat(logPath);
+        expectedBytes += Number(stat.size) || 0;
+        if (expectedBytes > 256 * 1024 * 1024) throw new Error('Upload-Logs überschreiten das Leselimit');
+      }
+      for await (const parsed of iterateUploadLogEntries(logPath, {
+        maxBytes: 256 * 1024 * 1024,
+        onBytes(bytes) {
+          actualBytes += bytes;
+          if (actualBytes > 256 * 1024 * 1024) throw new Error('Upload-Logs überschreiten das Leselimit');
+        }
+      })) {
+        if (parsed.confirmed !== true) continue;
         const key = `${parsed.hoster.toLowerCase()}\u0000${parsed.fileName.toLowerCase()}`;
         const previous = entries.get(key);
         const timestamp = Number.isFinite(parsed.ts) ? parsed.ts : -Infinity;
         const previousTimestamp = Number.isFinite(previous?.ts) ? previous.ts : -Infinity;
         if (!previous || timestamp >= previousTimestamp) entries.set(key, parsed);
+        if (entries.size > 250000) throw new Error('Upload-Log enthält zu viele eindeutige Einträge');
       }
-    } catch {}
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
   return [...entries.values()];
+}
+
+ipcMain.handle('read-own-upload-log', async () => {
+  const now = Date.now();
+  if (_uploadLogEvidenceCache?.expiresAt > now) return _uploadLogEvidenceCache.entries;
+  const generation = _uploadLogEvidenceGeneration;
+  if (_uploadLogEvidenceInFlight?.generation === generation) return _uploadLogEvidenceInFlight.promise;
+  const pending = _scanOwnUploadLog().then(entries => {
+    if (generation === _uploadLogEvidenceGeneration) {
+      _uploadLogEvidenceCache = { entries, expiresAt: Date.now() + 5000 };
+    }
+    return entries;
+  });
+  const inFlight = { generation, promise: pending };
+  _uploadLogEvidenceInFlight = inFlight;
+  try {
+    return await pending;
+  } finally {
+    if (_uploadLogEvidenceInFlight === inFlight) _uploadLogEvidenceInFlight = null;
+  }
 });
 
 ipcMain.handle('import-upload-log', async () => {
@@ -3252,7 +3409,7 @@ ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
   assertConfigWriteAllowed();
   await configStore.saveRendererGlobalSettings(globalSettings);
   globalSettings = configStore.load().globalSettings;
-  _invalidateLogSettings();
+  _invalidateLogSettings(globalSettings);
   if (uploadManager) {
     try { uploadManager.updateSettings(null, globalSettings); } catch (error) { debugLog(`global settings runtime update failed: ${error.message}`); }
   }
@@ -3465,6 +3622,18 @@ ipcMain.handle('folder-monitor:status', () => {
 
 ipcMain.handle('automation:get-status', () => {
   return automationStatusSnapshot();
+});
+
+ipcMain.handle('automation:get-completions', () => {
+  return configStore.loadAutomationCompletions();
+});
+
+ipcMain.handle('automation:record-completions', async (_event, entries) => {
+  const source = Array.isArray(entries) ? entries.slice(0, 10000) : [];
+  const normalized = source.map(normalizeAutomationCompletion);
+  if (source.length === 0 || normalized.some(entry => !entry)) throw new Error('Automatik-Abschlussnachweise sind ungültig');
+  await configStore.saveAutomationCompletions(normalized);
+  return true;
 });
 
 ipcMain.handle('automation:pause-after-active', () => enqueueAutomationLifecycle(async generation => {

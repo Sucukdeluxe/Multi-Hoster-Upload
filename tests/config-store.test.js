@@ -31,6 +31,7 @@ function createStore() {
   store = new ConfigStore(fakeApp);
   store.filePath = path.join(tmpDir, 'electron-config.json');
   store.historyPath = path.join(tmpDir, 'electron-history.json');
+  store.automationCompletionPath = path.join(tmpDir, 'automation-completions.json');
   return store;
 }
 
@@ -41,6 +42,7 @@ function createStoreAt(filePath) {
   });
   configuredStore.filePath = filePath;
   configuredStore.historyPath = path.join(path.dirname(filePath), 'electron-history.json');
+  configuredStore.automationCompletionPath = path.join(path.dirname(filePath), 'automation-completions.json');
   return configuredStore;
 }
 
@@ -123,6 +125,74 @@ describe('ConfigStore', () => {
 
     assert.equal(reloaded.globalSettings.folderMonitor.paused, true);
     assert.equal(reloaded.globalSettings.folderMonitor.pausedAt, 1787712000000);
+  });
+
+  it('automation completions survive queue clearing and can be removed explicitly', async () => {
+    const completion = {
+      path: 'C:\\watch\\episode.mkv',
+      size: 1024,
+      mtimeMs: 1787828400123,
+      hoster: 'doodstream.com',
+      completedAt: 1787828500000
+    };
+
+    await store.saveAutomationCompletions([completion]);
+    await store.savePendingQueue(null);
+    await store.appendHistory({ id: 'old', timestamp: '2026-01-01T00:00:00.000Z', files: [] });
+    await store.clearHistory();
+
+    const reloaded = createStoreAt(store.filePath);
+    assert.deepEqual(await reloaded.loadAutomationCompletions(), [completion]);
+
+    await reloaded.clearAutomationCompletions([{ path: completion.path, hoster: completion.hoster }]);
+    assert.deepEqual(await reloaded.loadAutomationCompletions(), []);
+    assert.equal(JSON.parse(fs.readFileSync(reloaded.automationCompletionPath, 'utf8')).version, 1);
+  });
+
+  it('automation completion writes remain serialized without evicting older unique paths', async () => {
+    const first = store.saveAutomationCompletions([
+      { path: 'C:\\watch\\old.mkv', size: 1, mtimeMs: 1, hoster: 'voe.sx', completedAt: 1 }
+    ], { maxEntries: 2 });
+    const second = store.saveAutomationCompletions([
+      { path: 'C:\\watch\\middle.mkv', size: 2, mtimeMs: 2, hoster: 'voe.sx', completedAt: 2 },
+      { path: 'C:\\watch\\new.mkv', size: 3, mtimeMs: 3, hoster: 'byse.sx', completedAt: 3 }
+    ], { maxEntries: 2 });
+
+    await Promise.all([first, second]);
+    await store.drainAutomationCompletionWrites();
+
+    assert.deepEqual((await store.loadAutomationCompletions()).map(entry => entry.path), [
+      'C:\\watch\\old.mkv',
+      'C:\\watch\\middle.mkv',
+      'C:\\watch\\new.mkv'
+    ]);
+  });
+
+  it('corrupted automation completion evidence fails closed', async () => {
+    fs.writeFileSync(store.automationCompletionPath, '{broken', 'utf8');
+    await assert.rejects(store.loadAutomationCompletions());
+    const reloaded = createStoreAt(store.filePath);
+    fs.writeFileSync(reloaded.automationCompletionPath, JSON.stringify({ version: 1, entries: [{ path: 'C:\\watch\\invalid.mkv' }] }), 'utf8');
+    await assert.rejects(reloaded.loadAutomationCompletions(), /ungültig/);
+  });
+
+  it('automation completion drain waits for an active durable write', async () => {
+    const originalWrite = store._writeAutomationCompletionFile.bind(store);
+    let releaseWrite;
+    store._writeAutomationCompletionFile = entries => new Promise((resolve, reject) => {
+      releaseWrite = () => originalWrite(entries).then(resolve, reject);
+    });
+    const saving = store.saveAutomationCompletions([
+      { path: 'C:\\watch\\drain.mkv', size: 1, mtimeMs: 2, hoster: 'voe.sx', completedAt: 3 }
+    ]);
+    while (!releaseWrite) await new Promise(resolve => setImmediate(resolve));
+    let drained = false;
+    const draining = store.drainAutomationCompletionWrites().then(() => { drained = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(drained, false);
+    releaseWrite();
+    await Promise.all([saving, draining]);
+    assert.equal(drained, true);
   });
 
   it('drops the retired plaintext credential setting from legacy configurations', () => {

@@ -13,6 +13,8 @@ electron-config.json.pre-history-split.bak
 electron-config.pre-import-*.json
 electron-history.json
 electron-history.json.tmp
+automation-completions.json
+automation-completions.json.tmp
 *.log
 debug.log
 fileuploader.log
