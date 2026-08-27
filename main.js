@@ -128,7 +128,6 @@ let tray = null;
 let _cachedLogSettings = null;
 const configStore = new ConfigStore(app);
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
-_setLogSettingsSnapshot((configStore.load() || {}).globalSettings);
 const onlineBackupKeyring = createOnlineBackupKeyring({
   filePath: path.join(app.getPath('userData'), 'online-backup-keys.json')
 });
@@ -1716,6 +1715,7 @@ app.whenReady().then(async () => {
   if (!_hasSingleInstanceLock) return;
   try {
     const _bootCfg = configStore.load();
+    _setLogSettingsSnapshot(_bootCfg.globalSettings);
     setLogVerbose(!!(_bootCfg.globalSettings && _bootCfg.globalSettings.logVerbose));
   } catch {}
   logMarker('APP START', {

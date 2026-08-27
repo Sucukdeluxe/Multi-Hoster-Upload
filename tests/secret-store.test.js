@@ -101,6 +101,27 @@ test('throws an identifiable error for encrypted values without secure storage',
   });
 });
 
+test('retries secure storage discovery after transient unavailability', () => {
+  let available = false;
+  let checks = 0;
+  const encrypted = `enc:v1:${Buffer.from('protected:secret').toString('base64')}`;
+  withSecretStore(availableSafeStorage({
+    isEncryptionAvailable: () => {
+      checks++;
+      return available;
+    }
+  }), secretStore => {
+    assert.throws(
+      () => secretStore.decryptField(encrypted),
+      error => error instanceof secretStore.SecretStoreError
+        && error.code === 'SECRET_STORE_UNAVAILABLE'
+    );
+    available = true;
+    assert.equal(secretStore.decryptField(encrypted), 'secret');
+    assert.equal(checks, 2);
+  });
+});
+
 test('throws an identifiable error when decryption fails', () => {
   const failure = new Error('decryption failed');
   withSecretStore(availableSafeStorage({ decryptString: () => { throw failure; } }), secretStore => {

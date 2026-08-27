@@ -3917,6 +3917,181 @@ app.whenReady().then(async () => {
   }
 });
 
+test('real main startup decrypts persisted credentials only after Electron is ready', { skip: process.platform !== 'win32' }, () => {
+  const projectRoot = path.join(__dirname, '..');
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-startup-dpapi-'));
+  try {
+    const appRoot = path.join(probeRoot, 'app');
+    const userDataPath = path.join(probeRoot, 'user-data');
+    const seedPath = path.join(appRoot, 'seed.cjs');
+    const probePath = path.join(appRoot, 'probe.cjs');
+    const outputPath = path.join(probeRoot, 'result.json');
+    const secret = 'startup-dpapi-secret';
+    fs.mkdirSync(appRoot, { recursive: true });
+    for (const relativePath of ['main.js', 'preload.js', 'preload-drop-target.js', 'package.json']) {
+      fs.copyFileSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath));
+    }
+    for (const relativePath of ['lib', 'renderer', 'assets']) {
+      fs.cpSync(path.join(projectRoot, relativePath), path.join(appRoot, relativePath), { recursive: true });
+    }
+    fs.symlinkSync(path.join(projectRoot, 'node_modules'), path.join(appRoot, 'node_modules'), 'junction');
+    fs.writeFileSync(seedPath, `
+const { app, safeStorage } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const userDataPath = process.env.MHU_STARTUP_DPAPI_USER_DATA;
+app.setPath('userData', userDataPath);
+app.whenReady().then(() => {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage unavailable');
+  const encrypted = 'enc:v1:' + safeStorage.encryptString(process.env.MHU_STARTUP_DPAPI_SECRET).toString('base64');
+  fs.mkdirSync(userDataPath, { recursive: true });
+  fs.writeFileSync(path.join(userDataPath, 'electron-config.json'), JSON.stringify({
+    hosters: {
+      'voe.sx': [{ id: 'startup-dpapi', name: 'Startup DPAPI', enabled: true, authType: 'api', apiKey: encrypted }]
+    },
+    globalSettings: {
+      language: 'de',
+      logVerbose: false,
+      logFilePath: path.join(userDataPath, 'fileuploader.log')
+    }
+  }), 'utf8');
+  setTimeout(() => app.quit(), 500);
+}).catch(error => {
+  process.stderr.write(error.stack || String(error));
+  app.exit(1);
+});
+`, 'utf8');
+    fs.writeFileSync(probePath, `
+const { app, BrowserWindow, dialog, safeStorage } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const outputPath = process.env.MHU_STARTUP_DPAPI_OUTPUT;
+const userDataPath = process.env.MHU_STARTUP_DPAPI_USER_DATA;
+app.setPath('userData', userDataPath);
+BrowserWindow.prototype.show = function () {};
+BrowserWindow.prototype.showInactive = function () {};
+BrowserWindow.prototype.focus = function () {};
+app.focus = function () {};
+let errorDialogs = 0;
+dialog.showErrorBox = function () { errorDialogs++; };
+let preReadySafeStorageCalls = 0;
+let postReadyDecryptCalls = 0;
+const originalIsEncryptionAvailable = safeStorage.isEncryptionAvailable.bind(safeStorage);
+const originalDecryptString = safeStorage.decryptString.bind(safeStorage);
+safeStorage.isEncryptionAvailable = function (...args) {
+  if (!app.isReady()) preReadySafeStorageCalls++;
+  return originalIsEncryptionAvailable(...args);
+};
+safeStorage.decryptString = function (...args) {
+  if (app.isReady()) postReadyDecryptCalls++;
+  return originalDecryptString(...args);
+};
+async function waitFor(read, timeoutMs = 20000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('startup DPAPI probe timed out');
+}
+try {
+  require('./main.js');
+} catch (error) {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
+  process.exit(1);
+}
+app.whenReady().then(async () => {
+  const window = await waitFor(() => BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed()) || null);
+  const renderer = await waitFor(async () => {
+    try {
+      if (window.webContents.isLoading()) return null;
+      const url = window.webContents.getURL();
+      if (!url.includes('/renderer/index.html')) return null;
+      const config = await window.webContents.executeJavaScript('window.api.getConfig()');
+      const account = config.hosters['voe.sx'].find(candidate => candidate.id === 'startup-dpapi');
+      return { url, decrypted: account.apiKey === process.env.MHU_STARTUP_DPAPI_SECRET };
+    } catch {
+      return null;
+    }
+  });
+  const liveWindows = BrowserWindow.getAllWindows().filter(candidate => !candidate.isDestroyed());
+  fs.writeFileSync(outputPath, JSON.stringify({
+    safeStorageAvailable: safeStorage.isEncryptionAvailable(),
+    preReadySafeStorageCalls,
+    postReadyDecryptCalls,
+    decrypted: renderer.decrypted,
+    rendererLoaded: renderer.url.includes('/renderer/index.html'),
+    liveWindows: liveWindows.length,
+    visibleWindows: liveWindows.filter(candidate => candidate.isVisible()).length,
+    errorDialogs
+  }), 'utf8');
+  for (const candidate of liveWindows) {
+    if (!candidate.isDestroyed()) candidate.destroy();
+  }
+  app.exit(0);
+}).catch(error => {
+  fs.writeFileSync(outputPath, JSON.stringify({ error: error.stack || String(error) }), 'utf8');
+  app.exit(1);
+});
+`, 'utf8');
+    const electronPath = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    const environment = {
+      ...process.env,
+      MHU_PERF: '0',
+      MHU_STARTUP_DPAPI_OUTPUT: outputPath,
+      MHU_STARTUP_DPAPI_USER_DATA: userDataPath,
+      MHU_STARTUP_DPAPI_SECRET: secret
+    };
+    delete environment.RUN_UI_SMOKE;
+    const seed = spawnSync(electronPath, [seedPath, `--user-data-dir=${userDataPath}`], {
+      cwd: appRoot,
+      env: environment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000
+    });
+    assert.equal(seed.status, 0, `${seed.stdout}\n${seed.stderr}`);
+    const rawConfig = fs.readFileSync(path.join(userDataPath, 'electron-config.json'), 'utf8');
+    assert.match(rawConfig, /"apiKey"\s*:\s*"enc:v1:/u);
+    assert.equal(rawConfig.includes(secret), false);
+    const execution = spawnSync(electronPath, [probePath, `--user-data-dir=${userDataPath}`], {
+      cwd: appRoot,
+      env: environment,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000
+    });
+    const probeOutput = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    assert.equal(execution.status, 0, `${execution.stdout}\n${execution.stderr}\n${probeOutput}`);
+    const result = JSON.parse(probeOutput);
+    assert.deepEqual({
+      safeStorageAvailable: result.safeStorageAvailable,
+      preReadySafeStorageCalls: result.preReadySafeStorageCalls,
+      decrypted: result.decrypted,
+      rendererLoaded: result.rendererLoaded,
+      liveWindows: result.liveWindows,
+      visibleWindows: result.visibleWindows,
+      errorDialogs: result.errorDialogs
+    }, {
+      safeStorageAvailable: true,
+      preReadySafeStorageCalls: 0,
+      decrypted: true,
+      rendererLoaded: true,
+      liveWindows: 1,
+      visibleWindows: 0,
+      errorDialogs: 0
+    });
+    assert.ok(result.postReadyDecryptCalls >= 1);
+    const allOutput = `${seed.stdout}\n${seed.stderr}\n${execution.stdout}\n${execution.stderr}\n${probeOutput}`;
+    assert.doesNotMatch(allOutput, /SECRET_STORE_(?:UNAVAILABLE|DECRYPT_FAILED)/u);
+    assert.doesNotMatch(allOutput, new RegExp(secret, 'u'));
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    assert.equal(fs.existsSync(probeRoot), false);
+  }
+});
+
 test('persisted automation pause survives runtime restart and resumes one reconciliation without starting previews', { skip: process.platform !== 'win32' }, () => {
   const projectRoot = path.join(__dirname, '..');
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8').replace(/\r\n?/gu, '\n');
