@@ -599,9 +599,13 @@ async function evaluateAutomationCandidates(files, options = {}) {
     .map(value => String(value || '').trim())
     .filter(Boolean)));
   const { history, uploadLog } = options.evidenceSnapshot || await loadAutomationEvidenceSnapshot();
+  const completedPaths = [..._completedUploadKeys].map(key => {
+    const separator = key.lastIndexOf('|');
+    return separator > 0 ? key.slice(0, separator) : '';
+  }).filter(Boolean);
   const processed = window.AutomationControl.classifyProcessedCandidates({
     candidates: matched,
-    queuePaths: [...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)],
+    queuePaths: [...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path), ...completedPaths],
     historyRows: flattenAutomationHistoryRows(history),
     uploadLogRows: uploadLog
   });

@@ -813,7 +813,7 @@ function getBaseLogFilePath() {
 // given session lands in the same file. A close→reopen of the app starts a new
 // main process, so a new SESSION_ID, so a new session file. A 6-digit random is
 // appended as a cheap hedge against same-minute restart collisions.
-const { resolveLogFileName, formatSessionStamp, formatDateStamp, stripModeStampFromFileName } = require('./lib/log-mode');
+const { resolveLogFileName, formatSessionStamp, formatDateStamp, stripModeStampFromFileName, isManagedUploadLogFileName } = require('./lib/log-mode');
 const SESSION_ID = formatSessionStamp(new Date(), String(Math.floor(100000 + Math.random() * 900000)));
 let _activeLogKey = null;   // remembers (mode + date-or-session) so cache rolls correctly
 let _activeLogPath = null;
@@ -3015,37 +3015,50 @@ ipcMain.handle('online-backup:restore', async (_event, key) => {
   }
 });
 
-ipcMain.handle('read-own-upload-log', () => {
-  // Read all log files (base + daily logs) and return parsed entries
-  const entries = [];
+ipcMain.handle('read-own-upload-log', async () => {
+  const entries = new Map();
   const basePath = getBaseLogFilePath();
   const dir = path.dirname(basePath);
   const ext = path.extname(basePath);
   const name = path.basename(basePath, ext);
 
-  // Collect all matching log files (base + daily variants)
-  const logFiles = [];
-  try {
-    for (const file of fs.readdirSync(dir)) {
-      if (file.startsWith(name) && file.endsWith(ext)) {
-        logFiles.push(path.join(dir, file));
-      }
-    }
-  } catch {}
-  if (logFiles.length === 0 && fs.existsSync(basePath)) {
-    logFiles.push(basePath);
-  }
-
-  for (const logPath of logFiles) {
+  const activeTarget = _resolveUploadLogTarget();
+  const directories = new Set([dir]);
+  if (activeTarget?.path) directories.add(path.dirname(activeTarget.path));
+  const desktop = getSafeDesktopDir();
+  if (desktop) directories.add(desktop);
+  try { directories.add(app.getPath('userData')); } catch {}
+  const logFiles = new Set();
+  for (const directory of directories) {
     try {
-      const content = fs.readFileSync(logPath, 'utf-8');
-      for (const line of content.split('\n')) {
-        const parsed = parseUploadLogLine(line);
-        if (parsed) entries.push(parsed);
+      for (const file of fs.readdirSync(directory)) {
+        if (
+          isManagedUploadLogFileName(file, { baseName: name, ext })
+          || isManagedUploadLogFileName(file, { baseName: 'fileuploader', ext: '.log' })
+        ) {
+          logFiles.add(path.join(directory, file));
+        }
       }
     } catch {}
   }
-  return entries;
+  if (activeTarget?.path && fs.existsSync(activeTarget.path)) logFiles.add(activeTarget.path);
+  if (fs.existsSync(basePath)) logFiles.add(basePath);
+
+  for (const logPath of logFiles) {
+    try {
+      const content = await fs.promises.readFile(logPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const parsed = parseUploadLogLine(line);
+        if (!parsed) continue;
+        const key = `${parsed.hoster.toLowerCase()}\u0000${parsed.fileName.toLowerCase()}`;
+        const previous = entries.get(key);
+        const timestamp = Number.isFinite(parsed.ts) ? parsed.ts : -Infinity;
+        const previousTimestamp = Number.isFinite(previous?.ts) ? previous.ts : -Infinity;
+        if (!previous || timestamp >= previousTimestamp) entries.set(key, parsed);
+      }
+    } catch {}
+  }
+  return [...entries.values()];
 });
 
 ipcMain.handle('import-upload-log', async () => {

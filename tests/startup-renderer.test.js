@@ -685,6 +685,57 @@ contextBridge.exposeInMainWorld('api', {
       acceptedNames: historyEvaluation.candidates.map(file => file.name).sort(),
       resultingJobs: historyEvaluation.summary.resultingJobs
     };
+    _completedUploadKeys.clear();
+    const completedFile = { path: 'C:\\history\\completed-in-session.mkv', name: 'completed-in-session.mkv', size: 1 };
+    config.globalSettings.removeFromQueueOnDone = true;
+    config.globalSettings.folderMonitor = {
+      enabled: true,
+      folderPath: 'C:\\history',
+      hosters: ['doodstream.com'],
+      autoStart: false,
+      queueLimitJobs: 15000,
+      paused: false
+    };
+    const completedJob = {
+      id: 'completed-in-session',
+      file: completedFile.path,
+      fileName: completedFile.name,
+      hoster: 'doodstream.com',
+      status: 'queued',
+      bytesTotal: 1,
+      automationAdmission: true
+    };
+    queueJobs = [completedJob];
+    selectedFiles = [];
+    uploading = false;
+    rebuildJobIndex();
+    window.api.configureAutomationProbe({ paused: false, history: [], uploadLog: [] });
+    handleProgress({
+      jobId: completedJob.id,
+      fileName: completedJob.fileName,
+      hoster: completedJob.hoster,
+      status: 'done',
+      bytesUploaded: 1,
+      bytesTotal: 1,
+      progress: 1,
+      result: { download_url: 'https://doodstream.com/d/completed-in-session' }
+    });
+    _doneRemovalCoalescer?.drainSync();
+    automationEvidenceSnapshotGeneration++;
+    automationEvidenceSnapshotCache = null;
+    const removedAfterDone = !queueJobs.some(job => job.id === completedJob.id);
+    const completedKeyPresent = _completedUploadKeys.has(completedFile.path + '|doodstream.com');
+    const completedResult = await handleFolderMonitorFiles([completedFile]);
+    const completedProbe = await window.api.getAutomationProbeState();
+    const completedEvidence = {
+      removedAfterDone,
+      completedKeyPresent,
+      admittedFiles: completedResult.admittedFiles.length,
+      matchingQueueJobs: queueJobs.filter(job => normalizeAutomationPath(job.file) === normalizeAutomationPath(completedFile.path)).length,
+      startOrInjectCalls: completedProbe.mutationCalls.filter(call => call[0] === 'start' || call[0] === 'inject').length
+    };
+    _completedUploadKeys.clear();
+    config.globalSettings.removeFromQueueOnDone = false;
     config.globalSettings.folderMonitor = {
       enabled: true,
       folderPath: 'C:\\\\pending',
@@ -2020,7 +2071,7 @@ contextBridge.exposeInMainWorld('api', {
       startCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'start').length,
       injectCalls: pausedProbe.mutationCalls.filter(call => call[0] === 'inject').length
     };
-    return { dry, manualTest, historyEvidence, pendingDedup, parallelAdmission, evidenceSnapshotDrain, separatedEventEvidence, distinctParallel, disjointClassification, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, pauseMarker, resumeQueue, paused };
+    return { dry, manualTest, historyEvidence, completedEvidence, pendingDedup, parallelAdmission, evidenceSnapshotDrain, separatedEventEvidence, distinctParallel, disjointClassification, manualHostTransactional, atomic, status, zeroAdmission, stress, persistedQueueExactness, stale, replannedEligibility, mainPauseResponses, cleanupRollback, crossPathCleanupRollback, partialAddOutcomes, collisionResolver, collisionAdmission, pauseBetweenApplyAndStart, startAcceptance, fulfilledFeedback, injectionOutcomes, pauseMarker, resumeQueue, paused };
   })()`;
   const automationControlCenterScript = `(async () => {
     const waitFor = async predicate => {
@@ -2798,6 +2849,13 @@ app.whenReady().then(async () => {
       alreadyProcessed: 2,
       acceptedNames: ['aborted.mkv', 'all-failed.mkv', 'error.mkv', 'same-name.mkv', 'same-name.mkv', 'skipped.mkv'],
       resultingJobs: 6
+    });
+    assert.deepEqual(result.automationPipeline.completedEvidence, {
+      removedAfterDone: true,
+      completedKeyPresent: true,
+      admittedFiles: 0,
+      matchingQueueJobs: 0,
+      startOrInjectCalls: 0
     });
     assert.deepEqual(result.automationPipeline.pendingDedup, {
       evaluatedNames: ['new.mkv'],

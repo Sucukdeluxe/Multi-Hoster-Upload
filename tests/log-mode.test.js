@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { normalizeLogMode, resolveLogFileName, formatDateStamp, formatSessionStamp } = require('../lib/log-mode');
+const { normalizeLogMode, resolveLogFileName, formatDateStamp, formatSessionStamp, isManagedUploadLogFileName } = require('../lib/log-mode');
 
 // --- normalizeLogMode ---
 
@@ -86,6 +86,21 @@ test('resolveLogFileName: unknown mode is treated as single', () => {
     resolveLogFileName({ baseName: 'fileuploader', ext: '.log', mode: 'lolnope' }),
     'fileuploader.log'
   );
+});
+
+test('managed upload-log discovery includes session logs and excludes unrelated logs', () => {
+  assert.equal(typeof isManagedUploadLogFileName, 'function');
+  const options = { baseName: 'fileuploader', ext: '.log' };
+  assert.equal(isManagedUploadLogFileName('fileuploader.log', options), true);
+  assert.equal(isManagedUploadLogFileName('fileuploader-2026-08-27.log', options), true);
+  assert.equal(isManagedUploadLogFileName('fileuploader-session-2026-08-27_05-40-59-1234.log', options), true);
+  assert.equal(isManagedUploadLogFileName('27-08-2026-mdu-session-05-40-599797.log', options), true);
+  assert.equal(isManagedUploadLogFileName('FILEUPLOADER-2026-08-27.LOG', options), true);
+  assert.equal(isManagedUploadLogFileName('27-08-2026-MDU-SESSION-05-40-599797.LOG', options), true);
+  assert.equal(isManagedUploadLogFileName('upload-audit.log', options), false);
+  assert.equal(isManagedUploadLogFileName('account-rotation.log', options), false);
+  assert.equal(isManagedUploadLogFileName('upload-debug.log', options), false);
+  assert.equal(isManagedUploadLogFileName('27-08-2026-mdu-session-05-40-599797.txt', options), false);
 });
 
 // --- stripModeStampFromFileName ---

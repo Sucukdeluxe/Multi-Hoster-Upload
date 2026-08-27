@@ -222,6 +222,57 @@ test('packages every Electron preload referenced by the main process', () => {
   assert.equal(packageJson.build.win.signAndEditExecutable, false);
 });
 
+test('read-own-upload-log discovers base daily session and both fallback directories without synchronous reads', async () => {
+  const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
+  const blockStart = mainSource.indexOf("ipcMain.handle('read-own-upload-log'");
+  const blockEnd = mainSource.indexOf("\nipcMain.handle('import-upload-log'", blockStart);
+  assert.notEqual(blockStart, -1);
+  assert.notEqual(blockEnd, -1);
+  const handlers = new Map();
+  const configured = 'C:\\configured';
+  const desktop = 'C:\\desktop';
+  const userData = 'C:\\user-data';
+  const entriesByDirectory = new Map([
+    [configured, ['custom.txt', 'custom-2026-08-27.txt', '27-08-2026-mdu-session-05-40-111111.txt', 'upload-audit.log']],
+    [desktop, ['FILEUPLOADER-2026-08-26.LOG', '26-08-2026-MDU-SESSION-05-40-222222.LOG', 'account-rotation.log']],
+    [userData, ['fileuploader-2026-08-25.log', '25-08-2026-mdu-session-05-40-333333.log', 'upload-debug.log']]
+  ]);
+  const fileNames = new Map();
+  for (const [directory, names] of entriesByDirectory) {
+    for (const name of names) {
+      if (name.includes('audit') || name.includes('rotation') || name.includes('debug')) continue;
+      fileNames.set(path.win32.join(directory, name), `${name}.mkv`);
+    }
+  }
+  const fakeFs = {
+    readdirSync: directory => entriesByDirectory.get(directory) || [],
+    existsSync: filePath => fileNames.has(filePath),
+    readFileSync: () => { throw new Error('synchronous read forbidden'); },
+    promises: {
+      readFile: async filePath => require('../lib/upload-log').formatUploadLogLine(
+        new Date(2026, 7, 27, 5, 40, 0),
+        'voe.sx',
+        'https://voe.sx/e/test',
+        fileNames.get(filePath)
+      )
+    }
+  };
+  vm.runInNewContext(mainSource.slice(blockStart, blockEnd), {
+    _resolveUploadLogTarget: () => ({ path: path.win32.join(configured, '27-08-2026-mdu-session-05-40-111111.txt') }),
+    app: { getPath: name => name === 'desktop' ? desktop : userData },
+    fs: fakeFs,
+    getBaseLogFilePath: () => path.win32.join(configured, 'custom.txt'),
+    getSafeDesktopDir: () => desktop,
+    ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
+    isManagedUploadLogFileName: require('../lib/log-mode').isManagedUploadLogFileName,
+    parseUploadLogLine: require('../lib/upload-log').parseUploadLogLine,
+    path: path.win32
+  });
+
+  const entries = await handlers.get('read-own-upload-log')();
+  assert.deepEqual([...entries.map(entry => entry.fileName)].sort(), [...fileNames.values()].sort());
+});
+
 test('exposes managed online backup operations through narrow IPC boundaries', () => {
   const preloadSource = fs.readFileSync(path.join(projectRoot, 'preload.js'), 'utf8');
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
