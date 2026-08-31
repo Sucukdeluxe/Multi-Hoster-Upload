@@ -19,7 +19,8 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Schlägt dieser Nachweis fehl, bleibt die Queue erhalten und der Fehler wird als lokale Persistenzstörung behandelt, damit kein stiller Doppel-Upload entsteht.
 - DoodStream-OTP-Prüfungen verwenden dieselbe Cookie-Sitzung weiter, fassen identische oder parallele Checks zusammen und fordern einen neuen Code nur nach einer ausdrücklichen Aktion mit mindestens 60 Sekunden Abstand an.
 - DoodStream-Accounts mit API-Key werden auch beim Health-Check über die API geprüft und lösen keinen Web-OTP aus.
-- Release-Ziel dieser Sitzung ist `2.1.41`; produktive Server werden dadurch nicht neu gestartet.
+- Version `2.1.41` ist als GitHub-Release veröffentlicht; produktive Server wurden dadurch nicht neu gestartet.
+- GitHub normalisiert Leerzeichen in hochgeladenen Release-Assets zu Punkten. Der Release-Plan und `latest.yml` verwenden deshalb die tatsächlich veröffentlichten Namen wie `Multi-Hoster-Upload.Setup.2.1.41.exe`.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
 
 ## Start- und Testbefehle
@@ -44,6 +45,7 @@ npm audit --omit=dev
 
 - `npm run verify` bricht in diesem konkreten Arbeitsverzeichnis bereits beim npm-Shim ab, obwohl Linter und Tests bei direktem Aufruf erfolgreich sind.
 - Der Forgejo-Standardzweig ist nicht mit dem aktuellen GitHub-`master` verwandt und darf nicht ohne gesonderte Prüfung oder ausdrückliche Freigabe überschrieben werden.
+- Der optionale, nur mit `RUN_UI_SMOKE=1` aktivierte Langzeit-UI-Test meldet reproduzierbar 16 bestehende Timing-/Fixture-Abweichungen außerhalb des Accounts-/OTP-Pfads; die reguläre CI aktiviert diesen Test nicht.
 
 ## Offene nächste Schritte
 
@@ -59,3 +61,4 @@ Stand: 31.08.2026
 - Backup-API-Tests: 15 erfolgreich, 0 fehlgeschlagen.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
 - Der Fix-Commit `40ce83d` wurde auf GitHub `origin/master` und Forgejo `sync/github-master` verifiziert.
+- GitHub-Release `v2.1.41` wurde mit Installer, Portable-Build, Blockmap und Update-Manifest veröffentlicht.

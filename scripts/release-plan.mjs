@@ -19,8 +19,8 @@ export function parseReleaseArgs(args) {
 
 export function createReleasePlan(options) {
   const releaseTitle = `${PRODUCT_NAME} v${options.version}`;
-  const setupName = `${PRODUCT_NAME} Setup ${options.version}.exe`;
-  const portableName = `${PRODUCT_NAME} ${options.version}.exe`;
+  const setupName = `${PRODUCT_NAME}.Setup.${options.version}.exe`;
+  const portableName = `${PRODUCT_NAME}.${options.version}.exe`;
   const blockmapName = `${setupName}.blockmap`;
   return {
     ...options,
