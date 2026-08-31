@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt geprüfter Code-Stand: Version `2.1.40`, Commit `bf33ab3e9937d8b0ad23d8956730f2020f861942`.
+- Zuletzt geprüfter Funktionsstand: Version `2.1.41`, Fix-Commit `40ce83d`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -17,7 +17,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Weiterarbeit erfolgt im aktiven Repository `Multi-Hoster-Upload`, nicht im archivierten `Multi-Hoster-Upload-Private-Archive` und nicht im älteren Tauri-Versuch `Multi-Hoster-Upload-2`.
 - Die jüngste Automatik schützt erfolgreiche Uploads mit einem atomar gespeicherten Abschlussnachweis aus vollständigem Pfad, Hoster, Dateigröße und Änderungszeit.
 - Schlägt dieser Nachweis fehl, bleibt die Queue erhalten und der Fehler wird als lokale Persistenzstörung behandelt, damit kein stiller Doppel-Upload entsteht.
-- Es wurde kein Release und kein Deployment ausgeführt.
+- DoodStream-OTP-Prüfungen verwenden dieselbe Cookie-Sitzung weiter, fassen identische oder parallele Checks zusammen und fordern einen neuen Code nur nach einer ausdrücklichen Aktion mit mindestens 60 Sekunden Abstand an.
+- DoodStream-Accounts mit API-Key werden auch beim Health-Check über die API geprüft und lösen keinen Web-OTP aus.
+- Release-Ziel dieser Sitzung ist `2.1.41`; produktive Server werden dadurch nicht neu gestartet.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
 
 ## Start- und Testbefehle
@@ -52,8 +54,8 @@ npm audit --omit=dev
 
 Stand: 31.08.2026
 
-- Lint: erfolgreich.
-- Haupttests: 797 erfolgreich, 0 fehlgeschlagen.
+- Lint: erfolgreich, 0 Warnungen und 0 Fehler.
+- Haupttests: 803 erfolgreich, 0 fehlgeschlagen.
 - Backup-API-Tests: 15 erfolgreich, 0 fehlgeschlagen.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
-- GitHub `origin/master` und Forgejo `release/v2.1.40` enthielten vor diesem Dokumentationscommit beide exakt den geprüften Code-Commit `bf33ab3e9937d8b0ad23d8956730f2020f861942`.
+- Der Fix-Commit `40ce83d` wurde auf GitHub `origin/master` und Forgejo `sync/github-master` verifiziert.
