@@ -704,6 +704,8 @@
     ['Updateprüfung fehlgeschlagen', 'Update check failed'],
     ['Upload läuft...', 'Uploading...'],
     ['Upload-Log', 'Upload log'],
+    ['Neuen Code anfordern', 'Request new code'],
+    ['OTP-Anfrage ist abgelaufen. Bitte einen neuen Code anfordern.', 'The OTP request has expired. Request a new code.'],
     ['Automatik-Abschlussnachweis konnte nicht gespeichert werden', 'Automation completion evidence could not be saved'],
     ['Lokale Speicherung', 'Local persistence'],
     ['Automatik-Abschlussdatei ist ungültig', 'Automation completion file is invalid'],

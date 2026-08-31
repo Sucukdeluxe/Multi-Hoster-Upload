@@ -14,7 +14,7 @@ const { HOSTER_CONFIGS } = require('./lib/hosters');
 const VidmolyUploader = require('./lib/vidmoly-upload');
 const VoeUploader = require('./lib/voe-upload');
 const DoodstreamUploader = require('./lib/doodstream-upload');
-const { selectUploadAuth } = require('./lib/account-auth');
+const { createDoodstreamOtpCoordinator, selectUploadAuth } = require('./lib/account-auth');
 const { createAccountCooldownController, createAccountPicker } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
@@ -413,6 +413,9 @@ let captureWindow = null;
 let captureWindowReady = false;
 let signalingQueue = [];
 const HEALTH_CHECK_TIMEOUT = 25000;
+const doodstreamHealthCoordinator = createDoodstreamOtpCoordinator({
+  createUploader: () => new DoodstreamUploader()
+});
 
 // --- Debug logging (writes to upload-debug.log next to the app) ---
 function getDebugLogPath() {
@@ -1268,32 +1271,18 @@ async function registerAutomationCompletionJobs(manager, jobs) {
   await Promise.all(Array.from({ length: Math.min(16, candidates.length) }, worker));
 }
 
-async function checkDoodstreamHealth(hosterConfig, otp) {
-  const username = hosterConfig && hosterConfig.username
-    ? String(hosterConfig.username).trim()
-    : '';
-  const password = hosterConfig && hosterConfig.password
-    ? String(hosterConfig.password).trim()
-    : '';
+async function checkDoodstreamHealth(hosterConfig, otp, options = {}) {
+  const auth = selectUploadAuth('doodstream.com', hosterConfig);
+  const apiKey = auth.apiKey ? String(auth.apiKey).trim() : '';
 
-  // Login-based check (preferred)
-  if (username && password) {
-    const uploader = new DoodstreamUploader();
-    try {
-      await uploader.login(username, password, otp || undefined);
-    } catch (err) {
-      if (err.otpRequired) {
-        return { status: 'otp_required', message: err.message || 'OTP erforderlich' };
-      }
-      throw err;
-    }
-    return { status: 'ok', message: 'Login ok, Upload-Seite bereit' };
+  if (!apiKey && auth.username && auth.password) {
+    return doodstreamHealthCoordinator.check({
+      username: String(auth.username).trim(),
+      password: String(auth.password).trim(),
+      otp,
+      requestNewChallenge: options.requestNewOtp === true
+    });
   }
-
-  // Fall back to API key check
-  const apiKey = hosterConfig && hosterConfig.apiKey
-    ? String(hosterConfig.apiKey).trim()
-    : '';
 
   if (!apiKey) {
     return { status: 'error', message: 'Login oder API Key fehlt' };
@@ -1517,7 +1506,7 @@ async function runHosterHealthCheck(config, requestedChecks) {
     checks = cleaned;
   }
 
-  const runOne = async ({ hoster, accountId, otp, _invalid }) => {
+  const runOne = async ({ hoster, accountId, otp, requestNewOtp, _invalid }) => {
     if (_invalid) {
       return { hoster, accountId, status: 'error', message: 'Account-ID fehlt im Check-Payload' };
     }
@@ -1527,7 +1516,9 @@ async function runHosterHealthCheck(config, requestedChecks) {
     const accounts = config.hosters[hoster];
     const hosterConfig = Array.isArray(accounts) ? accounts.find(a => a.id === accountId) : null;
     try {
-      const result = await _dispatchHealthCheck(hoster, hosterConfig, otp || '');
+      const result = await _dispatchHealthCheck(hoster, hosterConfig, otp || '', {
+        requestNewOtp: requestNewOtp === true
+      });
       return { hoster, accountId, ...result };
     } catch (err) {
       return { hoster, accountId, status: 'error', message: err && err.message ? err.message : 'Health-Check fehlgeschlagen' };
@@ -2003,18 +1994,20 @@ ipcMain.handle('validate-credentials', async (_event, payload) => {
     enabled: true
   };
   try {
-    return await _dispatchHealthCheck(payload.hoster, ephemeralHosterConfig, payload.otp || '');
+    return await _dispatchHealthCheck(payload.hoster, ephemeralHosterConfig, payload.otp || '', {
+      requestNewOtp: payload.requestNewOtp === true
+    });
   } catch (err) {
     return { status: 'error', message: err && err.message ? err.message : 'Validierung fehlgeschlagen' };
   }
 });
 
-async function _dispatchHealthCheck(hoster, hosterConfig, otp) {
+async function _dispatchHealthCheck(hoster, hosterConfig, otp, options = {}) {
   // Mirrors the per-hoster switch in runHosterHealthCheck so both code paths
   // (batch check by accountId and ephemeral validate) go through identical
   // checkers + timeout wrappers and surface identical result shapes.
   if (hoster === 'doodstream.com') {
-    return withTimeout(checkDoodstreamHealth(hosterConfig, otp), HEALTH_CHECK_TIMEOUT, 'Doodstream-Check');
+    return withTimeout(checkDoodstreamHealth(hosterConfig, otp, options), HEALTH_CHECK_TIMEOUT, 'Doodstream-Check');
   }
   if (hoster === 'vidmoly.me') {
     return withTimeout(checkVidmolyHealth(hosterConfig), HEALTH_CHECK_TIMEOUT, 'Vidmoly-Check');

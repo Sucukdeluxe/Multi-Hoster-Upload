@@ -7355,6 +7355,7 @@ function _buildAccountCardHtml(name, account, idx) {
     : '';
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
+  const checkLabel = statusPresentation.requiresOtp ? 'Neuen Code anfordern' : 'Prüfen';
 
   const sessionPauseKey = `${name}:${account.id}`;
   const sessionPause = _sessionFailedAccountStates.get(sessionPauseKey)
@@ -7384,7 +7385,7 @@ function _buildAccountCardHtml(name, account, idx) {
       </span>
       <div class="account-card-actions">
         <button class="btn btn-xs btn-secondary" data-account-toggle="${account.id}">${toggleLabel}</button>
-        <button class="btn btn-xs btn-secondary" data-account-check="${account.id}" ${isDisabled ? 'disabled' : ''}>Prüfen</button>
+        <button class="btn btn-xs btn-secondary" data-account-check="${account.id}" ${isDisabled ? 'disabled' : ''}>${checkLabel}</button>
         <button class="btn btn-xs btn-secondary" data-account-edit="${account.id}">Bearbeiten</button>
         <button class="btn btn-xs btn-danger" data-account-delete="${account.id}">Löschen</button>
       </div>
@@ -7906,13 +7907,14 @@ async function checkSingleAccount(accountId) {
   if (!accountId || healthCheckRunning) return;
   const found = findAccountById(accountId);
   if (!found) return;
+  const requestNewOtp = accountStatuses[accountId]?.status === 'otp_required';
   const generation = _nextAccountStatusGeneration(accountId);
   healthCheckRunning = true;
   accountStatuses[accountId] = { ...(accountStatuses[accountId] || {}), status: 'checking', message: '' };
   updateAccountCard(accountId);
   let nextStatus = null;
   try {
-    const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId }] });
+    const result = await window.api.runHealthCheck({ hosters: [{ hoster: found.name, accountId, requestNewOtp }] });
     const rows = result && Array.isArray(result.results) ? result.results : [];
     const row = rows.find(r => r.accountId === accountId);
     const checkedAt = result?.checkedAt || new Date().toISOString();

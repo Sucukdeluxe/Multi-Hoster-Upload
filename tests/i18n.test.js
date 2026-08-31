@@ -51,6 +51,8 @@ test('translates managed online backup controls in both directions', () => {
 test('translates the account check timestamp label', () => {
   assert.equal(translateText('geprüft', 'en'), 'checked');
   assert.equal(translateText('checked', 'de'), 'geprüft');
+  assert.equal(translateText('Neuen Code anfordern', 'en'), 'Request new code');
+  assert.equal(translateText('The OTP request has expired. Request a new code.', 'de'), 'OTP-Anfrage ist abgelaufen. Bitte einen neuen Code anfordern.');
 });
 
 test('translates settings search result labels in both directions', () => {

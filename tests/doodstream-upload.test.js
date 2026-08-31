@@ -161,6 +161,43 @@ function fakeRes(body, { status = 200, ctype = 'text/html' } = {}) {
   return { status, headers: { get: (h) => (h.toLowerCase() === 'content-type' ? ctype : null) }, text: async () => body };
 }
 
+test('OTP verification keeps the challenged cookie session without another bootstrap request', async () => {
+  const up = new DoodstreamUploader();
+  const originalFetch = globalThis.fetch;
+  let bootstrapCalls = 0;
+  let loginCalls = 0;
+  up._fetch = async () => {
+    bootstrapCalls++;
+    return fakeRes(bootstrapCalls === 1 ? 'ok' : '<input type="hidden" name="sess_id" value="SESSION456">');
+  };
+  globalThis.fetch = async (_url, options) => {
+    loginCalls++;
+    if (loginCalls === 1) {
+      assert.equal(options.headers.Cookie, undefined);
+      return {
+        status: 200,
+        headers: { getSetCookie: () => ['otp_session=SESSION123; Path=/'], get: () => null },
+        text: async () => JSON.stringify({ status: 'fail', message: 'OTP required' })
+      };
+    }
+    assert.equal(options.headers.Cookie, 'otp_session=SESSION123');
+    assert.match(options.body, /loginotp=123456/u);
+    return {
+      status: 302,
+      headers: { getSetCookie: () => [], get: () => '/dashboard' },
+      text: async () => ''
+    };
+  };
+  try {
+    await assert.rejects(() => up.login('user', 'secret'), error => error.otpRequired === true);
+    await up.login('user', 'secret', '123456');
+    assert.equal(bootstrapCalls, 2);
+    assert.equal(loginCalls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('getUploadServer: returns JSON result when present', async () => {
   const up = new DoodstreamUploader();
   up._fetch = async (url) => {
