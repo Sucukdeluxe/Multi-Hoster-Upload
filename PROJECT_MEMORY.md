@@ -19,8 +19,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Schlägt dieser Nachweis fehl, bleibt die Queue erhalten und der Fehler wird als lokale Persistenzstörung behandelt, damit kein stiller Doppel-Upload entsteht.
 - DoodStream-OTP-Prüfungen verwenden dieselbe Cookie-Sitzung weiter, fassen identische oder parallele Checks zusammen und fordern einen neuen Code nur nach einer ausdrücklichen Aktion mit mindestens 60 Sekunden Abstand an.
 - DoodStream-Accounts mit API-Key werden auch beim Health-Check über die API geprüft und lösen keinen Web-OTP aus.
-- Version `2.1.41` ist als GitHub-Release veröffentlicht; produktive Server wurden dadurch nicht neu gestartet.
-- GitHub normalisiert Leerzeichen in hochgeladenen Release-Assets zu Punkten. Der Release-Plan und `latest.yml` verwenden deshalb die tatsächlich veröffentlichten Namen wie `Multi-Hoster-Upload.Setup.2.1.41.exe`.
+- Version `2.1.41` ist als GitHub- und Forgejo-Release veröffentlicht; produktive Server wurden dadurch nicht neu gestartet.
+- Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
+- Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.41.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
 
 ## Start- und Testbefehle
@@ -61,4 +62,5 @@ Stand: 31.08.2026
 - Backup-API-Tests: 15 erfolgreich, 0 fehlgeschlagen.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
 - Der Fix-Commit `40ce83d` wurde auf GitHub `origin/master` und Forgejo `sync/github-master` verifiziert.
-- GitHub-Release `v2.1.41` wurde mit Installer, Portable-Build, Blockmap und Update-Manifest veröffentlicht.
+- GitHub- und Forgejo-Release `v2.1.41` wurden jeweils mit Installer, Portable-Build, Blockmap und einem zum Anbieter passenden Update-Manifest veröffentlicht.
+- Der von Version `2.1.40` verwendete Forgejo-Endpoint liefert `2.1.41` als neuesten stabilen Release.
