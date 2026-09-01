@@ -19,7 +19,7 @@ const { createAccountCooldownController, createAccountPicker } = require('./lib/
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
-const { downloadOnlineBackup } = require('./lib/online-backup');
+const { downloadOnlineBackup, normalizeOnlineBackupRetention } = require('./lib/online-backup');
 const { createOnlineBackupKeyring } = require('./lib/online-backup-keyring');
 const { createOnlineBackupManager } = require('./lib/online-backup-manager');
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
@@ -1461,7 +1461,7 @@ async function checkClouddropHealth(hosterConfig) {
 // requestedChecks can be:
 // - array of strings (hoster names) for legacy/all-accounts check
 // - array of { hoster, accountId } for specific account checks
-async function runHosterHealthCheck(config, requestedChecks) {
+async function runHosterHealthCheck(config, requestedChecks, onResult = null) {
   const allowed = ['doodstream.com', 'vidmoly.me', 'voe.sx', 'byse.sx', 'clouddrop.cc'];
 
   // Normalize input to [{ hoster, accountId? }]
@@ -1533,7 +1533,11 @@ async function runHosterHealthCheck(config, requestedChecks) {
   const groupResults = await Promise.all(Array.from(groups.values()).map(async (group) => {
     const out = [];
     for (const c of group) {
-      out.push(await runOne(c));
+      const result = await runOne(c);
+      out.push(result);
+      if (typeof onResult === 'function') {
+        try { onResult(result); } catch {}
+      }
     }
     return out;
   }));
@@ -1970,10 +1974,21 @@ ipcMain.handle('export-history', async (_event, format) => {
   };
 });
 
-ipcMain.handle('run-health-check', async (_event, payload) => {
+ipcMain.handle('run-health-check', async (event, payload) => {
   const config = configStore.load();
   const hosters = payload && Array.isArray(payload.hosters) ? payload.hosters : [];
-  return runHosterHealthCheck(config, hosters);
+  const requestId = typeof payload?.requestId === 'string' && /^[A-Za-z0-9_-]{1,80}$/u.test(payload.requestId)
+    ? payload.requestId
+    : null;
+  return runHosterHealthCheck(config, hosters, requestId ? (result) => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('health-check:result', {
+        requestId,
+        checkedAt: new Date().toISOString(),
+        result
+      });
+    }
+  } : null);
 });
 
 // Validate ephemeral credentials WITHOUT persisting them to config.hosters.
@@ -2974,7 +2989,8 @@ async function applyImportedSettings(imported) {
   settingsImportGate.begin();
   try {
     await waitForConfigStoreWrites();
-    const prepared = prepareImportedSettings(imported);
+    const preparationWarnings = [];
+    const prepared = prepareImportedSettings(imported, { warnings: preparationWarnings });
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const preImportPath = configStore.filePath.replace('.json', `.pre-import-${ts}.json`);
     try { fs.copyFileSync(configStore.filePath, preImportPath); } catch {}
@@ -2985,7 +3001,7 @@ async function applyImportedSettings(imported) {
     const config = configStore.load();
     _invalidateLogSettings(config.globalSettings);
     const warnings = await syncImportedRuntime(config);
-    return { config, warnings };
+    return { config, warnings: [...new Set([...preparationWarnings, ...warnings])] };
   } finally {
     settingsImportGate.end();
   }
@@ -3079,8 +3095,14 @@ ipcMain.handle('online-backup:list-managed', (event) => (
   invokeTrustedOnlineBackupIpc(event, () => onlineBackupManager.listManaged())
 ));
 
-ipcMain.handle('online-backup:create-managed', (event) => (
-  invokeTrustedOnlineBackupIpc(event, () => onlineBackupManager.createManaged())
+ipcMain.handle('online-backup:create-managed', (event, retention) => (
+  invokeTrustedOnlineBackupIpc(event, () => {
+    try {
+      return onlineBackupManager.createManaged(normalizeOnlineBackupRetention(retention));
+    } catch (error) {
+      return { ok: false, error: error.message || String(error) };
+    }
+  })
 ));
 
 ipcMain.handle('online-backup:copy-managed', (event, id) => (

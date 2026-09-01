@@ -65,6 +65,7 @@ let config = { hosters: {}, hosterSettings: {}, globalSettings: {} };
 let hosterSettings = {};
 let uploading = false;
 let healthCheckRunning = false;
+let healthCheckRequestSequence = 0;
 let automationRuntimeStatus = Object.freeze({});
 let automationRuntimeStatusAvailable = false;
 let automationPauseResumeBusy = false;
@@ -87,6 +88,7 @@ let managedOnlineBackupAuthoritativeLoadGeneration = 0;
 let managedOnlineBackupActiveMutations = 0;
 let onlineBackupStatusContextGeneration = 0;
 let managedOnlineBackupRefreshIssue = null;
+let managedOnlineBackupExpiryTimer = null;
 const managedOnlineBackupOperationQueues = new Map();
 
 let _rLongTasks = 0, _rLongTaskMax = 0, _rFrameLast = 0, _rFrameWorst = 0, _rFrameCount = 0, _rFrameJank = 0, _rPerfLastLog = 0, _rPerfWindowStart = 0;
@@ -1345,6 +1347,10 @@ async function init() {
   setUiLanguage(config.globalSettings?.language);
   hosterSettings = config.hosterSettings || {};
   autoHealthCheckEnabled = loadAutoCheckPreference();
+  if (config.globalSettings?.autoHealthCheckEnabled !== autoHealthCheckEnabled) {
+    config.globalSettings = { ...(config.globalSettings || {}), autoHealthCheckEnabled };
+    saveGlobalSettingsTracked(config.globalSettings).catch(() => {});
+  }
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   restoreQueueStateFromConfig();
@@ -3599,7 +3605,13 @@ function applyImportedConfig(importedConfig, message) {
   accountStatuses = {};
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
+  autoHealthCheckEnabled = config.globalSettings?.autoHealthCheckEnabled !== false;
+  try { localStorage.setItem(AUTO_CHECK_PREF_KEY, autoHealthCheckEnabled ? '1' : '0'); } catch {}
   alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
+  const importedLanguage = setUiLanguage(config.globalSettings?.language);
+  const importedUrl = new URL(window.location.href);
+  importedUrl.searchParams.set('language', importedLanguage);
+  window.history.replaceState(null, '', importedUrl.href);
   renderSettings();
   renderAccounts();
   renderHosterSummary();
@@ -3678,12 +3690,20 @@ function normalizeManagedOnlineBackups(entries) {
   const candidates = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
-    if (Object.keys(entry).sort().join(',') !== 'createdAt,displayKey,id') continue;
+    const shape = Object.keys(entry).sort().join(',');
+    if (shape !== 'createdAt,displayKey,id' && shape !== 'createdAt,displayKey,expiresAt,id') continue;
     if (!isCanonicalManagedOnlineBackupId(entry.id)) continue;
     if (typeof entry.displayKey !== 'string' || !/^MHU2-[A-Za-z0-9_-]{4}…[A-Za-z0-9_-]{4}$/.test(entry.displayKey)) continue;
     const createdAt = new Date(entry.createdAt);
     if (Number.isNaN(createdAt.getTime()) || createdAt.toISOString() !== entry.createdAt) continue;
-    candidates.push({ id: entry.id, displayKey: entry.displayKey, createdAt: entry.createdAt });
+    let expiresAt = null;
+    if (shape.includes('expiresAt') && entry.expiresAt !== null) {
+      const expiration = new Date(entry.expiresAt);
+      if (typeof entry.expiresAt !== 'string' || Number.isNaN(expiration.getTime()) || expiration.toISOString() !== entry.expiresAt || entry.expiresAt <= entry.createdAt) continue;
+      expiresAt = entry.expiresAt;
+    }
+    if (expiresAt !== null && new Date(expiresAt).getTime() <= Date.now()) continue;
+    candidates.push({ id: entry.id, displayKey: entry.displayKey, createdAt: entry.createdAt, expiresAt });
   }
   const counts = new Map();
   for (const entry of candidates) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
@@ -3739,6 +3759,8 @@ function removeManagedOnlineBackup(id, focusTarget = null) {
 function renderManagedOnlineBackups(focusTarget = undefined) {
   const list = document.getElementById('managedOnlineBackupList');
   if (!list) return;
+  clearTimeout(managedOnlineBackupExpiryTimer);
+  managedOnlineBackupExpiryTimer = null;
   const target = focusTarget === undefined ? managedOnlineBackupFocusTarget() : focusTarget;
   const content = document.createDocumentFragment();
   if (!managedOnlineBackupsAuthoritative) {
@@ -3761,7 +3783,13 @@ function renderManagedOnlineBackups(focusTarget = undefined) {
       key.textContent = entry.displayKey;
       const created = document.createElement('span');
       created.className = 'online-backup-managed-created';
-      created.textContent = formatDateTime(entry.createdAt).text;
+      const createdLabel = document.createElement('span');
+      createdLabel.textContent = `${localizeUiText('Erstellt')}: ${formatDateTime(entry.createdAt).text}`;
+      const expirationLabel = document.createElement('span');
+      expirationLabel.textContent = entry.expiresAt
+        ? `${localizeUiText('Gültig bis')}: ${formatDateTime(entry.expiresAt).text}`
+        : localizeUiText('Unbegrenzt gültig');
+      created.append(createdLabel, expirationLabel);
       const actions = document.createElement('div');
       actions.className = 'online-backup-managed-actions';
       const copyButton = document.createElement('button');
@@ -3790,6 +3818,17 @@ function renderManagedOnlineBackups(focusTarget = undefined) {
   }
   list.replaceChildren(content);
   restoreManagedOnlineBackupFocus(target);
+  const nextExpiry = managedOnlineBackups
+    .map(entry => entry.expiresAt ? new Date(entry.expiresAt).getTime() : 0)
+    .filter(timestamp => timestamp > Date.now())
+    .sort((left, right) => left - right)[0];
+  if (nextExpiry) {
+    const delay = Math.min(2_147_000_000, Math.max(0, nextExpiry - Date.now() + 50));
+    managedOnlineBackupExpiryTimer = setTimeout(() => {
+      managedOnlineBackupExpiryTimer = null;
+      loadManagedOnlineBackups();
+    }, delay);
+  }
 }
 
 function renderManagedOnlineBackupRefreshIssue() {
@@ -3948,10 +3987,13 @@ async function doOnlineBackupCreate() {
   }
   const authority = beginManagedOnlineBackupMutation();
   const createButton = document.getElementById('createOnlineBackupBtn');
+  const retentionSelect = document.getElementById('onlineBackupRetentionSelect');
+  const retention = retentionSelect?.value || '7d';
   if (createButton) createButton.disabled = true;
+  if (retentionSelect) retentionSelect.disabled = true;
   setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', authority.statusContext);
   try {
-    const result = await window.api.createManagedOnlineBackup();
+    const result = await window.api.createManagedOnlineBackup(retention);
     if (!result?.ok) {
       setOnlineBackupStatus(result?.error || 'Online-Sicherung konnte nicht erstellt werden', 'error', authority.statusContext);
       return;
@@ -3964,6 +4006,7 @@ async function doOnlineBackupCreate() {
   } finally {
     endManagedOnlineBackupMutation();
     if (createButton?.isConnected) createButton.disabled = false;
+    if (retentionSelect?.isConnected) retentionSelect.disabled = false;
     doOnlineBackupCreate.busy = false;
   }
 }
@@ -6013,33 +6056,46 @@ function showAppChoice({ message, title, confirmText, alternateText, cancelText 
 
 async function executeHealthCheck(hosters, _mode, generations) {
   renderHealthCheckResults([]);
-  const result = await window.api.runHealthCheck({ hosters });
-  const rows = result && Array.isArray(result.results) ? result.results : [];
-  const checkedAt = result?.checkedAt || new Date().toISOString();
-  const currentRows = rows.filter((row) => {
+  const requestId = `hc-${Date.now()}-${++healthCheckRequestSequence}`;
+  const rowsByKey = new Map();
+  const applyResult = (row, checkedAt) => {
     if (!row) return false;
     const key = row.accountId || row.hoster;
     const generation = generations?.get(key);
-    return generation === undefined || _isCurrentAccountStatusGeneration(key, generation);
-  });
-  const completedKeys = new Set();
-  currentRows.forEach((row) => {
-    const key = row.accountId || row.hoster;
-    if (key) {
-      completedKeys.add(key);
-      accountStatuses[key] = {
-        status: row.status || 'unchecked',
-        message: row.message || '',
-        checkedAt: row.checkedAt || checkedAt
-      };
-    }
-  });
-  for (const [key, generation] of generations || []) {
-    if (completedKeys.has(key) || !_isCurrentAccountStatusGeneration(key, generation)) continue;
-    accountStatuses[key] = { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
+    if (!key || (generation !== undefined && !_isCurrentAccountStatusGeneration(key, generation))) return false;
+    rowsByKey.set(key, row);
+    accountStatuses[key] = {
+      status: row.status || 'unchecked',
+      message: row.message || '',
+      checkedAt: row.checkedAt || checkedAt
+    };
+    if (row.accountId) updateAccountCard(row.accountId);
+    else renderAccounts();
+    renderHosterModal();
+    renderHealthCheckResults([...rowsByKey.values()]);
+    return true;
+  };
+  const stopListening = typeof window.api.onHealthCheckResult === 'function'
+    ? window.api.onHealthCheckResult((payload) => {
+        if (payload?.requestId === requestId) applyResult(payload.result, payload.checkedAt || new Date().toISOString());
+      })
+    : null;
+  let result;
+  try {
+    result = await window.api.runHealthCheck({ hosters, requestId });
+  } finally {
+    if (typeof stopListening === 'function') stopListening();
   }
+  const rows = result && Array.isArray(result.results) ? result.results : [];
+  const checkedAt = result?.checkedAt || new Date().toISOString();
+  rows.forEach(row => applyResult(row, checkedAt));
+  for (const [key, generation] of generations || []) {
+    if (rowsByKey.has(key) || !_isCurrentAccountStatusGeneration(key, generation)) continue;
+    accountStatuses[key] = { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
+    updateAccountCard(key);
+  }
+  const currentRows = [...rowsByKey.values()];
   renderHealthCheckResults(currentRows);
-  renderAccounts();
   renderHosterModal();
   return currentRows;
 }
@@ -6553,6 +6609,18 @@ function renderSettings() {
         </section>
         <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
         <footer class="online-backup-footer" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Neuen Schlüssel erzeugen">
+          <div class="online-backup-retention-field">
+            <label for="onlineBackupRetentionSelect">Gültigkeitsdauer</label>
+            <span class="online-backup-retention-select">
+              <select id="onlineBackupRetentionSelect">
+                <option value="1d">24 Stunden</option>
+                <option value="3d">3 Tage</option>
+                <option value="7d" selected>7 Tage (Standard)</option>
+                <option value="31d">31 Tage</option>
+                <option value="forever">Unbegrenzt</option>
+              </select>
+            </span>
+          </div>
           <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
         </footer>
       </section>
@@ -9283,6 +9351,8 @@ function setupListeners() {
     autoToggle.addEventListener('change', (e) => {
       autoHealthCheckEnabled = !!e.target.checked;
       try { localStorage.setItem(AUTO_CHECK_PREF_KEY, autoHealthCheckEnabled ? '1' : '0'); } catch {}
+      config.globalSettings = { ...(config.globalSettings || {}), autoHealthCheckEnabled };
+      saveGlobalSettingsTracked(config.globalSettings).catch(() => {});
     });
   }
 
@@ -9967,8 +10037,12 @@ function formatDateTime(value) {
 }
 
 function loadAutoCheckPreference() {
-  try { const r = localStorage.getItem(AUTO_CHECK_PREF_KEY); return r === null || r === '1'; }
-  catch { return true; }
+  try {
+    const stored = localStorage.getItem(AUTO_CHECK_PREF_KEY);
+    if (stored === '0' || stored === '1') return stored === '1';
+  }
+  catch {}
+  return config.globalSettings?.autoHealthCheckEnabled !== false;
 }
 
 // --- Queue table column resizing (JDownloader-style) ---

@@ -44,7 +44,8 @@ function fixture(options = {}) {
       encryptField: options.encryptField || encrypt,
       decryptField: options.decryptField || decrypt,
       isEncrypted: options.isEncrypted || isCanonicalEnvelope,
-      fsImpl: options.fsImpl
+      fsImpl: options.fsImpl,
+      now: options.now
     })
   };
 }
@@ -82,17 +83,38 @@ describe('encrypted online backup keyring', () => {
     assert.equal(document.version, 2);
     assert.equal(document.generation, 1);
     assert.equal(document.keys.length, 1);
+    assert.equal(document.keys[0].expiresAt, null);
     assert.equal(fs.readFileSync(filePath, 'utf8').includes(key), false);
     assert.deepEqual(snapshot.issues, []);
     assert.deepEqual(snapshot.entries, [{
       id: parseOnlineBackupKey(key).id,
       displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-      createdAt: timestamp
+      createdAt: timestamp,
+      expiresAt: null
     }]);
     assert.equal(Object.isFrozen(snapshot), true);
     assert.equal(Object.isFrozen(snapshot.entries), true);
     assert.equal(Object.isFrozen(snapshot.entries[0]), true);
     assert.equal(await keyring.getKey(prepared.id), key);
+  });
+
+  it('removes expired local keys from the managed list and encrypted keyring', async () => {
+    let currentTime = new Date(timestamp).getTime();
+    const { filePath, keyring } = fixture({ now: () => currentTime });
+    const finite = validKey();
+    const unlimited = validKey();
+    const expiresAt = '2026-08-23T10:00:00.000Z';
+    await keyring.commit(keyring.prepare(finite, timestamp, expiresAt));
+    await keyring.commit(keyring.prepare(unlimited, timestamp, null));
+
+    assert.deepEqual((await keyring.list()).entries.map(entry => entry.expiresAt), [expiresAt, null]);
+    currentTime = new Date(expiresAt).getTime();
+    const snapshot = await keyring.list();
+
+    assert.deepEqual(snapshot.entries.map(entry => entry.id), [parseOnlineBackupKey(unlimited).id]);
+    assert.equal(await keyring.getKey(parseOnlineBackupKey(finite).id), null);
+    const document = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    assert.equal(document.keys.some(entry => entry.id === parseOnlineBackupKey(finite).id), false);
   });
 
   it('keeps a valid v1 primary authoritative over an older v1 backup and migrates to v2', async () => {
@@ -342,7 +364,8 @@ describe('encrypted online backup keyring', () => {
     assert.deepEqual((await keyring.list()).entries, [{
       id: parseOnlineBackupKey(key).id,
       displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-      createdAt: timestamp
+      createdAt: timestamp,
+      expiresAt: null
     }]);
   });
 

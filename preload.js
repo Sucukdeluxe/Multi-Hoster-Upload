@@ -70,6 +70,11 @@ contextBridge.exposeInMainWorld('api', {
   completeUploadFinalization: (payload) => ipcRenderer.invoke('complete-upload-finalization', payload),
   finishAfterActive: () => ipcRenderer.invoke('finish-after-active'),
   runHealthCheck: (payload) => ipcRenderer.invoke('run-health-check', payload),
+  onHealthCheckResult: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('health-check:result', listener);
+    return () => ipcRenderer.removeListener('health-check:result', listener);
+  },
   validateCredentials: (payload) => ipcRenderer.invoke('validate-credentials', payload),
 
   // Log import
@@ -97,7 +102,7 @@ contextBridge.exposeInMainWorld('api', {
   exportBackup: (options) => ipcRenderer.invoke('export-backup', options),
   importBackup: (legacyPassword) => ipcRenderer.invoke('import-backup', legacyPassword),
   listManagedOnlineBackups: () => ipcRenderer.invoke('online-backup:list-managed'),
-  createManagedOnlineBackup: () => ipcRenderer.invoke('online-backup:create-managed'),
+  createManagedOnlineBackup: (retention) => ipcRenderer.invoke('online-backup:create-managed', retention),
   copyManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:copy-managed', id),
   deleteManagedOnlineBackup: (id) => ipcRenderer.invoke('online-backup:delete-managed', id),
   restoreOnlineBackup: (key) => ipcRenderer.invoke('online-backup:restore', key),

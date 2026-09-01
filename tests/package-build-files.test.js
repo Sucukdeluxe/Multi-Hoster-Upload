@@ -329,7 +329,7 @@ test('exposes managed online backup operations through narrow IPC boundaries', (
   const mainSource = fs.readFileSync(path.join(projectRoot, 'main.js'), 'utf8');
 
   assert.match(preloadSource, /listManagedOnlineBackups:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('online-backup:list-managed'\)/u);
-  assert.match(preloadSource, /createManagedOnlineBackup:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('online-backup:create-managed'\)/u);
+  assert.match(preloadSource, /createManagedOnlineBackup:\s*\(retention\)\s*=>\s*ipcRenderer\.invoke\('online-backup:create-managed',\s*retention\)/u);
   assert.match(preloadSource, /copyManagedOnlineBackup:\s*\(id\)\s*=>\s*ipcRenderer\.invoke\('online-backup:copy-managed',\s*id\)/u);
   assert.match(preloadSource, /deleteManagedOnlineBackup:\s*\(id\)\s*=>\s*ipcRenderer\.invoke\('online-backup:delete-managed',\s*id\)/u);
   assert.match(preloadSource, /restoreOnlineBackup:\s*\(key\)\s*=>\s*ipcRenderer\.invoke\('online-backup:restore',\s*key\)/u);
@@ -344,7 +344,7 @@ test('exposes managed online backup operations through narrow IPC boundaries', (
   assert.match(mainSource, /decoded\.toString\('base64url'\)\s*!==\s*id/u);
   assert.doesNotMatch(mainSource, /ipcMain\.handle\('online-backup:create'/u);
   assert.match(mainSource, /ipcMain\.handle\('online-backup:list-managed',[\s\S]*?onlineBackupManager\.listManaged\(\)/u);
-  assert.match(mainSource, /ipcMain\.handle\('online-backup:create-managed',[\s\S]*?onlineBackupManager\.createManaged\(\)/u);
+  assert.match(mainSource, /ipcMain\.handle\('online-backup:create-managed',[\s\S]*?onlineBackupManager\.createManaged\(normalizeOnlineBackupRetention\(retention\)\)/u);
   assert.match(mainSource, /ipcMain\.handle\('online-backup:copy-managed',[\s\S]*?onlineBackupManager\.copyManaged\(/u);
   assert.match(mainSource, /ipcMain\.handle\('online-backup:delete-managed',[\s\S]*?onlineBackupManager\.deleteManaged\(/u);
 });
@@ -393,6 +393,7 @@ test('managed online backup handlers reject every sender outside the local main 
     ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
     mainWindow,
     onlineBackupManager,
+    normalizeOnlineBackupRetention: value => value || '7d',
     path,
     pathToFileURL
   };

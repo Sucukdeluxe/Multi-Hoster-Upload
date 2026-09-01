@@ -110,7 +110,10 @@ test('validates payload shape, content type and decoded blob size', async (t) =>
     { ...valid.payload, blob: 'not+base64url' },
     { ...valid.payload, deleteVerifier: 'short' },
     { id: valid.payload.id, blob: valid.payload.blob },
-    { ...valid.payload, extra: true }
+    { ...valid.payload, extra: true },
+    { ...valid.payload, expiresInSeconds: 0 },
+    { ...valid.payload, expiresInSeconds: 30 * 24 * 60 * 60 },
+    { ...valid.payload, expiresInSeconds: '604800' }
   ]
 
   for (const body of invalid) {
@@ -137,6 +140,82 @@ test('validates payload shape, content type and decoded blob size', async (t) =>
     body: JSON.stringify(oversized.payload)
   })
   assert.equal(tooLarge.status, 413)
+})
+
+test('expires finite backups at the exact deadline and removes their ciphertext', async (t) => {
+  let nowMs = Date.parse('2026-09-01T10:00:00.000Z')
+  const api = await startApi({ now: () => nowMs })
+  t.after(() => api.close())
+  const backup = fixture()
+  backup.payload.expiresInSeconds = 86_400
+
+  const created = await request(api, '/v1/backups', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(backup.payload)
+  })
+  assert.equal(created.status, 201)
+  const storedPath = join(api.rootDir, `${backup.payload.id}.json`)
+  const stored = JSON.parse(await readFile(storedPath, 'utf8'))
+  assert.equal(stored.version, 2)
+  assert.equal(stored.expiresAt, '2026-09-02T10:00:00.000Z')
+
+  const beforeDeadline = await request(api, '/v1/backups/restore', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: backup.payload.id })
+  })
+  assert.equal(beforeDeadline.status, 200)
+
+  nowMs += 86_400_000
+  const expired = await request(api, '/v1/backups/restore', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: backup.payload.id })
+  })
+  assert.equal(expired.status, 404)
+  await assert.rejects(stat(storedPath), error => error.code === 'ENOENT')
+})
+
+test('keeps legacy records unlimited and reclaims expired records on the next upload', async (t) => {
+  let nowMs = Date.parse('2026-09-01T10:00:00.000Z')
+  const api = await startApi({ now: () => nowMs })
+  t.after(() => api.close())
+  const legacy = fixture()
+  await writeFile(join(api.rootDir, `${legacy.payload.id}.json`), JSON.stringify({
+    version: 1,
+    blob: legacy.payload.blob,
+    deleteVerifier: legacy.payload.deleteVerifier,
+    createdAt: '2026-01-01T00:00:00.000Z'
+  }))
+  const finite = fixture()
+  finite.payload.expiresInSeconds = 86_400
+  await request(api, '/v1/backups', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(finite.payload)
+  })
+
+  nowMs += 2 * 86_400_000
+  const replacement = fixture()
+  replacement.payload.expiresInSeconds = null
+  assert.equal((await request(api, '/v1/backups', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(replacement.payload)
+  })).status, 201)
+
+  await assert.rejects(stat(join(api.rootDir, `${finite.payload.id}.json`)), error => error.code === 'ENOENT')
+  assert.equal((await request(api, '/v1/backups/restore', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: legacy.payload.id })
+  })).status, 200)
+  assert.equal((await request(api, '/v1/backups/restore', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: replacement.payload.id })
+  })).status, 200)
 })
 
 test('deletes only with the matching client secret and returns constant not-found responses', async (t) => {

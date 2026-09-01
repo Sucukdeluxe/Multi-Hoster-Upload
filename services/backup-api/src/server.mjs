@@ -11,6 +11,7 @@ const idPattern = /^[A-Za-z0-9_-]{22}$/
 const verifierPattern = /^[A-Za-z0-9_-]{43}$/
 const blobPattern = /^[A-Za-z0-9_-]+$/
 const notFoundBody = '{"error":"not_found"}'
+const allowedRetentionSeconds = new Set([86_400, 259_200, 604_800, 2_678_400])
 
 function isCanonicalBase64Url(value, byteLength, pattern) {
   if (typeof value !== 'string' || !pattern.test(value)) return false
@@ -21,7 +22,9 @@ function isCanonicalBase64Url(value, byteLength, pattern) {
 function isValidBackup(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
   const keys = Object.keys(payload).sort()
-  if (keys.join(',') !== 'blob,deleteVerifier,id') return false
+  const shape = keys.join(',')
+  if (shape !== 'blob,deleteVerifier,id' && shape !== 'blob,deleteVerifier,expiresInSeconds,id') return false
+  if (shape.includes('expiresInSeconds') && payload.expiresInSeconds !== null && !allowedRetentionSeconds.has(payload.expiresInSeconds)) return false
   if (!isCanonicalBase64Url(payload.id, 16, idPattern)) return false
   if (!isCanonicalBase64Url(payload.deleteVerifier, 32, verifierPattern)) return false
   if (typeof payload.blob !== 'string' || !blobPattern.test(payload.blob)) return false
@@ -164,6 +167,36 @@ async function directoryUsage(rootDir) {
   return { bytes, records }
 }
 
+function isCanonicalTimestamp(value) {
+  if (typeof value !== 'string') return false
+  const timestamp = new Date(value)
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
+}
+
+function recordExpired(record, nowMs) {
+  return record.expiresAt !== null && new Date(record.expiresAt).getTime() <= nowMs
+}
+
+async function cleanupExpiredRecords(rootDir, nowMs) {
+  const entries = await readdir(rootDir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[A-Za-z0-9_-]{22}\.json$/.test(entry.name)) continue
+    const id = entry.name.slice(0, -5)
+    let record
+    try {
+      record = await readRecord(rootDir, id)
+    } catch {
+      continue
+    }
+    if (!record || !recordExpired(record, nowMs)) continue
+    try {
+      await unlink(recordPath(rootDir, id))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+}
+
 async function syncDirectory(rootDir) {
   let handle
   try {
@@ -219,15 +252,21 @@ async function recordExists(rootDir, id) {
   }
 }
 
-async function createRecord(rootDir, payload, maxStorageBytes, maxRecords) {
+async function createRecord(rootDir, payload, maxStorageBytes, maxRecords, nowMs) {
   await mkdir(rootDir, { recursive: true })
   await cleanupTemporaryFiles(rootDir)
+  await cleanupExpiredRecords(rootDir, nowMs)
   if (await recordExists(rootDir, payload.id)) return 'duplicate'
+  const expiresInSeconds = Object.prototype.hasOwnProperty.call(payload, 'expiresInSeconds')
+    ? payload.expiresInSeconds
+    : null
+  const expiresAt = expiresInSeconds === null ? null : new Date(nowMs + expiresInSeconds * 1000).toISOString()
   const contents = Buffer.from(JSON.stringify({
-    version: 1,
+    version: 2,
     blob: payload.blob,
     deleteVerifier: payload.deleteVerifier,
-    createdAt: new Date().toISOString()
+    createdAt: new Date(nowMs).toISOString(),
+    expiresAt
   }), 'utf8')
   const usage = await directoryUsage(rootDir)
   if (usage.bytes + contents.length > maxStorageBytes || usage.records >= maxRecords) return 'full'
@@ -282,10 +321,26 @@ async function readRecord(rootDir, id) {
   try {
     const raw = await readFile(recordPath(rootDir, id), 'utf8')
     const record = JSON.parse(raw)
-    if (record?.version !== 1 || typeof record.blob !== 'string' || !isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)) {
+    const keys = record && typeof record === 'object' && !Array.isArray(record) ? Object.keys(record).sort().join(',') : ''
+    const validBlob = typeof record?.blob === 'string'
+      && blobPattern.test(record.blob)
+      && Buffer.from(record.blob, 'base64url').length <= maxBlobBytes
+      && Buffer.from(record.blob, 'base64url').toString('base64url') === record.blob
+    const legacy = keys === 'blob,createdAt,deleteVerifier,version'
+      && record.version === 1
+      && validBlob
+      && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
+      && isCanonicalTimestamp(record.createdAt)
+    const expiring = keys === 'blob,createdAt,deleteVerifier,expiresAt,version'
+      && record.version === 2
+      && validBlob
+      && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
+      && isCanonicalTimestamp(record.createdAt)
+      && (record.expiresAt === null || (isCanonicalTimestamp(record.expiresAt) && record.expiresAt > record.createdAt))
+    if (!legacy && !expiring) {
       throw new Error('Invalid stored record')
     }
-    return record
+    return legacy ? { ...record, expiresAt: null } : record
   } catch (error) {
     if (error.code === 'ENOENT') return null
     throw error
@@ -383,6 +438,7 @@ export function createBackupServer(options) {
   const maxConcurrentPerClient = options.maxConcurrentPerClient ?? 8
   const maxConcurrentTotal = options.maxConcurrentTotal ?? 64
   const trustedProxyAddresses = new Set(options.trustedProxyAddresses ?? [])
+  const now = options.now ?? (() => Date.now())
   if (!Number.isSafeInteger(rateLimit.max) || rateLimit.max < 1 || !Number.isSafeInteger(rateLimit.windowMs) || rateLimit.windowMs < 1) {
     throw new Error('Invalid rate limit')
   }
@@ -398,6 +454,7 @@ export function createBackupServer(options) {
   if (!Number.isSafeInteger(healthCacheMs) || healthCacheMs < 1) throw new Error('Invalid health cache')
   if (!Number.isSafeInteger(maxConcurrentPerClient) || maxConcurrentPerClient < 1) throw new Error('Invalid per-client concurrency')
   if (!Number.isSafeInteger(maxConcurrentTotal) || maxConcurrentTotal < maxConcurrentPerClient) throw new Error('Invalid total concurrency')
+  if (typeof now !== 'function' || !Number.isFinite(Number(now()))) throw new Error('Invalid clock')
   const consumeRateLimit = createRateLimiter(rateLimit)
   const consumeUploadRateLimit = createRateLimiter(uploadRateLimit)
   const consumeRequestRateLimit = createRateLimiter(requestRateLimit)
@@ -471,7 +528,18 @@ export function createBackupServer(options) {
               return
             }
             const record = await readRecord(options.rootDir, parsed.value.id)
-            if (!record) {
+            if (!record || recordExpired(record, Number(now()))) {
+              if (record) {
+                await runStorageMutation(() => withStorageLock(options.rootDir, async () => {
+                  const current = await readRecord(options.rootDir, parsed.value.id)
+                  if (!current || !recordExpired(current, Number(now()))) return
+                  try {
+                    await unlink(recordPath(options.rootDir, parsed.value.id))
+                  } catch (error) {
+                    if (error.code !== 'ENOENT') throw error
+                  }
+                }))
+              }
               sendNotFound(response)
               return
             }
@@ -522,7 +590,7 @@ export function createBackupServer(options) {
           }
           const result = await runStorageMutation(() => withStorageLock(
             options.rootDir,
-            () => createRecord(options.rootDir, parsed.value, maxStorageBytes, maxRecords)
+            () => createRecord(options.rootDir, parsed.value, maxStorageBytes, maxRecords, Number(now()))
           ))
           if (result === 'duplicate') {
             sendJson(response, 409, { error: 'already_exists' })

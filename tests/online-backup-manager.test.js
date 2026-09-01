@@ -28,10 +28,12 @@ function createFixture(overrides = {}) {
     entries.set(id, {
       id,
       displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-      createdAt: '2026-08-22T10:00:00.000Z'
+      createdAt: '2026-08-22T10:00:00.000Z',
+      expiresAt: null
     });
   }
   let createdAt;
+  let expiresAt;
   let createArguments;
   const removalPlans = new WeakMap();
   const keyring = {
@@ -43,11 +45,12 @@ function createFixture(overrides = {}) {
         issues: overrides.listIssues || []
       };
     },
-    prepare: (value, timestamp) => {
+    prepare: (value, timestamp, expiration) => {
       events.push('prepare');
       if (overrides.prepareError) throw overrides.prepareError;
       createdAt = timestamp;
-      return { id, encryptedKey: 'encrypted-key', createdAt: timestamp };
+      expiresAt = expiration ?? null;
+      return { id, encryptedKey: 'encrypted-key', createdAt: timestamp, expiresAt };
     },
     commit: async (entry) => {
       events.push('commit');
@@ -56,7 +59,8 @@ function createFixture(overrides = {}) {
       entries.set(entry.id, {
         id: entry.id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-        createdAt: entry.createdAt
+        createdAt: entry.createdAt,
+        expiresAt: entry.expiresAt ?? null
       });
     },
     getKey: async (entryId) => {
@@ -90,7 +94,8 @@ function createFixture(overrides = {}) {
     appVersion: () => '2.1.31',
     createBackup: (...args) => {
       createArguments = args;
-      return { key, record };
+      const expiration = args[3] === 'forever' ? null : new Date(new Date(args[2]).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      return { key, record, expiresAt: expiration };
     },
     uploadBackup: async (uploadedRecord) => {
       events.push('upload');
@@ -111,6 +116,9 @@ function createFixture(overrides = {}) {
     state,
     get createdAt() {
       return createdAt;
+    },
+    get expiresAt() {
+      return expiresAt;
     },
     get createArguments() {
       return createArguments;
@@ -174,14 +182,15 @@ describe('transactional online backup manager', () => {
     const result = await fixture.manager.createManaged();
 
     assert.deepEqual(fixture.events, ['prepare', 'upload', 'commit']);
-    assert.deepEqual(fixture.createArguments, [settings, '2.1.31', fixture.createdAt]);
+    assert.deepEqual(fixture.createArguments, [settings, '2.1.31', fixture.createdAt, '7d']);
     assert.match(fixture.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.deepEqual(result, {
       ok: true,
       entry: {
         id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-        createdAt: fixture.createdAt
+        createdAt: fixture.createdAt,
+        expiresAt: fixture.expiresAt
       }
     });
     assert.equal(JSON.stringify(result).includes(key), false);
@@ -202,7 +211,8 @@ describe('transactional online backup manager', () => {
       entry: {
         id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-        createdAt: fixture.createdAt
+        createdAt: fixture.createdAt,
+        expiresAt: fixture.expiresAt
       }
     });
   });
@@ -445,7 +455,8 @@ describe('transactional online backup manager', () => {
       entries: [{
         id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-        createdAt: '2026-08-22T10:00:00.000Z'
+        createdAt: '2026-08-22T10:00:00.000Z',
+        expiresAt: null
       }]
     });
     fixture.keyring.list = async () => {
@@ -464,7 +475,8 @@ describe('transactional online backup manager', () => {
       entries: [{
         id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
-        createdAt: '2026-08-22T10:00:00.000Z'
+        createdAt: '2026-08-22T10:00:00.000Z',
+        expiresAt: null
       }],
       warningCode: 'KEYRING_DECRYPT_FAILED',
       warning: 'Gespeicherter Online-Sicherungsschlüssel konnte nicht entschlüsselt werden'
