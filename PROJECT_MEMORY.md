@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.41`; aktueller unveröffentlichter Funktionsstand ist Commit `9e5c512`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.41`; freigegebenes Release-Ziel ist Version `2.1.42` mit Funktionsstand `9e5c512`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -24,9 +24,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Vorhandene Online-Backups und alte Upload-Payloads ohne Ablaufangabe bleiben zur Abwärtskompatibilität unbegrenzt gültig.
 - Backup-Importe wenden Sprache und automatischen Account-Check sofort an. Alle Konfigurationsfelder werden übertragen; Warteschlange, Upload-Wiederherstellungsstatus, letzter Dateiauswahlordner, Automatik-Telemetrie und Pausenzustand bleiben bewusst geräte- beziehungsweise laufzeitgebunden.
 - Ein nicht vorhandener Ordnerüberwachungspfad bleibt nach dem Import sichtbar gespeichert, die Überwachung wird aber deaktiviert und der Nutzer erhält eine Warnung. Ein nicht vorhandener Log-Ordner wird ebenfalls gemeldet, ohne den konfigurierten Pfad still zu löschen.
-- Version `2.1.41` ist als GitHub- und Forgejo-Release veröffentlicht; produktive Server wurden dadurch nicht neu gestartet.
+- Version `2.1.41` ist als GitHub- und Forgejo-Release veröffentlicht; Version `2.1.42` ist für diese Sitzung ausdrücklich freigegeben und Backup-API `2.0.4` wurde vor dem Client-Release produktiv ausgerollt.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
-- Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.41.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
+- Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.42.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
 
 ## Start- und Testbefehle
@@ -55,7 +55,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
-- Der Ablaufzeit-Code ist noch nicht veröffentlicht oder produktiv ausgerollt. Bei einer späteren ausdrücklichen Release-Freigabe zuerst den kompatiblen Backup-API-Dienst ausrollen und prüfen, danach den Desktop-Client veröffentlichen; Rollback sind der vorherige Dienststand und Version `2.1.41`.
+- Anwendungsversion `2.1.42` mit vier Assets und anbieterspezifischen Update-Metadaten auf GitHub und Forgejo veröffentlichen und anschließend beide Updatepfade prüfen.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
@@ -70,3 +70,5 @@ Stand: 01.09.2026
 - Der unveröffentlichte Funktionsstand `9e5c512` wurde auf GitHub `origin/master` und Forgejo `sync/github-master` mit identischem Commit-Hash verifiziert.
 - GitHub- und Forgejo-Release `v2.1.41` wurden jeweils mit Installer, Portable-Build, Blockmap und einem zum Anbieter passenden Update-Manifest veröffentlicht.
 - Der von Version `2.1.40` verwendete Forgejo-Endpoint liefert `2.1.41` als neuesten stabilen Release.
+- Backup-API `2.0.4` läuft produktiv aus `/opt/mhu-backup-api/releases/20260901T140230Z-v2.0.4`; der vorherige Dienststand und alle 10 bestehenden Datensätze wurden davor in `/var/backups/mhu-backup-api/20260901T140230Z-pre-v2.0.4.tar.gz` gesichert und per Gzip-Test sowie SHA-256 geprüft.
+- Der produktive HTTPS-Smoke für einen endlichen Testschlüssel bestätigte Erstellen `201`, Wiederherstellen `200`, Löschen `204` und anschließendes Nichtfinden `404`; danach waren weiterhin exakt 10 bestehende Datensätze vorhanden.
