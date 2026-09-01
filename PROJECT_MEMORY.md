@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.41`; aktueller unveröffentlichter Arbeitsstand basiert auf `96037f2`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.41`; aktueller unveröffentlichter Funktionsstand ist Commit `9e5c512`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -67,6 +67,6 @@ Stand: 01.09.2026
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der vollständige opt-in UI-Smoke bestätigte alle neu ergänzten Prüfungen für fortlaufende Account-Statusmeldungen, Ablauf-Auswahl, Schlüsselbereinigung, Metadatenanzeige sowie sofortige Sprach-/Auto-Check-Übernahme; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
-- Vor Beginn dieser Änderung zeigten GitHub `origin/master` und Forgejo `sync/github-master` beide auf `96037f2`; der neue Stand muss nach dem Sitzungs-Commit auf beiden Remotes verifiziert werden.
+- Der unveröffentlichte Funktionsstand `9e5c512` wurde auf GitHub `origin/master` und Forgejo `sync/github-master` mit identischem Commit-Hash verifiziert.
 - GitHub- und Forgejo-Release `v2.1.41` wurden jeweils mit Installer, Portable-Build, Blockmap und einem zum Anbieter passenden Update-Manifest veröffentlicht.
 - Der von Version `2.1.40` verwendete Forgejo-Endpoint liefert `2.1.41` als neuesten stabilen Release.
