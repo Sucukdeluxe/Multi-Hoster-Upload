@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.42`; freigegebenes Release-Ziel `2.1.43` enthält den Status-Badge-Fix aus `69e1f26`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.43`, Release-Commit `5311cdf`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -25,7 +25,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Backup-Importe wenden Sprache und automatischen Account-Check sofort an. Alle Konfigurationsfelder werden übertragen; Warteschlange, Upload-Wiederherstellungsstatus, letzter Dateiauswahlordner, Automatik-Telemetrie und Pausenzustand bleiben bewusst geräte- beziehungsweise laufzeitgebunden.
 - Ein nicht vorhandener Ordnerüberwachungspfad bleibt nach dem Import sichtbar gespeichert, die Überwachung wird aber deaktiviert und der Nutzer erhält eine Warnung. Ein nicht vorhandener Log-Ordner wird ebenfalls gemeldet, ohne den konfigurierten Pfad still zu löschen.
 - Upload-Status-Badges und ihre Textlabels sind nicht markierbar; kopierbare Fehlerdetails, Logs und Eingabefelder behalten ihre Textauswahl.
-- Version `2.1.42` ist als GitHub- und Forgejo-Release veröffentlicht; Version `2.1.43` ist ausdrücklich freigegeben und benötigt keine Änderung an Backup-API `2.0.4`.
+- Version `2.1.43` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei diesem reinen Oberflächen-Release unverändert aktiv.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
 - Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.43.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
@@ -56,7 +56,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
-- Anwendungsversion `2.1.43` mit vier Assets und anbieterspezifischen Update-Metadaten auf GitHub und Forgejo veröffentlichen; Rollback-Ziel ist Version `2.1.42`.
+- Keine offenen Schritte für Release `v2.1.43`; Rollback-Ziel ist Anwendungsversion `2.1.42`.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
@@ -68,8 +68,8 @@ Stand: 02.09.2026
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
-- Release-Commit `f7aa1d4` und der annotierte Tag `v2.1.42` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
-- GitHub- und Forgejo-Release `v2.1.42` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.
-- Der echte Updater mit installierter Version `2.1.41` erkennt Forgejo-Release `v2.1.42`, lädt den englischen GitHub-Changelog und akzeptiert Version, Installername, Größe und SHA-512 des veröffentlichten Manifests.
+- Release-Commit `5311cdf` und der annotierte Tag `v2.1.43` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
+- GitHub- und Forgejo-Release `v2.1.43` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.
+- Der echte Updater mit installierter Version `2.1.42` erkennt Forgejo-Release `v2.1.43`, lädt den englischen GitHub-Changelog und akzeptiert Version, Installername, Größe und SHA-512 des veröffentlichten Manifests.
 - Backup-API `2.0.4` läuft produktiv aus `/opt/mhu-backup-api/releases/20260901T140230Z-v2.0.4`; der vorherige Dienststand und alle 10 bestehenden Datensätze wurden davor in `/var/backups/mhu-backup-api/20260901T140230Z-pre-v2.0.4.tar.gz` gesichert und per Gzip-Test sowie SHA-256 geprüft.
 - Der produktive HTTPS-Smoke für einen endlichen Testschlüssel bestätigte Erstellen `201`, Wiederherstellen `200`, Löschen `204` und anschließendes Nichtfinden `404`; danach waren weiterhin exakt 10 bestehende Datensätze vorhanden.
