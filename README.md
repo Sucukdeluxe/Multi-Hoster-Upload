@@ -8,7 +8,7 @@ Multi-Hoster-Upload is a Windows desktop application for sending file batches to
 
 Download the current Setup or Portable build from the [latest GitHub release](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest).
 
-The latest public release is version 2.1.42. Use the release page for the executables and the full English changelog.
+The latest public release is version 2.1.43. Use the release page for the executables and the full English changelog.
 
 ## Features
 
