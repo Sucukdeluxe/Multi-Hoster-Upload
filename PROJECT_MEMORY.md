@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.42`, Release-Commit `f7aa1d4`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.42`, Release-Commit `f7aa1d4`; danach wurde die Textauswahl in Upload-Status-Badges unveröffentlicht deaktiviert.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -24,6 +24,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Vorhandene Online-Backups und alte Upload-Payloads ohne Ablaufangabe bleiben zur Abwärtskompatibilität unbegrenzt gültig.
 - Backup-Importe wenden Sprache und automatischen Account-Check sofort an. Alle Konfigurationsfelder werden übertragen; Warteschlange, Upload-Wiederherstellungsstatus, letzter Dateiauswahlordner, Automatik-Telemetrie und Pausenzustand bleiben bewusst geräte- beziehungsweise laufzeitgebunden.
 - Ein nicht vorhandener Ordnerüberwachungspfad bleibt nach dem Import sichtbar gespeichert, die Überwachung wird aber deaktiviert und der Nutzer erhält eine Warnung. Ein nicht vorhandener Log-Ordner wird ebenfalls gemeldet, ohne den konfigurierten Pfad still zu löschen.
+- Upload-Status-Badges und ihre Textlabels sind nicht markierbar; kopierbare Fehlerdetails, Logs und Eingabefelder behalten ihre Textauswahl.
 - Version `2.1.42` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` wurde davor mit gesichertem Altstand produktiv ausgerollt.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
 - Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.42.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
@@ -56,16 +57,17 @@ npm audit --omit=dev
 ## Offene nächste Schritte
 
 - Keine offenen Schritte für Release `v2.1.42`; bei einer Störung sind der vorherige API-Symlink und Anwendungsversion `2.1.41` die geprüften Rollback-Ziele.
+- Der Status-Badge-Fix ist noch unveröffentlicht und benötigt für ein neues Release eine erneute ausdrückliche Freigabe.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
 
-Stand: 01.09.2026
+Stand: 02.09.2026
 
 - Lint: erfolgreich, 0 Warnungen und 0 Fehler.
 - Haupttests: 805 erfolgreich, 0 fehlgeschlagen.
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
-- Der vollständige opt-in UI-Smoke bestätigte alle neu ergänzten Prüfungen für fortlaufende Account-Statusmeldungen, Ablauf-Auswahl, Schlüsselbereinigung, Metadatenanzeige sowie sofortige Sprach-/Auto-Check-Übernahme; die 16 bekannten themenfremden Abweichungen blieben unverändert.
+- Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
 - Release-Commit `f7aa1d4` und der annotierte Tag `v2.1.42` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
 - GitHub- und Forgejo-Release `v2.1.42` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.

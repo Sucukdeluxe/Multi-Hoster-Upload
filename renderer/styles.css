@@ -36,11 +36,11 @@ body {
   flex-direction: column;
 }
 
-:where(button, select, option, label, .app-header, .menu-bar, .view-sidebar, .settings-sidebar, .queue-table th, .recent-files-table th, .history-table th, .resize-handle, .context-menu, .modal-header, .modal-footer, .account-card-drag-handle, .account-hoster-group-header, .account-hoster-settings-header) {
+:where(button, select, option, label, .app-header, .menu-bar, .view-sidebar, .settings-sidebar, .queue-table th, .recent-files-table th, .history-table th, .resize-handle, .context-menu, .modal-header, .modal-footer, .account-card-drag-handle, .account-hoster-group-header, .account-hoster-settings-header, .status-badge, .status-badge *) {
   user-select: none;
 }
 
-:where(.status-badge, .health-badge, .account-status, .panel-status, .account-modal-status, .online-backup-status, .health-check-results, .account-hoster-group-meta.error, .recent-file-row.error, .history-row.error, .log-file-path-row .key-input, .log-paths-list, .log-paths-list *, #jobLogBody, .update-release-notes, .update-release-notes *, .history-link-text, .copy-toast) {
+:where(.health-badge, .account-status, .panel-status, .account-modal-status, .online-backup-status, .health-check-results, .account-hoster-group-meta.error, .recent-file-row.error, .history-row.error, .log-file-path-row .key-input, .log-paths-list, .log-paths-list *, #jobLogBody, .update-release-notes, .update-release-notes *, .history-link-text, .copy-toast) {
   user-select: text;
 }
 

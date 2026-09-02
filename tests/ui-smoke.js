@@ -2130,6 +2130,9 @@ setTimeout(async () => {
     if (!explicitDynamicEnglishValid) console.log('Explicit dynamic English: ' + JSON.stringify(explicitDynamicEnglish));
     check('English runtime statuses, status tooltips, toast, and shutdown copy are localized', explicitDynamicEnglishValid);
 
+    const queueStatusSelection = await wc.executeJavaScript('(() => { const badge = document.querySelector("#queueBody .status-badge"); const label = badge?.querySelector(".status-badge-label"); return [badge, label].map(element => element ? getComputedStyle(element).userSelect : "missing"); })()');
+    check('Queue status badges and labels cannot be text-selected', queueStatusSelection.join('|') === 'none|none');
+
     const englishSettingsSearch = await wc.executeJavaScript(\`(() => {
       document.querySelector('.tab[data-view="settings"]').click();
       const search = document.getElementById('settingsSearchInput');
