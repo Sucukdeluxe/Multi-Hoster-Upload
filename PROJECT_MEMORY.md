@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.43`; freigegebenes Release-Ziel `2.1.44` enthält den VOE-Rotationsfix aus `c8838d3`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.44`, Release-Commit `e191ea8`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -26,9 +26,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Ein nicht vorhandener Ordnerüberwachungspfad bleibt nach dem Import sichtbar gespeichert, die Überwachung wird aber deaktiviert und der Nutzer erhält eine Warnung. Ein nicht vorhandener Log-Ordner wird ebenfalls gemeldet, ohne den konfigurierten Pfad still zu löschen.
 - Upload-Status-Badges und ihre Textlabels sind nicht markierbar; kopierbare Fehlerdetails, Logs und Eingabefelder behalten ihre Textauswahl.
 - VOE-Fehler mit der Meldung `Maximum storage space of the account used up.` gelten als temporärer Accountfehler. Die Retry-Schleife bricht auch nach einem bereits erfolgten Account-Wechsel sofort ab und setzt die Fallback-Kette Account für Account fort, bis ein Upload gelingt oder kein weiterer Account verfügbar ist.
-- Version `2.1.43` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei diesem reinen Oberflächen-Release unverändert aktiv.
+- Version `2.1.44` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei diesem reinen Desktop-Release unverändert aktiv.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
-- Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.43.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
+- Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.44.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
 
 ## Start- und Testbefehle
@@ -57,7 +57,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
-- Anwendungsversion `2.1.44` mit vier Assets und anbieterspezifischen Update-Metadaten auf GitHub und Forgejo veröffentlichen; Rollback-Ziel ist Version `2.1.43`.
+- Keine offenen Schritte für Release `v2.1.44`; Rollback-Ziel ist Anwendungsversion `2.1.43`.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
@@ -71,8 +71,9 @@ Stand: 07.09.2026
 - Das Support-Bundle vom 07.09.2026 bestätigt als Ursache der gemeldeten Datei: Wechsel vom Primäraccount auf `Fallback #1`, dort vier unnötige Versuche, anschließend `skip-account-pause` und Abbruch mit `override-same-as-current` statt Weiterschaltung.
 - Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
-- Release-Commit `5311cdf` und der annotierte Tag `v2.1.43` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
-- GitHub- und Forgejo-Release `v2.1.43` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.
-- Der echte Updater mit installierter Version `2.1.42` erkennt Forgejo-Release `v2.1.43`, lädt den englischen GitHub-Changelog und akzeptiert Version, Installername, Größe und SHA-512 des veröffentlichten Manifests.
+- Release-Commit `e191ea8` und der annotierte Tag `v2.1.44` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
+- GitHub- und Forgejo-Release `v2.1.44` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.
+- Der echte Updater mit installierter Version `2.1.43` erkennt Forgejo-Release `v2.1.44`, lädt den englischen GitHub-Changelog und akzeptiert Version, Installername, Größe und SHA-512 des veröffentlichten Manifests.
+- Der öffentliche Release-Quellcheck bestätigte 160 erlaubte Dateien, korrekte Versionsmetadaten und gültige Screenshots. Der über den Forgejo-Updatepfad erneut geladene Installer ist 98.029.932 Bytes groß, stimmt mit der Manifest-SHA-512 überein und trägt Datei- sowie Produktversion `2.1.44`.
 - Backup-API `2.0.4` läuft produktiv aus `/opt/mhu-backup-api/releases/20260901T140230Z-v2.0.4`; der vorherige Dienststand und alle 10 bestehenden Datensätze wurden davor in `/var/backups/mhu-backup-api/20260901T140230Z-pre-v2.0.4.tar.gz` gesichert und per Gzip-Test sowie SHA-256 geprüft.
 - Der produktive HTTPS-Smoke für einen endlichen Testschlüssel bestätigte Erstellen `201`, Wiederherstellen `200`, Löschen `204` und anschließendes Nichtfinden `404`; danach waren weiterhin exakt 10 bestehende Datensätze vorhanden.
