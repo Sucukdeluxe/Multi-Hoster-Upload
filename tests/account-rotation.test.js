@@ -238,6 +238,7 @@ test('account failure classification cools down quota and rate-limit errors with
   const quota = new Error('not enough disk space on your account');
   quota.accountError = true;
   assert.equal(classifyAccountFailure(quota), 'cooldown');
+  assert.equal(classifyAccountFailure(new Error('Maximum storage space of the account used up.')), 'cooldown');
   assert.equal(classifyAccountFailure(new Error('HTTP 429 Too Many Requests')), 'cooldown');
   const transient = new Error('HTTP 503 Service Unavailable');
   transient.transientNetwork = true;

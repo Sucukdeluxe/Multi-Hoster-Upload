@@ -1111,6 +1111,13 @@ describe('UploadManager', () => {
         'must not match generic "lehnte Datei ab" as file-rejected');
     });
 
+    it('classifies VOE storage exhaustion by message alone', () => {
+      const mgr = new UploadManager({});
+      const err = new Error('Maximum storage space of the account used up.');
+      assert.equal(mgr._shouldSkipRetryOnAccountError(err), true);
+      assert.equal(mgr._isFileRejectedError(err), false);
+    });
+
     it('keeps true file rejections as file-rejected', () => {
       const mgr = new UploadManager({});
       const err = new Error('Byse lehnte Datei ab: Duplicate');
@@ -1167,6 +1174,45 @@ describe('UploadManager', () => {
 
       assert.deepEqual(pauses, [{ hoster: 'byse.sx', accountId: 'full', mode: 'cooldown' }]);
       assert.deepEqual(successes, [{ hoster: 'byse.sx', accountId: 'fallback' }]);
+    });
+
+    it('advances through every VOE fallback after storage exhaustion', async () => {
+      const accounts = [
+        { id: 'primary', apiKey: 'key-1' },
+        { id: 'fallback-1', apiKey: 'key-2' },
+        { id: 'fallback-2', apiKey: 'key-3' },
+        { id: 'fallback-3', apiKey: 'key-4' }
+      ];
+      const attempts = [];
+      mockUploadFile.mock.mockImplementation(async (hoster, filePath, apiKey, onProgress) => {
+        attempts.push(apiKey);
+        if (apiKey !== 'key-4') throw new Error('Maximum storage space of the account used up.');
+        if (onProgress) onProgress(fakeFileSize, fakeFileSize);
+        return { download_url: 'https://voe.sx/final', embed_url: null, file_code: 'final' };
+      });
+      const mgr = new UploadManager({ 'voe.sx': { retries: 3, parallelCount: 1, rotateAccounts: false } });
+      mgr._sleep = async () => {};
+      const paused = [];
+      const completed = [];
+      mgr.on('account-paused', event => paused.push(event));
+      mgr.on('progress', event => {
+        if (event.status === 'done') completed.push(event.accountId);
+      });
+      mgr.on('account-failed', ({ hoster, accountId }) => {
+        const failedIndex = accounts.findIndex(account => account.id === accountId);
+        const fallback = accounts[failedIndex + 1];
+        if (fallback) mgr.switchAccount(hoster, fallback);
+      });
+
+      await mgr.startBatch([
+        { file: '/test/voe-storage-full.mkv', hoster: 'voe.sx', accountId: 'primary', apiKey: 'key-1' }
+      ], {
+        primeOverrides: [['voe.sx', accounts[1]]]
+      });
+
+      assert.deepEqual(attempts, ['key-1', 'key-2', 'key-3', 'key-4']);
+      assert.deepEqual(paused.map(event => event.accountId), ['primary', 'fallback-1', 'fallback-2']);
+      assert.deepEqual(completed, ['fallback-3']);
     });
 
     it('emits a manual account pause for credential failures', async () => {
