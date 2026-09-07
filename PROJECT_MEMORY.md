@@ -7,7 +7,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.43`, Release-Commit `5311cdf`.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.43`; freigegebenes Release-Ziel `2.1.44` enthält den VOE-Rotationsfix aus `c8838d3`.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -57,8 +57,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
-- Keine offenen Schritte für Release `v2.1.43`; Rollback-Ziel ist Anwendungsversion `2.1.42`.
-- Der nach `v2.1.43` behobene VOE-Account-Rotationsfehler ist vollständig getestet, aber noch nicht als neue Anwendungsversion veröffentlicht.
+- Anwendungsversion `2.1.44` mit vier Assets und anbieterspezifischen Update-Metadaten auf GitHub und Forgejo veröffentlichen; Rollback-Ziel ist Version `2.1.43`.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
