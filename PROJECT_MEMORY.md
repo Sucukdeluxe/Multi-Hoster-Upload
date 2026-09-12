@@ -7,8 +7,8 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 ## Aktueller Zustand
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
-- Zuletzt veröffentlichter Funktionsstand: Version `2.1.44`, Release-Commit `e191ea8`.
-- Version `2.1.45` wird mit den DoodStream-Login-/Sitzungskorrekturen veröffentlicht. Beide Release-Changelogs benennen die weiterhin fehlgeschlagene Web-Serverermittlung ausdrücklich als bekanntes Problem; ein erfolgreicher Dateiupload wird nicht behauptet.
+- Zuletzt veröffentlichter Funktionsstand: Version `2.1.45`, Release-Commit `05769cd`.
+- Version `2.1.45` ist auf GitHub und Forgejo veröffentlicht. Beide Release-Changelogs benennen die weiterhin fehlgeschlagene DoodStream-Web-Serverermittlung ausdrücklich als bekanntes Problem; ein erfolgreicher Dateiupload wird nicht behauptet.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -29,7 +29,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - VOE-Fehler mit der Meldung `Maximum storage space of the account used up.` gelten als temporärer Accountfehler. Die Retry-Schleife bricht auch nach einem bereits erfolgten Account-Wechsel sofort ab und setzt die Fallback-Kette Account für Account fort, bis ein Upload gelingt oder kein weiterer Account verfügbar ist.
 - Der DoodStream-Weblogin folgt dem aktuellen Browservertrag über `GET /?op=login_ajax`, behandelt `otp_sent` und `redirect` ausdrücklich und übernimmt `sess_id` auch aus den aktuellen Vue-Daten mit URL-sicheren Sonderzeichen. Die Upload-Server-Ermittlung verwendet `/?op=upload_get_srv` und versteht dessen `server.srv_url`-/`server.disk_id`-Antwort.
 - Eine bestätigte DoodStream-Dashboard-Sitzung benötigt beim Account-Check kein Upload-Sessionfeld. Uploads übernehmen unabhängige Kopien der bestätigten Cookie-Sitzung aus dem OTP-Koordinator. Ein fehlender Upload-Server ist vom Login getrennt; bei Web-Accounts findet keine automatische API-Key-Ableitung für Uploads statt.
-- Version `2.1.44` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei dieser reinen Veröffentlichung der Desktopanwendung unverändert aktiv.
+- Version `2.1.45` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei dieser reinen Veröffentlichung der Desktopanwendung unverändert aktiv.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
 - Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.44.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
@@ -61,7 +61,7 @@ npm audit --omit=dev
 ## Offene nächste Schritte
 
 - DoodStream: Am 12.09.2026 wurde das authentifizierte Dashboard ohne `sess_id` live bestätigt. Der alte Upload-Aufruf lieferte eine andere Seite ohne Upload-Felder. Ein zwischenzeitlich getesteter API-Ausweichweg bestätigte zwar den Account, wurde auf Nutzerwunsch wieder entfernt; dessen Uploadversuch scheiterte serverseitig mit `No servers available for uploads`. Der aktuelle Web-Upload muss noch live auf Serververfügbarkeit und erfolgreichen Dateitransfer geprüft werden. Die lokale Seitendiagnose protokolliert ausschließlich Strukturmerkmale ohne Formularwerte, OTP oder Cookie-Werte.
-- Keine offenen Schritte für Release `v2.1.44`; Rollback-Ziel ist Anwendungsversion `2.1.43`.
+- Keine offenen Veröffentlichungsschritte für Release `v2.1.45`; Rollback-Ziel ist Anwendungsversion `2.1.44`. Das oben dokumentierte DoodStream-Uploadproblem bleibt offen.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
@@ -77,6 +77,9 @@ Stand: 12.09.2026
 - Das Support-Bundle vom 07.09.2026 bestätigt als Ursache der gemeldeten Datei: Wechsel vom Primäraccount auf `Fallback #1`, dort vier unnötige Versuche, anschließend `skip-account-pause` und Abbruch mit `override-same-as-current` statt Weiterschaltung.
 - Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.
+- Release `v2.1.45`: Commit `05769cd` und annotierter Tag sind auf beiden Remotes identisch. Die englischen GitHub- und deutschen Forgejo-Changelogs, Titel, Versionsangaben und jeweils vier Assets wurden nach der Veröffentlichung geprüft.
+- Der echte Updater mit installierter Version `2.1.44` erkennt `2.1.45` und akzeptiert den englischen GitHub-Changelog sowie das Forgejo-Manifest. Alle acht veröffentlichten Assets wurden heruntergeladen und per Größe sowie SHA-512 gegen die lokalen Dateien geprüft. Beide Manifeste zeigen auf den tatsächlichen Installer-Namen des jeweiligen Anbieters.
+- Der Installer `2.1.45` ist 98.031.439 Bytes groß, Portable 97.806.832 Bytes. Datei- und Produktversion stimmen mit `2.1.45` überein; die verpackten Kernmodule stimmen mit dem geprüften Quellcode überein, Nutzereinstellungen sind nicht enthalten. Der vollständige öffentliche Quellcheck einschließlich Screenshots war erfolgreich.
 - Release-Commit `e191ea8` und der annotierte Tag `v2.1.44` wurden auf GitHub und Forgejo mit identischen Commit-Hashes verifiziert.
 - GitHub- und Forgejo-Release `v2.1.44` enthalten jeweils Installer, Portable-Build, Blockmap und ein zum Anbieter passendes Update-Manifest; GitHub führt den englischen und Forgejo den inhaltlich gleichwertigen deutschen Changelog.
 - Der echte Updater mit installierter Version `2.1.43` erkennt Forgejo-Release `v2.1.44`, lädt den englischen GitHub-Changelog und akzeptiert Version, Installername, Größe und SHA-512 des veröffentlichten Manifests.
