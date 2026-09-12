@@ -8,6 +8,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
 - Zuletzt veröffentlichter Funktionsstand: Version `2.1.44`, Release-Commit `e191ea8`.
+- Version `2.1.45` wird mit den DoodStream-Login-/Sitzungskorrekturen veröffentlicht. Beide Release-Changelogs benennen die weiterhin fehlgeschlagene Web-Serverermittlung ausdrücklich als bekanntes Problem; ein erfolgreicher Dateiupload wird nicht behauptet.
 - Einstiegspunkt des Electron-Hauptprozesses: `main.js`.
 - Oberfläche: `renderer/`; gekapselte Fachlogik: `lib/`; Online-Backup-Dienst: `services/backup-api/`.
 - Die Abhängigkeiten sind lokal mit Node.js 24 installiert.
@@ -68,7 +69,7 @@ npm audit --omit=dev
 Stand: 12.09.2026
 
 - Lint: erfolgreich, 0 Warnungen und 0 Fehler.
-- Haupttests: vollständiger Lauf erfolgreich, 0 fehlgeschlagen.
+- Haupttests: 818 erfolgreich, 0 fehlgeschlagen (Release-Prüfung für `2.1.45`).
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der Regressionstest für die VOE-Fallback-Kette bestätigt bei deaktivierter normaler Rotation genau einen Versuch auf jedem vollen Account und anschließend den erfolgreichen Wechsel auf den vierten Account.
 - Der öffentliche DoodStream-Webablauf wurde am 12.09.2026 direkt gegen die Startseite und deren aktuelle Browser-Skripte geprüft. Regressionstests bilden den neuen GET-Login, `otp_sent`, `redirect`, Vue-Sessiontokens mit `_`/`-` und die aktuelle `upload_get_srv`-Antwort nach.
