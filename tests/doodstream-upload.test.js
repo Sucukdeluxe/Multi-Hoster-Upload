@@ -246,7 +246,7 @@ test('login cannot report success when the redirected session is still a guest',
       ? JSON.stringify({ status: 'redirect', message: '/dashboard' })
       : `<home-upload :upload="{ utype: 'anon', sess_id: '' }"></home-upload>`
   ));
-  await assert.rejects(up.login('user', 'password'), /guest=true; sessionField=true; cookies=0/);
+  await assert.rejects(up.login('user', 'password'), /sess_id nicht gefunden/);
   assert.equal(up.sessId, '');
 });
 
@@ -259,6 +259,56 @@ test('login redirect chains cannot forward session cookies to another origin', a
   });
   await assert.rejects(up._fetch('https://doodstream.com/dashboard', { allowedOrigin: 'https://doodstream.com' }), /Weiterleitungsziel/);
   assert.equal(calls, 1);
+});
+
+test('authenticated dashboard verifies web login without an upload token or API calls', async (t) => {
+  const up = new DoodstreamUploader();
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    const target = new URL(url);
+    assert.equal(target.hostname, 'doodstream.com');
+    if (target.searchParams.get('op') === 'login_ajax') {
+      return new Response(JSON.stringify({ status: 'redirect', message: '/dashboard' }), {
+        headers: { 'set-cookie': 'xfsts=SESSION; Path=/' }
+      });
+    }
+    return new Response('<a href="/settings">Settings</a><a href="/videos">Videos</a><a href="/?op=logout">Logout</a>');
+  });
+  await up.login('user', 'secret', '123456');
+  assert.equal(up.apiKey, '');
+  assert.equal(up.sessId, '');
+  assert.equal(up.cookies.get('xfsts'), 'SESSION');
+});
+
+test('an unverified settings token cannot make a missing-session login pass', async (t) => {
+  const up = new DoodstreamUploader();
+  t.mock.method(globalThis, 'fetch', async url => {
+    const target = new URL(url);
+    if (target.hostname === 'doodapi.co') return new Response(JSON.stringify({ status: 403 }));
+    if (target.searchParams.get('op') === 'login_ajax') return new Response(JSON.stringify({ status: 'success' }));
+    if (target.pathname === '/settings') return new Response('<label>API Key</label><input value="INVALIDKEY12345678901234567890">');
+    return new Response('');
+  });
+  await assert.rejects(up.login('user', 'secret'), /sess_id nicht gefunden/);
+  assert.equal(up.apiKey, '');
+});
+
+test('web server unavailability is a hoster failure rather than a missing login session', async () => {
+  const up = new DoodstreamUploader();
+  up._fetch = async () => new Response(JSON.stringify({ success: false, message: 'No servers available for uploads' }));
+  await assert.rejects(up._getUploadServer(), error => error.hosterTransient === true && /No servers available/.test(error.message));
+});
+
+test('parallel web uploads receive independent cookie and upload-session state', () => {
+  const up = new DoodstreamUploader();
+  up.cookies.set('xfsts', 'AUTH_SESSION');
+  up.sessId = 'UPLOAD_SESSION';
+  const first = up.cloneSession();
+  const second = up.cloneSession();
+  first.cookies.set('xfsts', 'CHANGED');
+  first.sessId = 'CHANGED';
+  assert.equal(second.cookies.get('xfsts'), 'AUTH_SESSION');
+  assert.equal(second.sessId, 'UPLOAD_SESSION');
+  assert.equal(up.cookies.get('xfsts'), 'AUTH_SESSION');
 });
 
 test('getUploadServer: parses the current upload_get_srv response', async () => {

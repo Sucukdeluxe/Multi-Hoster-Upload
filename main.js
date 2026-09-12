@@ -2343,7 +2343,9 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     return { started: true, taskCount: 0, skippedJobs };
   }
 
-  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config));
+  uploadManager = new UploadManager(config.hosterSettings || {}, config.globalSettings || {}, buildAccountPools(config), {
+    acquireDoodstreamSession: (task) => doodstreamHealthCoordinator.acquire({ username: task.username, password: task.password })
+  });
   globalThis._mhuUploadManagerRef = uploadManager;
   const _thisManager = uploadManager;
   await registerAutomationCompletionJobs(_thisManager, jobs);

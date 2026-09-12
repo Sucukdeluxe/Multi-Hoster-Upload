@@ -564,6 +564,7 @@
     ['Einstellungen konnten vor dem Update nicht gespeichert werden', 'Settings could not be saved before the update'],
     ['Das Update wurde nicht gestartet, weil die Einstellungen vor dem Beenden nicht gespeichert werden konnten', 'The update was not started because the settings could not be saved before quitting'],
     ['Login ok, Upload-Seite bereit', 'Login successful, upload page ready'],
+    ['Login erfolgreich', 'Login successful'],
     ['Login oder API Key fehlt', 'Login or API key is missing'],
     ['Account-Check lieferte kein gültiges JSON', 'Account check did not return valid JSON'],
     ['Account-Check fehlgeschlagen', 'Account check failed'],

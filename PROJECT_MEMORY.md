@@ -18,7 +18,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Die jüngste Automatik schützt erfolgreiche Uploads mit einem atomar gespeicherten Abschlussnachweis aus vollständigem Pfad, Hoster, Dateigröße und Änderungszeit.
 - Schlägt dieser Nachweis fehl, bleibt die Queue erhalten und der Fehler wird als lokale Persistenzstörung behandelt, damit kein stiller Doppel-Upload entsteht.
 - DoodStream-OTP-Prüfungen verwenden dieselbe Cookie-Sitzung weiter, fassen identische oder parallele Checks zusammen und fordern einen neuen Code nur nach einer ausdrücklichen Aktion mit mindestens 60 Sekunden Abstand an.
-- DoodStream-Accounts mit API-Key werden auch beim Health-Check über die API geprüft und lösen keinen Web-OTP aus.
+- DoodStream respektiert die ausdrückliche Auswahl `authType=login`: Weblogin und Webupload werden nicht durch einen zusätzlich gespeicherten API-Key übersteuert. API-Accounts und ältere Accounts ohne ausdrückliche Login-Auswahl behalten den API-Weg.
 - Sammelchecks melden jedes Account-Ergebnis einzeln an den Renderer, sodass fertige Karten sofort grün, rot oder als OTP-pflichtig erscheinen, während die übrigen Accounts weiter geprüft werden.
 - Neue Online-Backups unterstützen `24 Stunden`, `3 Tage`, `7 Tage` (Standard), `31 Tage` und `Unbegrenzt`. Endliche Schlüssel werden lokal aus dem verschlüsselten Schlüsselbund entfernt und serverseitig ab Ablauf nicht mehr wiederhergestellt; der Dienst räumt abgelaufene Datensätze bei Zugriff oder der nächsten Speicherung auf.
 - Vorhandene Online-Backups und alte Upload-Payloads ohne Ablaufangabe bleiben zur Abwärtskompatibilität unbegrenzt gültig.
@@ -27,6 +27,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Upload-Status-Badges und ihre Textlabels sind nicht markierbar; kopierbare Fehlerdetails, Logs und Eingabefelder behalten ihre Textauswahl.
 - VOE-Fehler mit der Meldung `Maximum storage space of the account used up.` gelten als temporärer Accountfehler. Die Retry-Schleife bricht auch nach einem bereits erfolgten Account-Wechsel sofort ab und setzt die Fallback-Kette Account für Account fort, bis ein Upload gelingt oder kein weiterer Account verfügbar ist.
 - Der DoodStream-Weblogin folgt dem aktuellen Browservertrag über `GET /?op=login_ajax`, behandelt `otp_sent` und `redirect` ausdrücklich und übernimmt `sess_id` auch aus den aktuellen Vue-Daten mit URL-sicheren Sonderzeichen. Die Upload-Server-Ermittlung verwendet `/?op=upload_get_srv` und versteht dessen `server.srv_url`-/`server.disk_id`-Antwort.
+- Eine bestätigte DoodStream-Dashboard-Sitzung benötigt beim Account-Check kein Upload-Sessionfeld. Uploads übernehmen unabhängige Kopien der bestätigten Cookie-Sitzung aus dem OTP-Koordinator. Ein fehlender Upload-Server ist vom Login getrennt; bei Web-Accounts findet keine automatische API-Key-Ableitung für Uploads statt.
 - Version `2.1.44` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei dieser reinen Veröffentlichung der Desktopanwendung unverändert aktiv.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
 - Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.44.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
@@ -58,7 +59,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
-- DoodStream: Der echte OTP-Test nach dem ersten Kompatibilitätsfix meldete weiterhin fehlendes `sess_id`. JSON- und HTTP-Weiterleitungen werden nun vor der Sessionprüfung aufgerufen, einschließlich der dort gesetzten Cookies. 35 gezielte Tests und Lint sind erfolgreich; ein erneuter echter OTP-Login steht aus. Die konkrete Ursache der Nutzersitzung ist noch nicht abschließend bestätigt. Fehlende Sessions liefern HTTP-Status, Gastseiten-/Sessionfeld-Erkennung und Cookie-Anzahl ohne Cookie-Werte oder Zugangsdaten.
+- DoodStream: Am 12.09.2026 wurde das authentifizierte Dashboard ohne `sess_id` live bestätigt. Der alte Upload-Aufruf lieferte eine andere Seite ohne Upload-Felder. Ein zwischenzeitlich getesteter API-Ausweichweg bestätigte zwar den Account, wurde auf Nutzerwunsch wieder entfernt; dessen Uploadversuch scheiterte serverseitig mit `No servers available for uploads`. Der aktuelle Web-Upload muss noch live auf Serververfügbarkeit und erfolgreichen Dateitransfer geprüft werden. Die lokale Seitendiagnose protokolliert ausschließlich Strukturmerkmale ohne Formularwerte, OTP oder Cookie-Werte.
 - Keine offenen Schritte für Release `v2.1.44`; Rollback-Ziel ist Anwendungsversion `2.1.43`.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
@@ -67,10 +68,11 @@ npm audit --omit=dev
 Stand: 12.09.2026
 
 - Lint: erfolgreich, 0 Warnungen und 0 Fehler.
-- Haupttests: 808 erfolgreich, 0 fehlgeschlagen.
+- Haupttests: vollständiger Lauf erfolgreich, 0 fehlgeschlagen.
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der Regressionstest für die VOE-Fallback-Kette bestätigt bei deaktivierter normaler Rotation genau einen Versuch auf jedem vollen Account und anschließend den erfolgreichen Wechsel auf den vierten Account.
 - Der öffentliche DoodStream-Webablauf wurde am 12.09.2026 direkt gegen die Startseite und deren aktuelle Browser-Skripte geprüft. Regressionstests bilden den neuen GET-Login, `otp_sent`, `redirect`, Vue-Sessiontokens mit `_`/`-` und die aktuelle `upload_get_srv`-Antwort nach.
+- Der lokale Web-Account-Check um 14:35:27 bestätigte das authentifizierte Dashboard ohne Upload-Sessionfeld. Regressionen prüfen zusätzlich explizite Web-Auswahl trotz gespeichertem API-Key, Wiederverwendung der OTP-Sitzung, getrennte Cookie-Kopien für parallele Uploads und Web-Serverausfälle. Der Upload-Aufruf verwendet nachweislich weder API-Ableitung noch einen zweiten Login.
 - Das Support-Bundle vom 07.09.2026 bestätigt als Ursache der gemeldeten Datei: Wechsel vom Primäraccount auf `Fallback #1`, dort vier unnötige Versuche, anschließend `skip-account-pause` und Abbruch mit `override-same-as-current` statt Weiterschaltung.
 - Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.

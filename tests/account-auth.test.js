@@ -49,6 +49,22 @@ function otpRequired(message = 'OTP erforderlich') {
   return error;
 }
 
+test('explicit web login is not overridden by a stored API key', () => {
+  assert.deepEqual(selectUploadAuth('doodstream.com', { authType: 'login', username: 'user', password: 'secret', apiKey: 'KEY' }), { username: 'user', password: 'secret' });
+});
+
+test('upload reuses the confirmed OTP session without another login', async () => {
+  let logins = 0;
+  const uploadSession = {};
+  const coordinator = createDoodstreamOtpCoordinator({
+    createUploader: () => ({ async login() { logins++; }, cloneSession: () => uploadSession })
+  });
+  const health = await coordinator.check({ username: 'user', password: 'secret' });
+  assert.equal(health.status, 'ok');
+  assert.equal(await coordinator.acquire({ username: 'user', password: 'secret' }), uploadSession);
+  assert.equal(logins, 1);
+});
+
 test('concurrent and repeated Doodstream checks request only one OTP', async () => {
   let loginCalls = 0;
   let releaseLogin;
@@ -87,7 +103,7 @@ test('Doodstream OTP verification reuses the challenged uploader session', async
   assert.equal((await coordinator.check({ username: 'user', password: 'secret' })).status, 'otp_required');
   assert.deepEqual(await coordinator.check({ username: 'user', password: 'secret', otp: '123456' }), {
     status: 'ok',
-    message: 'Login ok, Upload-Seite bereit'
+    message: 'Login erfolgreich'
   });
   assert.equal(created, 1);
   assert.deepEqual(calls, ['', '123456']);

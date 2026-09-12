@@ -70,6 +70,28 @@ describe('UploadManager', () => {
     assert.ok(events.length > 0, 'should emit at least one progress event');
   });
 
+  it('web-login uploads use the confirmed web session without API discovery or a second login', async () => {
+    let uploads = 0;
+    const mgr = new UploadManager({}, {}, {}, {
+      acquireDoodstreamSession: async task => {
+        assert.equal(task.username, 'user');
+        return {
+          async login() { throw new Error('must not request another OTP'); },
+          async upload(file) {
+            assert.equal(file, '/test/video.mp4');
+            uploads++;
+            return { file_code: 'WEBFILE123', download_url: 'https://doodstream.com/d/WEBFILE123' };
+          }
+        };
+      }
+    });
+    mgr._resolveDoodstreamApiKey = async () => { throw new Error('must not change web login to API'); };
+    const result = await mgr._executeUpload({ hoster: 'doodstream.com', file: '/test/video.mp4', username: 'user', password: 'secret' });
+    assert.equal(result.file_code, 'WEBFILE123');
+    assert.equal(uploads, 1);
+    assert.equal(mockUploadFile.mock.callCount(), 0);
+  });
+
   it('emits job-settled after releasing job resources', async () => {
     const mgr = new UploadManager({});
     let settled;
