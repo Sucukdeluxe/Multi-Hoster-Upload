@@ -215,6 +215,52 @@ test('_findSessId accepts the current Vue upload data and URL-safe tokens', () =
   assert.equal(up._findSessId(`<home-upload :upload="{ utype: 'anon', sess_id: '' }"></home-upload>`), '');
 });
 
+test('login follows the session-establishing redirect before loading the upload page', async (t) => {
+  const up = new DoodstreamUploader();
+  const requests = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const parsed = new URL(url);
+    const route = parsed.pathname + (parsed.searchParams.get('op') || '');
+    requests.push(route);
+    if (parsed.searchParams.get('op') === 'login_ajax') {
+      return new Response(JSON.stringify({ status: 'redirect', message: '/finish-login?ticket=TEST' }));
+    }
+    if (parsed.pathname === '/finish-login') {
+      return new Response('', { headers: { 'set-cookie': 'session=TEST; Path=/' } });
+    }
+    if (parsed.searchParams.get('op') === 'upload') {
+      assert.equal(options.headers.Cookie, 'session=TEST');
+      return new Response('<input name="sess_id" value="TEST_SESSION">');
+    }
+    return new Response('');
+  });
+  await up.login('user', 'password', '123456');
+  assert.deepEqual(requests, ['/', '/login_ajax', '/finish-login', '/upload']);
+  assert.equal(up.sessId, 'TEST_SESSION');
+});
+
+test('login cannot report success when the redirected session is still a guest', async (t) => {
+  const up = new DoodstreamUploader();
+  t.mock.method(globalThis, 'fetch', async url => new Response(
+    new URL(url).searchParams.get('op') === 'login_ajax'
+      ? JSON.stringify({ status: 'redirect', message: '/dashboard' })
+      : `<home-upload :upload="{ utype: 'anon', sess_id: '' }"></home-upload>`
+  ));
+  await assert.rejects(up.login('user', 'password'), /guest=true; sessionField=true; cookies=0/);
+  assert.equal(up.sessId, '');
+});
+
+test('login redirect chains cannot forward session cookies to another origin', async (t) => {
+  const up = new DoodstreamUploader();
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return new Response('', { status: 302, headers: { location: 'https://other.example/' } });
+  });
+  await assert.rejects(up._fetch('https://doodstream.com/dashboard', { allowedOrigin: 'https://doodstream.com' }), /Weiterleitungsziel/);
+  assert.equal(calls, 1);
+});
+
 test('getUploadServer: parses the current upload_get_srv response', async () => {
   const up = new DoodstreamUploader();
   up._fetch = async (url) => {

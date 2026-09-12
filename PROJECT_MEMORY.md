@@ -58,6 +58,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
+- DoodStream: Der echte OTP-Test nach dem ersten Kompatibilitätsfix meldete weiterhin fehlendes `sess_id`. JSON- und HTTP-Weiterleitungen werden nun vor der Sessionprüfung aufgerufen, einschließlich der dort gesetzten Cookies. 35 gezielte Tests und Lint sind erfolgreich; ein erneuter echter OTP-Login steht aus. Die konkrete Ursache der Nutzersitzung ist noch nicht abschließend bestätigt. Fehlende Sessions liefern HTTP-Status, Gastseiten-/Sessionfeld-Erkennung und Cookie-Anzahl ohne Cookie-Werte oder Zugangsdaten.
 - Keine offenen Schritte für Release `v2.1.44`; Rollback-Ziel ist Anwendungsversion `2.1.43`.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
