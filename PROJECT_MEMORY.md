@@ -26,7 +26,8 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 - Ein nicht vorhandener Ordnerüberwachungspfad bleibt nach dem Import sichtbar gespeichert, die Überwachung wird aber deaktiviert und der Nutzer erhält eine Warnung. Ein nicht vorhandener Log-Ordner wird ebenfalls gemeldet, ohne den konfigurierten Pfad still zu löschen.
 - Upload-Status-Badges und ihre Textlabels sind nicht markierbar; kopierbare Fehlerdetails, Logs und Eingabefelder behalten ihre Textauswahl.
 - VOE-Fehler mit der Meldung `Maximum storage space of the account used up.` gelten als temporärer Accountfehler. Die Retry-Schleife bricht auch nach einem bereits erfolgten Account-Wechsel sofort ab und setzt die Fallback-Kette Account für Account fort, bis ein Upload gelingt oder kein weiterer Account verfügbar ist.
-- Version `2.1.44` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei diesem reinen Desktop-Release unverändert aktiv.
+- Der DoodStream-Weblogin folgt dem aktuellen Browservertrag über `GET /?op=login_ajax`, behandelt `otp_sent` und `redirect` ausdrücklich und übernimmt `sess_id` auch aus den aktuellen Vue-Daten mit URL-sicheren Sonderzeichen. Die Upload-Server-Ermittlung verwendet `/?op=upload_get_srv` und versteht dessen `server.srv_url`-/`server.disk_id`-Antwort.
+- Version `2.1.44` ist als GitHub- und Forgejo-Release veröffentlicht; Backup-API `2.0.4` blieb bei dieser reinen Veröffentlichung der Desktopanwendung unverändert aktiv.
 - Der eingebaute Updater liest Releases und Binärdateien von Forgejo; GitHub liefert ergänzend die öffentlichen Release Notes. Ein Release ist deshalb erst vollständig, wenn die vier Assets auch im Forgejo-Release vorhanden sind.
 - Forgejo bewahrt Leerzeichen in Asset-Namen, GitHub normalisiert sie zu Punkten. Das Forgejo-`latest.yml` und der Release-Plan verwenden Namen wie `Multi-Hoster-Upload Setup 2.1.44.exe`; das GitHub-Manifest muss auf den dort tatsächlich veröffentlichten Punktnamen zeigen.
 - `forgejo/master` besitzt eine getrennte ältere Historie. Die aktuelle GitHub-Arbeitslinie wird deshalb zerstörungsfrei unter `forgejo/sync/github-master` gespiegelt.
@@ -62,12 +63,13 @@ npm audit --omit=dev
 
 ## Zuletzt verifiziert
 
-Stand: 07.09.2026
+Stand: 12.09.2026
 
 - Lint: erfolgreich, 0 Warnungen und 0 Fehler.
-- Haupttests: 807 erfolgreich, 0 fehlgeschlagen.
+- Haupttests: 808 erfolgreich, 0 fehlgeschlagen.
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der Regressionstest für die VOE-Fallback-Kette bestätigt bei deaktivierter normaler Rotation genau einen Versuch auf jedem vollen Account und anschließend den erfolgreichen Wechsel auf den vierten Account.
+- Der öffentliche DoodStream-Webablauf wurde am 12.09.2026 direkt gegen die Startseite und deren aktuelle Browser-Skripte geprüft. Regressionstests bilden den neuen GET-Login, `otp_sent`, `redirect`, Vue-Sessiontokens mit `_`/`-` und die aktuelle `upload_get_srv`-Antwort nach.
 - Das Support-Bundle vom 07.09.2026 bestätigt als Ursache der gemeldeten Datei: Wechsel vom Primäraccount auf `Fallback #1`, dort vier unnötige Versuche, anschließend `skip-account-pause` und Abbruch mit `override-same-as-current` statt Weiterschaltung.
 - Der vollständige opt-in UI-Smoke bestätigte zusätzlich, dass Upload-Status-Badges und deren Labels nicht markierbar sind; die 16 bekannten themenfremden Abweichungen blieben unverändert.
 - Produktionsabhängigkeiten: `npm audit --omit=dev` meldet 0 Schwachstellen.

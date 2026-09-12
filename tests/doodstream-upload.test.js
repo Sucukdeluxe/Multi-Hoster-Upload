@@ -168,24 +168,27 @@ test('OTP verification keeps the challenged cookie session without another boots
   let loginCalls = 0;
   up._fetch = async () => {
     bootstrapCalls++;
-    return fakeRes(bootstrapCalls === 1 ? 'ok' : '<input type="hidden" name="sess_id" value="SESSION456">');
+    return fakeRes(bootstrapCalls === 1 ? 'ok' : `<home-upload :upload="{ utype: 'reg', sess_id: 'SESSION_456-X' }"></home-upload>`);
   };
-  globalThis.fetch = async (_url, options) => {
+  globalThis.fetch = async (url, options) => {
     loginCalls++;
+    assert.match(url, /\?op=login_ajax&/u);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.body, undefined);
     if (loginCalls === 1) {
       assert.equal(options.headers.Cookie, undefined);
       return {
         status: 200,
         headers: { getSetCookie: () => ['otp_session=SESSION123; Path=/'], get: () => null },
-        text: async () => JSON.stringify({ status: 'fail', message: 'OTP required' })
+        text: async () => JSON.stringify({ status: 'otp_sent', message: 'Verification code has been sent' })
       };
     }
     assert.equal(options.headers.Cookie, 'otp_session=SESSION123');
-    assert.match(options.body, /loginotp=123456/u);
+    assert.match(url, /loginotp=123456/u);
     return {
-      status: 302,
-      headers: { getSetCookie: () => [], get: () => '/dashboard' },
-      text: async () => ''
+      status: 200,
+      headers: { getSetCookie: () => [], get: () => null },
+      text: async () => JSON.stringify({ status: 'redirect', message: '/?op=my_account' })
     };
   };
   try {
@@ -193,24 +196,38 @@ test('OTP verification keeps the challenged cookie session without another boots
     await up.login('user', 'secret', '123456');
     assert.equal(bootstrapCalls, 2);
     assert.equal(loginCalls, 2);
+    assert.equal(up.sessId, 'SESSION_456-X');
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('getUploadServer: returns JSON result when present', async () => {
+test('_findSessId accepts the current Vue upload data and URL-safe tokens', () => {
+  const up = new DoodstreamUploader();
+  assert.equal(
+    up._findSessId(`<home-upload :upload="{ utype: 'reg', sess_id: 'abc_DEF-123' }"></home-upload>`),
+    'abc_DEF-123'
+  );
+  assert.equal(
+    up._findSessId('<home-upload :upload="{ &quot;sess_id&quot;: &quot;abc_DEF-456&quot; }"></home-upload>'),
+    'abc_DEF-456'
+  );
+  assert.equal(up._findSessId(`<home-upload :upload="{ utype: 'anon', sess_id: '' }"></home-upload>`), '');
+});
+
+test('getUploadServer: parses the current upload_get_srv response', async () => {
   const up = new DoodstreamUploader();
   up._fetch = async (url) => {
-    assert.match(url, /op=upload_server/);
-    return fakeRes(JSON.stringify({ result: 'https://node42.cloudatacdn.com/upload/01' }), { ctype: 'application/json' });
+    assert.match(url, /op=upload_get_srv/);
+    return fakeRes(JSON.stringify({ success: true, server: { srv_url: 'https://node42.cloudatacdn.com', disk_id: '01' } }), { ctype: 'application/json' });
   };
-  assert.equal(await up._getUploadServer(), 'https://node42.cloudatacdn.com/upload/01');
+  assert.match(await up._getUploadServer(), /^https:\/\/node42\.cloudatacdn\.com\/upload\/01\?t=\d+$/u);
 });
 
 test('getUploadServer: falls back to srv_url in upload-page HTML', async () => {
   const up = new DoodstreamUploader();
   up._fetch = async (url) => {
-    if (/op=upload_server/.test(url)) return fakeRes('<html>not json</html>');
+    if (/op=upload_get_srv/.test(url)) return fakeRes('<html>not json</html>');
     return fakeRes('<script>var srv_url: "https://node7.cloudatacdn.com/upload/01";</script>');
   };
   assert.equal(await up._getUploadServer(), 'https://node7.cloudatacdn.com/upload/01');
@@ -220,18 +237,18 @@ test('getUploadServer: parses current form-action node and refreshes sess_id fro
   const up = new DoodstreamUploader();
   up.sessId = 'stale-from-login';
   up._fetch = async (url) => {
-    if (/op=upload_server/.test(url)) return fakeRes('<html>not json</html>');
-    return fakeRes('<form name="file" enctype="multipart/form-data" action="https://n9.cloudatacdn.com/upload/01?FRESH123" method="post"><input type="hidden" name="sess_id" value="FRESH123"></form>');
+    if (/op=upload_get_srv/.test(url)) return fakeRes('<html>not json</html>');
+    return fakeRes('<form name="file" enctype="multipart/form-data" action="https://n9.cloudatacdn.com/upload/01?FRESH_123-X" method="post"><input type="hidden" name="sess_id" value="FRESH_123-X"></form>');
   };
   const url = await up._getUploadServer();
-  assert.equal(url, 'https://n9.cloudatacdn.com/upload/01?FRESH123');
-  assert.equal(up.sessId, 'FRESH123'); // critical: form-field token must match the node URL token
+  assert.equal(url, 'https://n9.cloudatacdn.com/upload/01?FRESH_123-X');
+  assert.equal(up.sessId, 'FRESH_123-X'); // critical: form-field token must match the node URL token
 });
 
 test('getUploadServer: un-escapes &amp; in the form-action query string', async () => {
   const up = new DoodstreamUploader();
   up._fetch = async (url) => {
-    if (/op=upload_server/.test(url)) return fakeRes('<html>not json</html>');
+    if (/op=upload_get_srv/.test(url)) return fakeRes('<html>not json</html>');
     return fakeRes('<form name="file" enctype="multipart/form-data" action="https://n9.cloudatacdn.com/upload/01?a=1&amp;b=2" method="post"></form>');
   };
   assert.equal(await up._getUploadServer(), 'https://n9.cloudatacdn.com/upload/01?a=1&b=2');
