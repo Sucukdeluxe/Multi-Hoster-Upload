@@ -60,7 +60,8 @@ function createFixture(overrides = {}) {
         id: entry.id,
         displayKey: `${key.slice(0, 9)}…${key.slice(-4)}`,
         createdAt: entry.createdAt,
-        expiresAt: entry.expiresAt ?? null
+        expiresAt: entry.expiresAt ?? null,
+        ...(entry.sourceIp ? { sourceIp: entry.sourceIp } : {})
       });
     },
     getKey: async (entryId) => {
@@ -101,6 +102,7 @@ function createFixture(overrides = {}) {
       events.push('upload');
       assert.equal(uploadedRecord, record);
       if (overrides.uploadError) throw overrides.uploadError;
+      return overrides.uploadMetadata;
     },
     deleteBackup: async (value) => {
       events.push(`delete:${value}`);
@@ -176,6 +178,15 @@ function deleteVerifier(value) {
 }
 
 describe('transactional online backup manager', () => {
+  it('keeps server-provided source IP in the committed and listed metadata', async () => {
+    const fixture = createFixture({ initialKey: null, uploadMetadata: { sourceIp: '2001:db8::1' } });
+    const created = await fixture.manager.createManaged();
+    assert.equal(created.ok, true);
+    assert.equal(created.entry.sourceIp, '2001:db8::1');
+    const listed = await fixture.manager.listManaged();
+    assert.equal(listed.entries[0].sourceIp, '2001:db8::1');
+    assert.ok(!JSON.stringify(listed).includes(key));
+  });
   it('creates in prepare, upload, commit order and returns only the sanitized entry', async () => {
     const fixture = createFixture({ initialKey: null });
 

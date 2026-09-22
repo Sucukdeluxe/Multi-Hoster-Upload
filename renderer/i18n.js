@@ -385,6 +385,7 @@
     ['Unbegrenzt (Standard)', 'Unlimited (default)'],
     ['31 Tage', '31 days'],
     ['Erstellt', 'Created'],
+    ['IP unbekannt', 'IP unknown'],
     ['Gültig bis', 'Valid until'],
     ['Unbegrenzt gültig', 'Valid indefinitely'],
     ['Auf diesem Gerät erstellt', 'Created on this device'],

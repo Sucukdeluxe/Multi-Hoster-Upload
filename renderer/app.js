@@ -3691,7 +3691,8 @@ function normalizeManagedOnlineBackups(entries) {
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const shape = Object.keys(entry).sort().join(',');
-    if (shape !== 'createdAt,displayKey,id' && shape !== 'createdAt,displayKey,expiresAt,id') continue;
+    if (shape !== 'createdAt,displayKey,id' && shape !== 'createdAt,displayKey,expiresAt,id' && shape !== 'createdAt,displayKey,expiresAt,id,sourceIp') continue;
+    if (shape.includes('sourceIp') && (typeof entry.sourceIp !== 'string' || !/^[0-9a-fA-F:.]{2,45}$/.test(entry.sourceIp))) continue;
     if (!isCanonicalManagedOnlineBackupId(entry.id)) continue;
     if (typeof entry.displayKey !== 'string' || !/^MHU2-[A-Za-z0-9_-]{4}…[A-Za-z0-9_-]{4}$/.test(entry.displayKey)) continue;
     const createdAt = new Date(entry.createdAt);
@@ -3703,7 +3704,7 @@ function normalizeManagedOnlineBackups(entries) {
       expiresAt = entry.expiresAt;
     }
     if (expiresAt !== null && new Date(expiresAt).getTime() <= Date.now()) continue;
-    candidates.push({ id: entry.id, displayKey: entry.displayKey, createdAt: entry.createdAt, expiresAt });
+    candidates.push({ id: entry.id, displayKey: entry.displayKey, createdAt: entry.createdAt, expiresAt, ...(entry.sourceIp ? { sourceIp: entry.sourceIp } : {}) });
   }
   const counts = new Map();
   for (const entry of candidates) counts.set(entry.id, (counts.get(entry.id) || 0) + 1);
@@ -3784,7 +3785,7 @@ function renderManagedOnlineBackups(focusTarget = undefined) {
       const created = document.createElement('span');
       created.className = 'online-backup-managed-created';
       const createdLabel = document.createElement('span');
-      createdLabel.textContent = `${localizeUiText('Erstellt')}: ${formatDateTime(entry.createdAt).text}`;
+      createdLabel.textContent = `${localizeUiText('Erstellt')}: ${formatDateTime(entry.createdAt).text} | ${entry.sourceIp ? `IP: ${entry.sourceIp}` : localizeUiText('IP unbekannt')}`;
       const expirationLabel = document.createElement('span');
       expirationLabel.textContent = entry.expiresAt
         ? `${localizeUiText('Gültig bis')}: ${formatDateTime(entry.expiresAt).text}`

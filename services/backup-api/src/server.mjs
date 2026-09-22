@@ -261,7 +261,7 @@ async function recordExists(rootDir, id) {
   }
 }
 
-async function createRecord(rootDir, payload, maxStorageBytes, maxRecords, nowMs) {
+async function createRecord(rootDir, payload, maxStorageBytes, maxRecords, nowMs, sourceIp) {
   await mkdir(rootDir, { recursive: true })
   await cleanupTemporaryFiles(rootDir)
   await cleanupExpiredRecords(rootDir, nowMs)
@@ -271,7 +271,8 @@ async function createRecord(rootDir, payload, maxStorageBytes, maxRecords, nowMs
     : null
   const expiresAt = expiresInSeconds === null ? null : new Date(nowMs + expiresInSeconds * 1000).toISOString()
   const contents = Buffer.from(JSON.stringify({
-    version: payload.recovery ? 3 : 2,
+    version: 4,
+    sourceIp,
     ...(payload.recovery ? { recovery: payload.recovery } : {}),
     blob: payload.blob,
     deleteVerifier: payload.deleteVerifier,
@@ -342,7 +343,10 @@ async function readRecord(rootDir, id) {
       && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
       && isCanonicalTimestamp(record.createdAt)
     const expiring = ((keys === 'blob,createdAt,deleteVerifier,expiresAt,version' && record.version === 2)
-      || (keys === 'blob,createdAt,deleteVerifier,expiresAt,recovery,version' && record.version === 3 && validRecovery(record.recovery)))
+      || (keys === 'blob,createdAt,deleteVerifier,expiresAt,recovery,version' && record.version === 3 && validRecovery(record.recovery))
+      || (record.version === 4 && typeof record.sourceIp === 'string' && isIP(record.sourceIp)
+        && (keys === 'blob,createdAt,deleteVerifier,expiresAt,sourceIp,version'
+          || (keys === 'blob,createdAt,deleteVerifier,expiresAt,recovery,sourceIp,version' && validRecovery(record.recovery)))))
       && validBlob
       && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
       && isCanonicalTimestamp(record.createdAt)
@@ -620,9 +624,15 @@ export function createBackupServer(options) {
             sendJson(response, 429, { error: 'rate_limited' })
             return
           }
+          let createdAtMs
+          const sourceIp = address.startsWith('::ffff:') && isIP(address.slice(7)) === 4 ? address.slice(7) : address
+          if (!isIP(sourceIp)) throw new Error('Invalid client address')
           const result = await runStorageMutation(() => withStorageLock(
             options.rootDir,
-            () => createRecord(options.rootDir, parsed.value, maxStorageBytes, maxRecords, Number(now()))
+            () => {
+              createdAtMs = Number(now())
+              return createRecord(options.rootDir, parsed.value, maxStorageBytes, maxRecords, createdAtMs, sourceIp)
+            }
           ))
           if (result === 'duplicate') {
             sendJson(response, 409, { error: 'already_exists' })
@@ -632,7 +642,7 @@ export function createBackupServer(options) {
             sendJson(response, 507, { error: 'insufficient_storage' })
             return
           }
-          sendJson(response, 201, { created: true })
+          sendJson(response, 201, { created: true, sourceIp, createdAt: new Date(createdAtMs).toISOString() })
           return
         } finally {
           bodyConcurrency.leave(address)

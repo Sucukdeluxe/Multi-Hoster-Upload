@@ -76,6 +76,7 @@ test('creates immutable ciphertext records and restores them after a restart', a
     body: JSON.stringify(backup.payload)
   })
   assert.equal(created.status, 201)
+  assert.equal((await created.json()).sourceIp, '127.0.0.1')
   await new Promise((resolve) => api.server.close(resolve))
 
   api.server = createBackupServer({ rootDir: api.rootDir, allowedOrigins: [allowedOrigin] })
@@ -157,7 +158,7 @@ test('expires finite backups at the exact deadline and removes their ciphertext'
   assert.equal(created.status, 201)
   const storedPath = join(api.rootDir, `${backup.payload.id}.json`)
   const stored = JSON.parse(await readFile(storedPath, 'utf8'))
-  assert.equal(stored.version, 2)
+  assert.equal(stored.version, 4)
   assert.equal(stored.expiresAt, '2026-09-02T10:00:00.000Z')
 
   const beforeDeadline = await request(api, '/v1/backups/restore', {
@@ -345,6 +346,35 @@ test('uses the last forwarded address from an explicitly trusted proxy', async (
 
   assert.equal((await restore('198.51.100.1, 203.0.113.9')).status, 404)
   assert.equal((await restore('198.51.100.2, 203.0.113.9')).status, 429)
+})
+
+test('stores only server-derived source IP and keeps it out of public restore responses', async t => {
+  for (const [trustedProxy, forwarded, expected] of [
+    [false, '198.51.100.2', '127.0.0.1'],
+    [true, '198.51.100.2, 203.0.113.9', '203.0.113.9'],
+    [true, '2001:db8::42', '2001:db8::42'],
+    [true, 'invalid', '127.0.0.1']
+  ]) {
+    const api = await startApi({ trustedProxy, trustedProxyAddresses: ['127.0.0.1'] })
+    t.after(() => api.close())
+    const backup = fixture()
+    const create = payload => request(api, '/v1/backups', { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': forwarded }, body: JSON.stringify(payload) })
+    assert.equal((await create({ ...backup.payload, sourceIp: '192.0.2.1' })).status, 400)
+    const created = await create(backup.payload)
+    assert.equal(created.status, 201)
+    const metadata = await created.json()
+    assert.equal(metadata.sourceIp, expected)
+    const file = join(api.rootDir, `${backup.payload.id}.json`)
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(stored.sourceIp, expected)
+    assert.equal(stored.createdAt, metadata.createdAt)
+    const restoreRecord = () => request(api, '/v1/backups/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: backup.payload.id }) })
+    assert.deepEqual(await (await restoreRecord()).json(), { blob: backup.payload.blob })
+    delete stored.sourceIp
+    stored.version = 2
+    await writeFile(file, JSON.stringify(stored))
+    assert.equal((await restoreRecord()).status, 200)
+  }
 })
 
 test('keeps concurrency leases until storage mutations finish', async (t) => {

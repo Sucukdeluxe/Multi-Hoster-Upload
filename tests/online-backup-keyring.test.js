@@ -70,6 +70,20 @@ function writeKeyring(filePath, keys, generation = null) {
 }
 
 describe('encrypted online backup keyring', () => {
+  it('persists valid source IPs across reloads alongside legacy entries', async () => {
+    const { keyring, filePath } = fixture();
+    const first = { ...keyring.prepare(validKey(), timestamp), sourceIp: '2001:db8::42' };
+    await keyring.commit(first);
+    await keyring.commit(keyring.prepare(validKey(), timestamp));
+    const listed = await keyring.list();
+    assert.equal(listed.issues.length, 0);
+    assert.equal(listed.entries.find(entry => entry.id === first.id).sourceIp, '2001:db8::42');
+    assert.equal(JSON.parse(fs.readFileSync(filePath, 'utf8')).keys.find(entry => entry.id === first.id).sourceIp, '2001:db8::42');
+    await assert.rejects(keyring.commit({ ...keyring.prepare(validKey(), timestamp), sourceIp: 'invalid' }));
+    const removal = await keyring.prepareRemove(first.id);
+    await keyring.commitRemove(removal);
+    assert.equal((await keyring.list()).entries.length, 1);
+  });
   it('persists the spec keys schema without plaintext and returns frozen sanitized entries', async () => {
     const { filePath, keyring } = fixture();
     const key = validKey();

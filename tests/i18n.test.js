@@ -6,6 +6,14 @@ const espree = require('espree');
 
 const { normalizeLanguage, translateText } = require('../renderer/i18n');
 
+test('online backup metadata displays source IP without exposing full keys', () => {
+  assert.equal(translateText('IP unbekannt', 'en'), 'IP unknown');
+  assert.equal(translateText('IP unknown', 'de'), 'IP unbekannt');
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  assert.ok(source.includes('`IP: ${entry.sourceIp}`'));
+  assert.ok(source.includes('key.textContent = entry.displayKey;'));
+});
+
 test('online backup selection defaults to unlimited in both languages', () => {
   assert.equal(translateText('Unbegrenzt (Standard)', 'en'), 'Unlimited (default)');
   assert.equal(translateText('Unlimited (default)', 'de'), 'Unbegrenzt (Standard)');
