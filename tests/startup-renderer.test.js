@@ -140,7 +140,8 @@ app.whenReady().then(async () => {
     await wait(500);
     assert.equal((await state()).display, 'none');
     await js('document.querySelector(".menu-submenu-trigger").focus();document.querySelector(".menu-submenu-trigger").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowLeft",bubbles:true}))');
-    await wait(240);
+    const focusDeadline = Date.now() + 3000;
+    while (await js('document.activeElement.dataset.menuAction') !== 'backup-export' && Date.now() < focusDeadline) await wait(50);
     assert.equal(await js('document.activeElement.dataset.menuAction'), 'backup-export');
     await js('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
     await wait(240);
@@ -158,6 +159,58 @@ app.whenReady().then(async () => {
   const execution = spawnSync(path.join(root, 'node_modules/electron/dist/electron.exe'), [probe, '--user-data-dir=' + path.join(directory, 'profile')], {
     cwd: root, windowsHide: true, encoding: 'utf8', timeout: 20000,
     env: { ...process.env, MHU_MENU_ROOT: root, MHU_MENU_RESULT: result }
+  });
+  const data = fs.existsSync(result) ? JSON.parse(fs.readFileSync(result, 'utf8')) : {};
+  assert.equal(execution.status, 0, data.error || execution.stderr);
+  assert.equal(data.ok, true);
+});
+
+test('online backup validity controls match settings sizing and adapt without overflow', { skip: process.platform !== 'win32' }, t => {
+  const root = path.resolve(__dirname, '..');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-retention-layout-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const probe = path.join(directory, 'probe.cjs');
+  const result = path.join(directory, 'result.json');
+  fs.writeFileSync(probe, `
+const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+app.whenReady().then(async () => {
+  const root=process.env.MHU_RETENTION_ROOT;
+  const css=fs.readFileSync(path.join(root,'renderer/styles.css'),'utf8');
+  const source=fs.readFileSync(path.join(root,'renderer/app.js'),'utf8');
+  const footer=source.match(/<footer class="online-backup-footer"[\\s\\S]*?<\\/footer>/)[0];
+  const win=new BrowserWindow({show:false,width:1000,height:500,webPreferences:{backgroundThrottling:false}});
+  const wc=win.webContents;
+  for(const width of [1000,600,360]) {
+    win.setContentSize(width,500);
+    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><section class="online-backup-panel"><h3>Verschlüsseltes Online-Backup</h3><div class="online-backup-key-row"><label>Schlüssel importieren</label><input class="key-input"><button class="btn btn-secondary">Importieren</button></div><div class="online-backup-status"></div>'+footer+'</section></main>'));
+    const layout=await wc.executeJavaScript('(() => { const s=document.querySelector("select"), b=document.querySelector("footer button"), l=document.querySelector(".online-backup-retention-field label"), i=document.querySelector(".key-input"); const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height}}; return {select:rect(s),button:rect(b),input:rect(i),labelFont:getComputedStyle(l).fontSize,selectFont:getComputedStyle(s).fontSize,buttonFont:getComputedStyle(b).fontSize,arrowRight:getComputedStyle(s.parentElement,"::after").right,empty:getComputedStyle(document.querySelector(".online-backup-status")).display,scroll:document.documentElement.scrollWidth,viewport:innerWidth}; })()');
+    assert.equal(layout.select.height,40);
+    assert.equal(layout.button.height,40);
+    assert.equal(layout.selectFont,layout.buttonFont);
+    assert.equal(layout.labelFont,'14px');
+    assert.equal(layout.arrowRight,'14px');
+    assert.equal(layout.empty,'none');
+    assert.ok(layout.scroll<=layout.viewport);
+    assert.ok(layout.select.right<=layout.viewport-16);
+    if(width>820) { assert.equal(layout.select.top,layout.button.top); assert.equal(layout.select.left,layout.input.left); }
+    else assert.ok(layout.button.top>=layout.select.bottom);
+    await wc.executeJavaScript('document.querySelector(".online-backup-status").textContent="Status"');
+    assert.notEqual(await wc.executeJavaScript('getComputedStyle(document.querySelector(".online-backup-status")).display'),'none');
+    if(process.env.MHU_RETENTION_SCREENSHOT && width===1000) {
+      await wc.executeJavaScript('document.querySelector(".online-backup-status").textContent=""');
+      await new Promise(resolve=>setTimeout(resolve,500));
+      fs.writeFileSync(process.env.MHU_RETENTION_SCREENSHOT,(await wc.capturePage()).toPNG());
+    }
+  }
+  win.destroy();fs.writeFileSync(process.env.MHU_RETENTION_RESULT,JSON.stringify({ok:true}));app.exit(0);
+}).catch(error=>{fs.writeFileSync(process.env.MHU_RETENTION_RESULT,JSON.stringify({error:error.stack}));app.exit(1)});
+`);
+  const execution = spawnSync(path.join(root, 'node_modules/electron/dist/electron.exe'), [probe, '--user-data-dir=' + path.join(directory, 'profile')], {
+    cwd: root, windowsHide: true, encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, MHU_RETENTION_ROOT: root, MHU_RETENTION_RESULT: result }
   });
   const data = fs.existsSync(result) ? JSON.parse(fs.readFileSync(result, 'utf8')) : {};
   assert.equal(execution.status, 0, data.error || execution.stderr);

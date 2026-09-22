@@ -2243,7 +2243,8 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .online-backup-footer {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: flex-end;
   min-width: 0;
@@ -2251,13 +2252,16 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .online-backup-retention-field {
   display: grid;
-  gap: 6px;
-  min-width: 190px;
+  grid-template-columns: 150px minmax(210px, 300px);
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 370px;
+  min-width: 0;
 }
 
 .online-backup-retention-field label {
   color: var(--text);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -2280,15 +2284,15 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .online-backup-retention-select select {
   width: 100%;
-  min-height: 34px;
+  min-height: 40px;
   padding: 7px 38px 7px 11px;
   border: 1px solid var(--border);
   border-radius: 6px;
   appearance: none;
   color: var(--text);
-  background: var(--bg-card);
+  background: var(--bg-input);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .online-backup-retention-select select:focus {
@@ -2305,6 +2309,10 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   min-height: 18px;
   color: var(--text-dim);
   font-size: 12px;
+}
+
+.online-backup-status:empty {
+  display: none;
 }
 
 .online-backup-status[data-state="success"] {
@@ -2338,6 +2346,8 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
   .online-backup-retention-field {
     width: 100%;
+    grid-template-columns: 1fr;
+    flex-basis: auto;
   }
 }
 
