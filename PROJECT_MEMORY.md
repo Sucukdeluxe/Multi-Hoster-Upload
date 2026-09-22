@@ -6,6 +6,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 
 ## Aktueller Zustand
 
+- Lokale Erweiterung: Online-Backups erhalten einen RSA-3072/OAEP-SHA256-verschlüsselten Wiederherstellungsumschlag, der an die Datensatzkennung gebunden ist. Der private Wiederherstellungsschlüssel bleibt außerhalb des Servers. Verwaltungswerkzeug: `scripts/backup-recovery.cjs`; Einrichtung und Offline-Wiederherstellung stehen in der README.
+- Noch nicht produktiv aktiviert oder veröffentlicht: Zuerst ein lokales Schlüsselpaar separat sichern, dann ausschließlich den öffentlichen Schlüssel über `RECOVERY_PUBLIC_KEY_FILE` im aktualisierten Sicherungsdienst konfigurieren. Der neue Client verweigert neue Exporte ohne verfügbaren öffentlichen Schlüssel. Alte Clients und bisherige Importe bleiben kompatibel. Keine Live-Datenänderung vorgenommen; Aktivierung benötigt das gesonderte Go nach Backup- und Staging-Prüfung.
+
 - Aktive Arbeitslinie: `master` aus `Sucukdeluxe/Multi-Hoster-Upload`.
 - Zuletzt veröffentlichter Funktionsstand: Version `2.1.45`, Release-Commit `05769cd`.
 - Version `2.1.45` ist auf GitHub und Forgejo veröffentlicht. Beide Release-Changelogs benennen die weiterhin fehlgeschlagene DoodStream-Web-Serverermittlung ausdrücklich als bekanntes Problem; ein erfolgreicher Dateiupload wird nicht behauptet.
@@ -66,10 +69,11 @@ npm audit --omit=dev
 
 ## Zuletzt verifiziert
 
-Stand: 12.09.2026
+Stand: 22.09.2026 (lokale Wiederherstellungserweiterung; Produktions- und Release-Prüfungen darunter weiterhin vom 12.09.2026)
 
 - Lint: erfolgreich, 0 Warnungen und 0 Fehler.
-- Haupttests: 818 erfolgreich, 0 fehlgeschlagen (Release-Prüfung für `2.1.45`).
+- Haupttests: 822 erfolgreich, 0 fehlgeschlagen; einschließlich vier neuer Wiederherstellungstests und öffentlicher Quellmanifest-Prüfung (163 Dateien).
+- Wiederherstellung lokal Ende-zu-Ende geprüft: öffentliche Schlüsselabfrage, verschlüsselter Serverdatensatz, normaler Import, private Offline-Wiederherstellung und Löschen. Falsche Schlüssel, beschädigte Daten, Kennungstausch, Ablauf, fehlende Serverkonfiguration und Überschreiben bestehender Schlüssel/Ausgabedateien werden geprüft. Anleitung zusätzlich auf dem lokalen Desktop abgelegt; keine produktiven privaten Schlüssel erzeugt.
 - Backup-API-Tests: 17 erfolgreich, 0 fehlgeschlagen.
 - Der Regressionstest für die VOE-Fallback-Kette bestätigt bei deaktivierter normaler Rotation genau einen Versuch auf jedem vollen Account und anschließend den erfolgreichen Wechsel auf den vierten Account.
 - Der öffentliche DoodStream-Webablauf wurde am 12.09.2026 direkt gegen die Startseite und deren aktuelle Browser-Skripte geprüft. Regressionstests bilden den neuen GET-Login, `otp_sent`, `redirect`, Vue-Sessiontokens mit `_`/`-` und die aktuelle `upload_get_srv`-Antwort nach.

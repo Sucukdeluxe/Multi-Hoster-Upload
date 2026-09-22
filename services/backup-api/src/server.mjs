@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual, randomBytes } from 'node:crypto'
+import { createHash, createPublicKey, timingSafeEqual, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { link, mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises'
 import { isIP } from 'node:net'
@@ -21,7 +21,8 @@ function isCanonicalBase64Url(value, byteLength, pattern) {
 
 function isValidBackup(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
-  const keys = Object.keys(payload).sort()
+  const keys = Object.keys(payload).filter(key => key !== 'recovery').sort()
+  if (Object.hasOwn(payload, 'recovery') && !validRecovery(payload.recovery)) return false
   const shape = keys.join(',')
   if (shape !== 'blob,deleteVerifier,id' && shape !== 'blob,deleteVerifier,expiresInSeconds,id') return false
   if (shape.includes('expiresInSeconds') && payload.expiresInSeconds !== null && !allowedRetentionSeconds.has(payload.expiresInSeconds)) return false
@@ -167,6 +168,14 @@ async function directoryUsage(rootDir) {
   return { bytes, records }
 }
 
+function validRecovery(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'keyId,version,wrappedKey'
+    && value.version === 1
+    && isCanonicalBase64Url(value.keyId, 32, verifierPattern)
+    && isCanonicalBase64Url(value.wrappedKey, 384, blobPattern)
+}
+
 function isCanonicalTimestamp(value) {
   if (typeof value !== 'string') return false
   const timestamp = new Date(value)
@@ -262,7 +271,8 @@ async function createRecord(rootDir, payload, maxStorageBytes, maxRecords, nowMs
     : null
   const expiresAt = expiresInSeconds === null ? null : new Date(nowMs + expiresInSeconds * 1000).toISOString()
   const contents = Buffer.from(JSON.stringify({
-    version: 2,
+    version: payload.recovery ? 3 : 2,
+    ...(payload.recovery ? { recovery: payload.recovery } : {}),
     blob: payload.blob,
     deleteVerifier: payload.deleteVerifier,
     createdAt: new Date(nowMs).toISOString(),
@@ -331,8 +341,8 @@ async function readRecord(rootDir, id) {
       && validBlob
       && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
       && isCanonicalTimestamp(record.createdAt)
-    const expiring = keys === 'blob,createdAt,deleteVerifier,expiresAt,version'
-      && record.version === 2
+    const expiring = ((keys === 'blob,createdAt,deleteVerifier,expiresAt,version' && record.version === 2)
+      || (keys === 'blob,createdAt,deleteVerifier,expiresAt,recovery,version' && record.version === 3 && validRecovery(record.recovery)))
       && validBlob
       && isCanonicalBase64Url(record.deleteVerifier, 32, verifierPattern)
       && isCanonicalTimestamp(record.createdAt)
@@ -427,6 +437,15 @@ function clientAddress(request, trustedProxy, trustedProxyAddresses) {
 
 export function createBackupServer(options) {
   if (!options?.rootDir) throw new Error('rootDir is required')
+  let recoveryKeyId = null
+  let recoveryPublicKey = null
+  if (options.recoveryPublicKey !== undefined) {
+    if (typeof options.recoveryPublicKey !== 'string' || !options.recoveryPublicKey.startsWith('-----BEGIN PUBLIC KEY-----')) throw new Error('Invalid recovery public key')
+    const key = createPublicKey(options.recoveryPublicKey)
+    if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails.modulusLength !== 3072) throw new Error('Recovery requires RSA-3072')
+    recoveryPublicKey = key.export({ type: 'spki', format: 'pem' })
+    recoveryKeyId = createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest('base64url')
+  }
   const allowedOrigins = new Set(options.allowedOrigins ?? [])
   const rateLimit = options.rateLimit ?? { max: 60, windowMs: 60_000 }
   const uploadRateLimit = options.uploadRateLimit ?? { max: 10, windowMs: 3_600_000 }
@@ -490,6 +509,15 @@ export function createBackupServer(options) {
         return
       }
       const address = clientAddress(request, options.trustedProxy === true, trustedProxyAddresses)
+      if (request.method === 'GET' && url.pathname === '/v1/recovery-key') {
+        const retryAfter = consumeRequestRateLimit(address)
+        if (retryAfter !== null) {
+          response.setHeader('retry-after', String(retryAfter))
+          sendJson(response, 429, { error: 'rate_limited' })
+        } else if (recoveryPublicKey) sendJson(response, 200, { publicKey: recoveryPublicKey })
+        else sendJson(response, 503, { error: 'recovery_unavailable' })
+        return
+      }
       if (url.pathname === '/v1/backups/restore' || url.pathname === '/v1/backups/delete') {
         const retryAfter = consumeRateLimit(address)
         if (retryAfter !== null) {
@@ -580,6 +608,10 @@ export function createBackupServer(options) {
           }
           if (!isValidBackup(parsed.value)) {
             sendJson(response, 400, { error: 'invalid_request' })
+            return
+          }
+          if (parsed.value.recovery && parsed.value.recovery.keyId !== recoveryKeyId) {
+            sendJson(response, 409, { error: 'recovery_key_changed' })
             return
           }
           const uploadRetryAfter = consumeUploadRateLimit(address)

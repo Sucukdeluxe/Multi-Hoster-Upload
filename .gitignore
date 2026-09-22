@@ -22,3 +22,5 @@ account-rotation.log
 doodstream-debug.log
 upload-debug.log
 release-*.log
+recovery-private.pem
+recovered-online-key*.txt

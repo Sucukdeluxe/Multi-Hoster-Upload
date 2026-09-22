@@ -19,7 +19,7 @@ const { createAccountCooldownController, createAccountPicker } = require('./lib/
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
-const { downloadOnlineBackup, normalizeOnlineBackupRetention } = require('./lib/online-backup');
+const { downloadOnlineBackup, downloadRecoveryPublicKey, normalizeOnlineBackupRetention } = require('./lib/online-backup');
 const { createOnlineBackupKeyring } = require('./lib/online-backup-keyring');
 const { createOnlineBackupManager } = require('./lib/online-backup-manager');
 const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./lib/settings-backup');
@@ -132,6 +132,7 @@ const onlineBackupKeyring = createOnlineBackupKeyring({
   filePath: path.join(app.getPath('userData'), 'online-backup-keys.json')
 });
 const onlineBackupManager = createOnlineBackupManager({
+  loadRecoveryPublicKey: downloadRecoveryPublicKey,
   keyring: onlineBackupKeyring,
   loadSettings: async () => {
     await waitForConfigStoreWrites();

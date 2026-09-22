@@ -1,4 +1,5 @@
 import { resolve } from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { createBackupServer } from './server.mjs'
 
 const port = Number.parseInt(process.env.PORT ?? '8788', 10)
@@ -35,6 +36,7 @@ const trustedProxyAddresses = (process.env.TRUSTED_PROXY_ADDRESSES ?? '127.0.0.1
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error('Invalid PORT')
 
 const server = createBackupServer({
+  recoveryPublicKey: process.env.RECOVERY_PUBLIC_KEY_FILE ? await readFile(resolve(process.env.RECOVERY_PUBLIC_KEY_FILE), 'utf8') : undefined,
   rootDir,
   allowedOrigins,
   rateLimit,

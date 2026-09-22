@@ -193,7 +193,15 @@ Both backup formats can contain credentials. Protect `.mhu` files like credentia
 
 ### Encrypted online transfer
 
-Online backup is optional and transfers accounts and settings only. The application creates a 75-character key, encrypts the backup on the client with AES-256-GCM, and uploads only the encrypted blob. The service does not receive the decryption key. Queue state and history are not included.
+Online backup is optional and transfers accounts and settings only. The application creates a 75-character key and encrypts the backup on the client with AES-256-GCM. New clients also encrypt the transfer key with the service operator's RSA-3072 public recovery key (OAEP-SHA256, bound to the record ID). The service stores only ciphertext and cannot decrypt backups by itself. Whoever holds the separate private recovery key and a stored record can recover its transfer key and contents. Queue state and history are not included.
+
+#### Operator recovery setup
+
+Before deploying the new client, run `node scripts/backup-recovery.cjs init <new-local-directory>` on a trusted local computer. Save `recovery-private.pem` separately in a password manager or encrypted offline storage. Do not put it on the backup server, in Git, or in support bundles. On Windows, use a private user directory with restricted inherited access permissions; POSIX file modes alone do not set Windows ACLs. Transfer only `recovery-public.pem` to the server and configure `RECOVERY_PUBLIC_KEY_FILE` with its absolute path. Deploy the updated backup service before the client. The client refuses new exports when the public key endpoint is unavailable or invalid; existing imports remain available. Older clients remain compatible but do not create recovery envelopes.
+
+To recover a lost transfer key, obtain a read-only copy of the corresponding `<record-id>.json` file from the service's `BACKUP_DATA_DIR`, preserving the filename. Use SSH/admin access; there is deliberately no public backup-listing endpoint. If the ID was lost too, inspect record filenames, creation dates and expiry dates through that admin access. On the trusted local computer run `node scripts/backup-recovery.cjs recover <record-id>.json <recovery-private.pem> <new-output.txt>`. The tool verifies the ID, expiry, key fingerprint and encrypted payload, then writes the original transfer key to a new file without printing it. Import that key normally in the uploader. Protect and remove the temporary key file after use. Existing output files are never overwritten.
+
+Recovery applies only to new records carrying recovery data. Old backups cannot be retroactively recovered without their original key. Expired or deleted backups are not recoverable through this workflow. Retain older private keys when rotating the public key; new keys cannot recover records encrypted for a previous key. No live data migration is required.
 
 Treat the generated key like a password: anyone with it can restore the encrypted settings. Creating a new key does not invalidate older keys.
 

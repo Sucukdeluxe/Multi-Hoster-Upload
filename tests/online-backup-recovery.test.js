@@ -1,0 +1,90 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { generateKeyPairSync } = require('node:crypto');
+const { mkdtemp, readFile, writeFile, rm } = require('node:fs/promises');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { createOnlineBackup, downloadRecoveryPublicKey, uploadOnlineBackup, downloadOnlineBackup, deleteOnlineBackup } = require('../lib/online-backup');
+const { recoverBackupKey, recoveryPublicKey } = require('../lib/online-backup-recovery');
+const pair = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+
+test('recovery binds the original key to its record and validates ciphertext and expiry', () => {
+  const backup = createOnlineBackup({ language: 'de' }, 'test', undefined, 'forever', pair.publicKey);
+  const record = { ...backup.record, expiresAt: null };
+  assert.equal(recoverBackupKey(record.id, record, pair.privateKey), backup.key);
+  assert.throws(() => recoverBackupKey(record.id, { ...record, expiresAt: '2020-01-01T00:00:00.000Z' }, pair.privateKey));
+  assert.throws(() => recoverBackupKey(record.id, { ...record, expiresAt: 'invalid' }, pair.privateKey));
+  assert.throws(() => recoverBackupKey(record.id, { ...record, recovery: undefined }, pair.privateKey));
+  assert.throws(() => recoverBackupKey('x'.repeat(22), record, pair.privateKey));
+  assert.throws(() => recoverBackupKey(record.id, { ...record, blob: 'AAAA' }, pair.privateKey));
+  assert.throws(() => recoverBackupKey(record.id, { ...record, recovery: { ...record.recovery, keyId: 'wrong' } }, pair.privateKey));
+  assert.throws(() => recoverBackupKey(record.id, { ...record, recovery: { ...record.recovery, wrappedKey: 'A'.repeat(512) } }, pair.privateKey));
+  assert.throws(() => recoveryPublicKey(pair.privateKey));
+  const weak = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' });
+  assert.throws(() => recoveryPublicKey(weak));
+});
+
+test('server persists recovery without plaintext secrets, supports normal import and offline recovery', async t => {
+  const { createBackupServer } = await import('../services/backup-api/src/server.mjs');
+  const rootDir = await mkdtemp(join(tmpdir(), 'mhu-recovery-'));
+  let now = Date.now();
+  const server = createBackupServer({ rootDir, recoveryPublicKey: pair.publicKey, now: () => now });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await rm(rootDir, { recursive: true, force: true }); });
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const publicKey = await downloadRecoveryPublicKey(url);
+  assert.equal(publicKey, pair.publicKey);
+  const backup = createOnlineBackup({ language: 'de', password: 'test-secret' }, 'test', undefined, '1d', publicKey);
+  await uploadOnlineBackup(backup.record, url);
+  const recordPath = join(rootDir, `${backup.record.id}.json`);
+  const raw = await readFile(recordPath, 'utf8');
+  assert.ok(!raw.includes(backup.key));
+  assert.ok(!raw.includes('test-secret'));
+  const record = JSON.parse(raw);
+  assert.equal(record.version, 3);
+  assert.equal(recoverBackupKey(backup.record.id, record, pair.privateKey), backup.key);
+  assert.equal((await downloadOnlineBackup(backup.key, url)).settings.language, 'de');
+  const privateFile = join(rootDir, 'private.pem');
+  const output = join(rootDir, 'result.txt');
+  await writeFile(privateFile, pair.privateKey);
+  const cli = join(__dirname, '../scripts/backup-recovery.cjs');
+  const result = spawnSync(process.execPath, [cli, 'recover', recordPath, privateFile, output], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal((await readFile(output, 'utf8')).trim(), backup.key);
+  assert.ok(!result.stdout.includes(backup.key));
+  assert.equal(spawnSync(process.execPath, [cli, 'recover', recordPath, privateFile, output]).status, 1);
+  const other = createOnlineBackup({}, 'test', undefined, 'forever', publicKey);
+  await uploadOnlineBackup(other.record, url);
+  assert.equal((await deleteOnlineBackup(other.key, url)).deleted, true);
+  await assert.rejects(uploadOnlineBackup({ ...other.record, recovery: { ...other.record.recovery, wrappedKey: 'bad' } }, url));
+  await assert.rejects(uploadOnlineBackup({ ...other.record, recovery: { ...other.record.recovery, keyId: Buffer.alloc(32).toString('base64url') } }, url));
+  now += 86400 * 1000;
+  await assert.rejects(downloadOnlineBackup(backup.key, url));
+});
+
+test('missing or invalid public configuration fails closed without uploading', async () => {
+  await assert.rejects(downloadRecoveryPublicKey('https://example.test', { fetchImpl: async () => new Response('{}', { status: 503 }) }));
+  await assert.rejects(downloadRecoveryPublicKey('https://example.test', { fetchImpl: async () => new Response('{"publicKey":"bad"}') }));
+  const { createOnlineBackupManager } = require('../lib/online-backup-manager');
+  let uploaded = false;
+  const manager = createOnlineBackupManager({ loadSettings: async () => ({}), loadRecoveryPublicKey: async () => { throw new Error('unavailable'); }, uploadBackup: async () => { uploaded = true; } });
+  assert.equal((await manager.createManaged()).ok, false);
+  assert.equal(uploaded, false);
+});
+
+test('offline setup creates a matching key pair and never replaces existing keys', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mhu-recovery-setup-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, 'keys');
+  const cli = join(__dirname, '../scripts/backup-recovery.cjs');
+  const result = spawnSync(process.execPath, [cli, 'init', directory], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const publicPem = await readFile(join(directory, 'recovery-public.pem'), 'utf8');
+  const privatePem = await readFile(join(directory, 'recovery-private.pem'), 'utf8');
+  const backup = createOnlineBackup({}, 'test', undefined, 'forever', publicPem);
+  assert.equal(recoverBackupKey(backup.record.id, { ...backup.record, expiresAt: null }, privatePem), backup.key);
+  assert.equal(spawnSync(process.execPath, [cli, 'init', directory]).status, 1);
+  assert.equal(await readFile(join(directory, 'recovery-private.pem'), 'utf8'), privatePem);
+  assert.ok(!result.stdout.includes('PRIVATE KEY'));
+});
