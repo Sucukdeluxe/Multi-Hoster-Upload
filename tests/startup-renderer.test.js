@@ -222,7 +222,7 @@ app.whenReady().then(async () => {
   assert.equal(data.ok, true);
 });
 
-test('automation and log fields share responsive grids and aligned hints', { skip: process.platform !== 'win32' }, t => {
+test('settings controls align responsively and search placeholders fit at every breakpoint', { skip: process.platform !== 'win32' }, t => {
   const root = path.resolve(__dirname, '..');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-layout-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -277,6 +277,20 @@ app.whenReady().then(async()=>{
     assert.equal(layout.overflow,false);
     assert.deepEqual(layout.options,['single','daily','session']);
     if(process.env.MHU_LOG_SCREENSHOT && width===1000){await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_LOG_SCREENSHOT,(await wc.capturePage()).toPNG())}
+  }
+  const search=source.slice(source.indexOf('<div class="settings-search-wrap">'),source.indexOf('<nav class="settings-navigation"'));
+  const {translateText}=require(path.join(root,'renderer/i18n'));
+  for(const width of [1920,1200,1000,840,839,360]){
+    win.setContentSize(width,700);
+    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><div class="settings-layout"><aside class="settings-sidebar">'+search+'</aside><section class="settings-content"></section></div></main>'));
+    for(const language of ['de','en']){
+      await wc.executeJavaScript('document.getElementById("settingsSearchInput").placeholder='+JSON.stringify(translateText('Einstellungen durchsuchen',language)));
+      const searchSize=await wc.executeJavaScript('(() => {const e=document.getElementById("settingsSearchInput"),s=getComputedStyle(e),p=getComputedStyle(e,"::placeholder"),canvas=document.createElement("canvas"),ctx=canvas.getContext("2d");ctx.font=p.font||s.font;return {available:e.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight),text:ctx.measureText(e.placeholder).width,font:parseFloat(s.fontSize),overflow:document.documentElement.scrollWidth>innerWidth};})()');
+      assert.ok(searchSize.available>=searchSize.text,JSON.stringify({width,language,searchSize}));
+      assert.ok(searchSize.font>=13);
+      assert.equal(searchSize.overflow,false);
+    }
+    if(process.env.MHU_SEARCH_SCREENSHOT && width===1000){await wc.executeJavaScript('document.getElementById("settingsSearchInput").placeholder="Einstellungen durchsuchen"');await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_SEARCH_SCREENSHOT,(await wc.capturePage()).toPNG())}
   }
   win.destroy();fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({ok:true}));app.exit(0);
 }).catch(error=>{fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({error:error.stack}));app.exit(1)});

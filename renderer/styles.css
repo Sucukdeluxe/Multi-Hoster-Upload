@@ -5046,3 +5046,9 @@ input[type="checkbox"] {
     grid-column: 1 / -1;
   }
 }
+
+@media (min-width: 840px) {
+  .settings-layout {
+    grid-template-columns: 260px minmax(0, 1fr);
+  }
+}
