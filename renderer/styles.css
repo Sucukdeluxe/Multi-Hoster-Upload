@@ -4895,6 +4895,10 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+.automation-status-card:has(+ .automation-form-fields) {
+  margin-bottom: 0;
+}
+
 .settings-subpage .settings-row.automation-field-row {
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr);

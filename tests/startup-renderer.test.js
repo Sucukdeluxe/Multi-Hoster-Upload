@@ -242,6 +242,9 @@ app.whenReady().then(async()=>{
   for(const width of [1000,760,360]){
     win.setContentSize(width,1100);
     await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><div class="settings-subpage" style="display:block;width:100%">'+context.pages.automatik.innerHTML+'</div></main>'));
+    const sectionGaps=await wc.executeJavaScript('(() => { const card=document.querySelector(".automation-status-card"); const labels=document.querySelectorAll(".automation-form-fields > .settings-section-label"); return { first:labels[0].getBoundingClientRect().top-card.getBoundingClientRect().bottom, next:labels[1].getBoundingClientRect().top-labels[1].previousElementSibling.getBoundingClientRect().bottom }; })()');
+    assert.equal(sectionGaps.first,28);
+    assert.equal(sectionGaps.first,sectionGaps.next);
     await wc.executeJavaScript('document.querySelector(".automation-status-card").remove()');
     const data=await wc.executeJavaScript('(() => { const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};const rows=Array.from(document.querySelectorAll(".automation-field-row")).map(row=>({label:rect(row.querySelector("label")),input:rect(row.querySelector("input,select")),hint:row.querySelector(".hint")?rect(row.querySelector(".hint")):null}));return {rows,numbers:Array.from(document.querySelectorAll(".automation-field-row input[type=number]")).map(rect),selects:Array.from(document.querySelectorAll(".automation-select-control")).map(e=>({width:rect(e).width,arrow:getComputedStyle(e,"::after").right})),overflow:document.documentElement.scrollWidth>innerWidth,last:document.querySelector(".settings-subpage").lastElementChild.classList.contains("automation-test-action-row")};})()');
     assert.equal(data.overflow,false);
