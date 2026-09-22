@@ -97,6 +97,7 @@ npm audit --omit=dev
 
 ## Zuletzt verifiziert
 
+- Update-Button nach `2.1.49`: feste Breite für Button und sichtbaren Platzhalter von 146 auf 166 px erhöht; Beschriftung ohne Umbruch und ohne Schrumpfen. Gezielter Header-Regressionstest und Lint erfolgreich. In der laufenden Entwicklung für Deutsch und Englisch jeweils eine Textzeile und ausreichender Innenabstand per DOM-Messung bestätigt. Lokaler Anzeigetest für `2.1.50` im ignorierten Entwicklungslauncher aktiv; Download und Installation dort gesperrt, kein tatsächliches Release. Entwicklerversion automatisch neu gestartet.
 - Nachbesserung gegen abgeschnittenes letztes Zeichen: gezielter Electron-Layouttest für beide Sprachen und sechs Breiten sowie Lint erfolgreich. Screenshot mit vollständigem Text geprüft; automatischer Entwicklungsneustart bestätigt. Kein Release.
 - Einstellungssuche: auf Nutzerwunsch Lupe rechts (12 px Innenabstand), Suchtext mit symmetrischem 32-px-Padding zentriert. Gezielter Electron-Layouttest prüft Zentrierung, Symbolposition und vollständige Platzhalter in beiden Sprachen bei sechs Breiten; Lint erfolgreich, Screenshot visuell geprüft. Automatischer Entwicklungsneustart bestätigt; noch nicht veröffentlicht.
 - Einstellungssuche: Layout-/Textbreitentest in Deutsch und Englisch bei sechs Viewports sowie Lint erfolgreich. Startup-Datei 25/26 erfolgreich, bestehender Checkbox-Fokustest einmal mit bekanntem Timingfehler; separat unverändert erneut erfolgreich. Automatischer Neustart bestätigt. Kein Release.
