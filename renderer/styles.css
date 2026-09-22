@@ -3926,25 +3926,6 @@ input[type="checkbox"] {
   background: #3c3b6e;
 }
 
-.log-file-path-row {
-  display: flex !important;
-  align-items: center !important;
-  flex-wrap: wrap !important;
-  gap: 8px !important;
-}
-
-.log-file-path-row > label {
-  min-width: 140px !important;
-  flex: 1 1 190px;
-}
-
-.log-file-path-row > .key-input {
-  width: auto;
-  min-width: 180px !important;
-  max-width: 100%;
-  flex: 999 1 260px;
-}
-
 .log-file-path-row .btn {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -4953,7 +4934,8 @@ input[type="checkbox"] {
   grid-template-columns: minmax(0, 180px) minmax(0, 1fr);
 }
 
-.automation-select-control {
+.automation-select-control,
+.settings-select-control {
   display: block;
   position: relative;
   width: 100%;
@@ -4961,7 +4943,8 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
-.automation-select-control::after {
+.automation-select-control::after,
+.settings-select-control::after {
   content: '';
   position: absolute;
   top: 50%;
@@ -4974,7 +4957,8 @@ input[type="checkbox"] {
   pointer-events: none;
 }
 
-.settings-subpage .automation-select-control > select {
+.settings-subpage .automation-select-control > select,
+.settings-subpage .settings-select-control > select {
   appearance: none;
   padding-right: 38px;
   user-select: none;
@@ -4998,5 +4982,67 @@ input[type="checkbox"] {
 @container automation-fields (max-width: 380px) {
   .automation-filter-controls {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.log-config-fields {
+  container: log-fields / inline-size;
+  min-width: 0;
+}
+
+.settings-subpage .settings-row.log-config-row {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.settings-subpage .settings-row.log-config-row > label {
+  min-width: 0;
+  padding-top: 9px;
+  line-height: 1.5;
+}
+
+.log-path-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.log-mode-controls {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-subpage .log-config-fields :is(.key-input, .hs-input) {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 6px;
+}
+
+@container log-fields (max-width: 620px) {
+  .settings-subpage .settings-row.log-config-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .settings-subpage .settings-row.log-config-row > label {
+    padding-top: 0;
+  }
+}
+
+@container log-fields (max-width: 380px) {
+  .log-path-controls {
+    grid-template-columns: auto auto;
+    justify-content: start;
+  }
+
+  .log-path-controls > input {
+    grid-column: 1 / -1;
   }
 }

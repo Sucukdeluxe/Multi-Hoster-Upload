@@ -222,7 +222,7 @@ app.whenReady().then(async () => {
   assert.equal(data.ok, true);
 });
 
-test('automation fields share a responsive grid and leave hints below their controls', { skip: process.platform !== 'win32' }, t => {
+test('automation and log fields share responsive grids and aligned hints', { skip: process.platform !== 'win32' }, t => {
   const root = path.resolve(__dirname, '..');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-layout-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -260,6 +260,23 @@ app.whenReady().then(async()=>{
     for(const number of data.numbers) assert.equal(number.width,120);
     for(const select of data.selects){assert.ok(select.width<=240);assert.equal(select.arrow,'14px')}
     if(process.env.MHU_AUTOMATION_SCREENSHOT && width===1000){await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_AUTOMATION_SCREENSHOT,(await wc.capturePage()).toPNG())}
+  }
+  context.pages.logs={};context.window={};
+  vm.runInNewContext(source.slice(source.indexOf('pages.logs.innerHTML ='),source.indexOf('pages.remote.innerHTML =')),context);
+  for(const width of [1000,760,360]){
+    win.setContentSize(width,700);
+    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><div class="settings-subpage" style="display:block;width:100%">'+context.pages.logs.innerHTML+'</div></main>'));
+    const layout=await wc.executeJavaScript('(() => {const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};const select=document.getElementById("logModeInput");return {input:rect(document.getElementById("logFilePathInput")),select:rect(select),hint:rect(document.querySelector(".log-mode-controls .hint")),arrow:getComputedStyle(select.parentElement,"::after").right,overflow:document.documentElement.scrollWidth>innerWidth,options:Array.from(select.options).map(o=>o.value)};})()');
+    assert.equal(layout.input.left,layout.select.left);
+    assert.equal(layout.input.height,40);
+    assert.equal(layout.select.height,40);
+    assert.ok(layout.select.width<=240);
+    assert.equal(layout.hint.left,layout.select.left);
+    assert.ok(layout.hint.top>=layout.select.bottom+6);
+    assert.equal(layout.arrow,'14px');
+    assert.equal(layout.overflow,false);
+    assert.deepEqual(layout.options,['single','daily','session']);
+    if(process.env.MHU_LOG_SCREENSHOT && width===1000){await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_LOG_SCREENSHOT,(await wc.capturePage()).toPNG())}
   }
   win.destroy();fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({ok:true}));app.exit(0);
 }).catch(error=>{fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({error:error.stack}));app.exit(1)});

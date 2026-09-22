@@ -6505,20 +6505,28 @@ function renderSettings() {
   pages.logs.innerHTML = `
       ${pageHeader('Logs & Support', 'Protokollierung verwalten, Log-Dateien öffnen und ein bereinigtes Support-Paket erstellen.')}
       <div class="settings-section-label">Log</div>
-      <div class="settings-row log-file-path-row">
-        <label>FileUploader Log</label>
+      <div class="log-config-fields">
+      <div class="settings-row log-file-path-row log-config-row">
+        <label for="logFilePathInput">FileUploader Log</label>
+        <div class="log-path-controls">
         <input type="text" class="key-input settings-autosave" id="logFilePathInput" value="${escapeAttr(globalSettings.logFilePath || '')}" placeholder="Standardpfad verwenden">
         <button class="btn btn-xs btn-secondary" id="chooseLogFilePathBtn">Ordner wählen</button>
         <button class="btn btn-xs btn-secondary" id="openLogFolderBtn" title="Log-Ordner im Explorer öffnen">Öffnen</button>
+        </div>
       </div>
-      <div class="settings-row">
-        <label>Log-Datei-Modus</label>
+      <div class="settings-row log-config-row">
+        <label for="logModeInput">Log-Datei-Modus</label>
+        <div class="log-mode-controls">
+        <span class="settings-select-control">
         <select class="hs-input settings-autosave" id="logModeInput">
           <option value="single" ${(window.LogMode ? window.LogMode.normalizeLogMode(globalSettings) : (globalSettings.logMode || 'single')) === 'single' ? 'selected' : ''}>Eine Datei</option>
           <option value="daily" ${(window.LogMode ? window.LogMode.normalizeLogMode(globalSettings) : (globalSettings.logMode || 'single')) === 'daily' ? 'selected' : ''}>Pro Tag</option>
           <option value="session" ${(window.LogMode ? window.LogMode.normalizeLogMode(globalSettings) : (globalSettings.logMode || 'single')) === 'session' ? 'selected' : ''}>Pro Session</option>
         </select>
+        </span>
         <span class="hint">Pro Session = neue Datei bei jedem App-Start; nach komplettem Schließen + erneutem Öffnen beginnt eine neue Session.</span>
+        </div>
+      </div>
       </div>
       <div class="settings-option verbose-logging-option">
         <div class="settings-option-copy">
