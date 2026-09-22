@@ -82,6 +82,88 @@ app.whenReady().then(async () => {
   assert.equal(data.ok, true);
 });
 
+test('backup submenu survives slow gap crossing, hover clicks and keyboard navigation', { skip: process.platform !== 'win32' }, t => {
+  const root = path.resolve(__dirname, '..');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-menu-hover-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const probe = path.join(directory, 'probe.cjs');
+  const result = path.join(directory, 'result.json');
+  fs.writeFileSync(probe, `
+const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+app.whenReady().then(async () => {
+  const root = process.env.MHU_MENU_ROOT;
+  const css = fs.readFileSync(path.join(root, 'renderer/styles.css'), 'utf8');
+  const html = fs.readFileSync(path.join(root, 'renderer/index.html'), 'utf8');
+  const source = fs.readFileSync(path.join(root, 'renderer/app.js'), 'utf8');
+  const init = source.slice(source.indexOf('function initMenuBar()'), source.indexOf('async function _handleMenuAction('));
+  const nav = html.match(/<nav class="menu-bar"[\\s\\S]*?<\\/nav>/)[0];
+  const win = new BrowserWindow({ show: false, width: 850, height: 650, webPreferences: { backgroundThrottling: false } });
+  const wc = win.webContents;
+  await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<style>' + css + '</style><div class="header-utilities" style="position:absolute;right:20px;top:30px">' + nav + '</div><button id="outside">Outside</button>'));
+  await wc.executeJavaScript('function _initMenuSettingsControls() {} function _syncMenuSettings() {} ' + init + '; initMenuBar();');
+  const js = code => wc.executeJavaScript(code);
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const state = () => js('(() => { const t=document.querySelector(".menu-submenu-trigger"); const s=document.querySelector(".menu-submenu-dropdown"); return { expanded:t.getAttribute("aria-expanded"), display:getComputedStyle(s).display, closing:s.classList.contains("menu-closing") }; })()');
+  const move = async (x, y) => {
+    await js('(() => { const hit=document.elementFromPoint(' + x + ',' + y + '); const next=hit?.closest(".menu-submenu"); const previous=window.testHoverMenu; if(previous!==next) { previous?.dispatchEvent(new MouseEvent("mouseleave",{relatedTarget:hit})); next?.dispatchEvent(new MouseEvent("mouseenter")); window.testHoverMenu=next; } })()');
+    await wait(60);
+  };
+  wc.focus();
+  for (const width of [850, 600]) {
+    win.setSize(width, 650);
+    await js('document.querySelector("[data-menu-trigger=datei]").click()');
+    await wait(240);
+    await js('document.getAnimations().forEach(animation=>animation.finish())');
+    const rect = await js('(() => { const r=document.querySelector(".menu-submenu-trigger").getBoundingClientRect(); return {left:r.left,top:r.top,width:r.width,height:r.height}; })()');
+    await move(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    await wait(240);
+    await js('document.getAnimations().forEach(animation=>animation.finish())');
+    assert.equal((await state()).expanded, 'true', JSON.stringify({ rect, hit:await js('document.elementFromPoint(' + (rect.left + rect.width / 2) + ',' + (rect.top + rect.height / 2) + ')?.outerHTML') }));
+    await js('document.querySelector(".menu-submenu-trigger").click()');
+    assert.equal((await state()).expanded, 'true');
+    await move(rect.left - 3, rect.top + rect.height / 2);
+    await wait(350);
+    assert.equal((await state()).expanded, 'true');
+    const target = await js('(() => { const r=document.querySelector("[data-menu-action=backup-export]").getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()');
+    await move(target.x, target.y);
+    assert.equal((await state()).closing, false);
+    await js('document.querySelector(".menu-submenu").dispatchEvent(new MouseEvent("mouseleave"))');
+    await wait(80);
+    await js('document.querySelector(".menu-submenu").dispatchEvent(new MouseEvent("mouseenter"))');
+    await wait(300);
+    assert.equal((await state()).expanded, 'true');
+    await js('document.querySelector(".menu-submenu-trigger").focus()');
+    await move(30, 400);
+    await wait(500);
+    assert.equal((await state()).display, 'none');
+    await js('document.querySelector(".menu-submenu-trigger").focus();document.querySelector(".menu-submenu-trigger").dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowLeft",bubbles:true}))');
+    await wait(240);
+    assert.equal(await js('document.activeElement.dataset.menuAction'), 'backup-export');
+    await js('document.activeElement.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+    await wait(240);
+    assert.equal((await state()).display, 'none');
+    assert.equal(await js('getComputedStyle(document.querySelector("[data-menu-dropdown=datei]")).display !== "none"'), true);
+    assert.equal(await js('document.activeElement.classList.contains("menu-submenu-trigger")'), true);
+    await js('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+    await wait(240);
+  }
+  win.destroy();
+  fs.writeFileSync(process.env.MHU_MENU_RESULT, JSON.stringify({ ok:true }));
+  app.exit(0);
+}).catch(error => { fs.writeFileSync(process.env.MHU_MENU_RESULT, JSON.stringify({ error:error.stack })); app.exit(1); });
+`);
+  const execution = spawnSync(path.join(root, 'node_modules/electron/dist/electron.exe'), [probe, '--user-data-dir=' + path.join(directory, 'profile')], {
+    cwd: root, windowsHide: true, encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, MHU_MENU_ROOT: root, MHU_MENU_RESULT: result }
+  });
+  const data = fs.existsSync(result) ? JSON.parse(fs.readFileSync(result, 'utf8')) : {};
+  assert.equal(execution.status, 0, data.error || execution.stderr);
+  assert.equal(data.ok, true);
+});
+
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
     super();

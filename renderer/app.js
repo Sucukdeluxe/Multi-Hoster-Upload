@@ -1585,7 +1585,8 @@ function initMenuBar() {
     panel.classList.remove('menu-opening', 'menu-closing');
     void panel.offsetHeight;
     panel.classList.add('menu-closing');
-    const finish = () => {
+    const finish = (event) => {
+      if (event && event.target !== panel) return;
       if (!Object.is(panelTokens.get(panel), token)) return;
       panel.style.display = 'none';
       panel.classList.remove('menu-closing');
@@ -1623,30 +1624,44 @@ function initMenuBar() {
   menuBar.querySelectorAll('.menu-submenu').forEach(sm => {
     const sub = sm.querySelector('.menu-submenu-dropdown');
     const trigger = sm.querySelector('.menu-submenu-trigger');
+    let closeTimer = null;
+    const cancelClose = () => { clearTimeout(closeTimer); closeTimer = null; };
+    const opensLeft = () => window.getComputedStyle(sub).right !== 'auto';
     const openSubmenu = (focusFirst = false) => {
-      openPanel(sub);
+      cancelClose();
+      if (trigger?.getAttribute('aria-expanded') !== 'true') openPanel(sub);
       trigger?.setAttribute('aria-expanded', 'true');
       if (focusFirst) requestAnimationFrame(() => sub.querySelector('[data-menu-action]')?.focus());
     };
     const closeSubmenu = () => {
+      cancelClose();
       closePanel(sub);
       trigger?.setAttribute('aria-expanded', 'false');
     };
     sm.addEventListener('mouseenter', () => openSubmenu());
-    sm.addEventListener('mouseleave', closeSubmenu);
+    sm.addEventListener('mouseleave', () => {
+      cancelClose();
+      closeTimer = setTimeout(() => {
+        if (!sub.contains(document.activeElement)) closeSubmenu();
+      }, 250);
+    });
+    sm.addEventListener('focusin', cancelClose);
+    sm.addEventListener('focusout', (event) => {
+      if (!sm.contains(event.relatedTarget) && !sm.matches(':hover')) closeSubmenu();
+    });
     trigger?.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (trigger.getAttribute('aria-expanded') === 'true') closeSubmenu();
-      else openSubmenu();
+      openSubmenu();
     });
     trigger?.addEventListener('keydown', (event) => {
-      if (!['Enter', ' ', 'ArrowRight', 'ArrowDown'].includes(event.key)) return;
+      if (!['Enter', ' ', opensLeft() ? 'ArrowLeft' : 'ArrowRight', 'ArrowDown'].includes(event.key)) return;
       event.preventDefault();
       openSubmenu(true);
     });
     sub.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape' && event.key !== 'ArrowLeft') return;
+      if (event.key !== 'Escape' && event.key !== (opensLeft() ? 'ArrowRight' : 'ArrowLeft')) return;
       event.preventDefault();
+      event.stopPropagation();
       closeSubmenu();
       trigger?.focus();
     });
