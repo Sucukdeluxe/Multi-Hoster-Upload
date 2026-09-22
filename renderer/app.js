@@ -927,7 +927,10 @@ async function applyAutomationEvaluation(evaluation) {
 
 async function runFolderMonitorTestScan() {
   const result = await window.api.folderMonitorTestScan();
-  if (result?.error) throw new Error('Ordnerüberwachung konnte nicht getestet werden.');
+  if (result?.error) {
+    const knownErrors = ['Kein Ordnerpfad angegeben', 'Ordner nicht erreichbar', 'Ordnerscan fehlgeschlagen'];
+    throw new Error(knownErrors.includes(result.error) ? result.error : 'Ordnerüberwachung konnte nicht getestet werden.');
+  }
   return evaluateAutomationCandidates(result?.files || [], { dryRun: true, trigger: result?.trigger || 'test' });
 }
 
@@ -1226,9 +1229,10 @@ async function runAutomationTestOverlay() {
     const evaluation = await runFolderMonitorTestScan();
     if (generation !== automationTestGeneration) return;
     renderAutomationTestViewState({ loading: false, summary: evaluation.summary, error: '' });
-  } catch {
+  } catch (error) {
     if (generation !== automationTestGeneration) return;
-    renderAutomationTestViewState({ loading: false, summary: null, error: 'Ordnerüberwachung konnte nicht getestet werden.' });
+    const knownErrors = ['Kein Ordnerpfad angegeben', 'Ordner nicht erreichbar', 'Ordnerscan fehlgeschlagen'];
+    renderAutomationTestViewState({ loading: false, summary: null, error: knownErrors.includes(error?.message) ? error.message : 'Ordnerüberwachung konnte nicht getestet werden.' });
   }
 }
 

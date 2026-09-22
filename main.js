@@ -3712,7 +3712,7 @@ ipcMain.handle('automation:resume', () => enqueueAutomationLifecycle(async gener
 }));
 
 ipcMain.handle('folder-monitor:test-scan', () => {
-  return folderMonitor.scan({ emitFiles: false, trigger: 'test' });
+  return folderMonitor.testScan(configStore.load().globalSettings?.folderMonitor || {});
 });
 
 ipcMain.handle('folder-monitor:reconcile', () => {

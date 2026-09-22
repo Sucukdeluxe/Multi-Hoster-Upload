@@ -19,6 +19,75 @@ function createWatcherHarness() {
   return { calls, monitor: new FolderMonitor({ watch, ...timers }) };
 }
 
+test('test scan works while inactive, active or paused without changing monitor state', async () => {
+  const folderPath = path.join(os.tmpdir(), 'monitor-read-only-test');
+  for (const state of ['inactive', 'active', 'paused']) {
+    const { monitor, events } = createScanHarness({ files: [
+      { path: path.join(folderPath, 'video.mkv'), size: 12, mtimeMs: 1 },
+      { path: path.join(folderPath, 'note.txt'), size: 2, mtimeMs: 2 }
+    ] });
+    if (state === 'active') monitor.start({ folderPath: 'different-live-folder' });
+    if (state === 'paused') monitor.configure({ folderPath: 'different-paused-folder', paused: true });
+    const before = monitor.status();
+    const generation = monitor._generation;
+    const settings = monitor._settings;
+    const statuses = events.statuses.length;
+    const seen = [...monitor._seenFiles];
+    const result = await monitor.testScan({ enabled: false, folderPath, extensions: 'mkv', filterMode: 'include', recursive: true });
+    assert.equal(result.reachable, true);
+    assert.deepEqual(result.files.map(file => file.filterMatched), [true, false]);
+    assert.deepEqual(monitor.status(), before);
+    assert.equal(monitor._generation, generation);
+    assert.equal(monitor._settings, settings);
+    assert.deepEqual([...monitor._seenFiles], seen);
+    assert.equal(events.statuses.length, statuses);
+    assert.equal(events.newFiles.length, 0);
+    monitor.stop();
+  }
+});
+
+test('test scan uses independent settings for concurrent read-only requests', async () => {
+  const visited = [];
+  const monitor = new FolderMonitor({
+    access: async () => {},
+    walkFolder: async (folder, options) => { visited.push([folder, options.recursive]); return []; },
+    watch: () => { throw new Error('No watcher may be started'); },
+    setIntervalFn: () => { throw new Error('No timer may be started'); }
+  });
+  await Promise.all([
+    monitor.testScan({ folderPath: 'first', recursive: false }),
+    monitor.testScan({ folderPath: 'second', recursive: true })
+  ]);
+  assert.deepEqual(visited, [['first', false], ['second', true]]);
+  assert.equal(monitor.running, false);
+  assert.equal(monitor.status().folderPath, '');
+});
+
+test('test scan distinguishes missing, unavailable and unreadable folders safely', async () => {
+  const missing = await new FolderMonitor().testScan({});
+  assert.equal(missing.error, 'Kein Ordnerpfad angegeben');
+  const unavailable = await new FolderMonitor({ access: async () => { throw new Error('private path'); } }).testScan({ folderPath: 'test' });
+  assert.equal(unavailable.error, 'Ordner nicht erreichbar');
+  const failed = await new FolderMonitor({ access: async () => {}, walkFolder: async () => { throw new Error('private path'); } }).testScan({ folderPath: 'test' });
+  assert.equal(failed.error, 'Ordnerscan fehlgeschlagen');
+});
+
+test('test scan IPC reads persisted settings instead of depending on the active watcher', async () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
+  const start = source.indexOf("ipcMain.handle('folder-monitor:test-scan'");
+  const end = source.indexOf('\n});', start) + 4;
+  const settings = { enabled: false, folderPath: 'test-folder' };
+  let handler;
+  const expected = { files: [], reachable: true };
+  vm.runInNewContext(source.slice(start, end), {
+    ipcMain: { handle: (_name, callback) => { handler = callback; } },
+    configStore: { load: () => ({ globalSettings: { folderMonitor: settings } }) },
+    folderMonitor: { testScan: snapshot => { assert.equal(snapshot, settings); return expected; } }
+  });
+  assert.equal(await handler(), expected);
+});
+
 function createManualTimers() {
   const intervals = new Set();
   const timeouts = new Set();
