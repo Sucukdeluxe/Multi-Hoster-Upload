@@ -289,6 +289,11 @@ app.whenReady().then(async()=>{
       assert.ok(searchSize.available>=searchSize.text,JSON.stringify({width,language,searchSize}));
       assert.ok(searchSize.font>=13);
       assert.equal(searchSize.overflow,false);
+      const alignment=await wc.executeJavaScript('(() => {const input=document.getElementById("settingsSearchInput"),style=getComputedStyle(input),icon=document.querySelector(".settings-search-icon"),iconStyle=getComputedStyle(icon);return {text:style.textAlign,left:style.paddingLeft,right:style.paddingRight,iconRight:iconStyle.right,iconOnRight:icon.getBoundingClientRect().left>input.getBoundingClientRect().left+input.getBoundingClientRect().width/2};})()');
+      assert.equal(alignment.text,'center');
+      assert.equal(alignment.left,alignment.right);
+      assert.equal(alignment.iconRight,'12px');
+      assert.equal(alignment.iconOnRight,true);
     }
     if(process.env.MHU_SEARCH_SCREENSHOT && width===1000){await wc.executeJavaScript('document.getElementById("settingsSearchInput").placeholder="Einstellungen durchsuchen"');await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_SEARCH_SCREENSHOT,(await wc.capturePage()).toPNG())}
   }

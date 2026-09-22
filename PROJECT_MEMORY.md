@@ -97,6 +97,7 @@ npm audit --omit=dev
 
 ## Zuletzt verifiziert
 
+- Einstellungssuche: auf Nutzerwunsch Lupe rechts (12 px Innenabstand), Suchtext mit symmetrischem 32-px-Padding zentriert. Gezielter Electron-Layouttest prüft Zentrierung, Symbolposition und vollständige Platzhalter in beiden Sprachen bei sechs Breiten; Lint erfolgreich, Screenshot visuell geprüft. Automatischer Entwicklungsneustart bestätigt; noch nicht veröffentlicht.
 - Einstellungssuche: Layout-/Textbreitentest in Deutsch und Englisch bei sechs Viewports sowie Lint erfolgreich. Startup-Datei 25/26 erfolgreich, bestehender Checkbox-Fokustest einmal mit bekanntem Timingfehler; separat unverändert erneut erfolgreich. Automatischer Neustart bestätigt. Kein Release.
 - Log-Layout: 47 Startup-/Electron- und Logmodus-Tests sowie Lint erfolgreich. Gemeinsame Feldkante, Feldhöhe, Dropdownbreite, Pfeil-Innenabstand, Hinweise und unveränderte Modusoptionen bei 1000/760/360 px geprüft. Entwicklerversion automatisch neu gestartet; nicht veröffentlicht.
 - Automatik-Abstand: alle 26 Startup-/Electron-Tests und Lint erfolgreich. Gleiche Abschnittsabstände von 28 px bei drei Breiten bestätigt; automatischer Entwicklungsneustart im Watcher-Log nachgewiesen. Kein Release.
