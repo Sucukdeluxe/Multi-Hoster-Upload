@@ -6,6 +6,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 
 ## Aktueller Zustand
 
+- Vidmoly nach `2.1.48`, noch nicht veröffentlicht: Anmeldung wird über `/api/auth/me` statt anhand der Upload-Konfiguration verifiziert. Öffentliches Website-JavaScript am 22.09.2026 bestätigt unveränderte Upload-Felder sowie `DISK_FULL`, `UPLOAD_IP_BLACKLIST` und `UPLOAD_DISABLED`; diese Antworten werden jetzt getrennt und ohne Antwortdaten angezeigt. Upload übernimmt zusätzlich das aktuelle Webfeld `tos=1`, weiterhin ohne API-Key. HTTP-Fehler, fehlende Benutzer, OTP-Anforderung und ungültige Serveradressen werden geprüft. Die konkrete Serverantwort des gemeldeten Accounts war in den lokalen Logs nicht vorhanden; erfolgreicher Live-Login/Upload ist noch nicht bestätigt.
 - Nach `2.1.48` lokal geändert, noch nicht veröffentlicht: Checkboxen in den Hoster-Einstellungen übernehmen beim Mausklick nicht mehr den Fokus-Schatten von Textfeldern. Tastatur-Fokusmarkierung bleibt erhalten; echter isolierter Electron-Test prüft An-/Abhaken, Tabulator, Leertaste und unveränderten Zahlenfeld-Fokus.
 - Hoster-Dateigrößenlimit wird direkt in GB eingegeben (`0` unbegrenzt, `1 GB = 1024 MB`). Beide Speicherwege rechnen verlustfrei in das bestehende `maxSizeMb`-Format um; bestehende Einstellungen und Backups bleiben kompatibel. Import-Vorprüfung und Upload-Manager überspringen zu große Dateien pro Hoster, lassen die exakte Grenze und andere Hoster zu. Regressionen prüfen 5 GB, einen Byte darüber sowie Dezimalwerte. Vorab übersprungene Jobs melden korrekt 0 Versuche statt der konfigurierten Höchstzahl.
 
@@ -85,6 +86,7 @@ npm audit --omit=dev
 
 ## Zuletzt verifiziert
 
+- Vidmoly-Änderung vom 22.09.2026: alle sieben neuen Regressionen und Lint erfolgreich. Hauptlauf: 836 von 837 Tests erfolgreich; bestehender Electron-Checkbox-Fokustest einmal mit Timingfehler, separater Wiederholungslauf der gesamten Datei mit 23 von 23 erfolgreich. Backup-API weiterhin 18 von 18 erfolgreich. Öffentlicher Quellcheck umfasst 164 Dateien. Keine Live-Anmeldung und kein Release durchgeführt.
 - Checkbox-/GB-Limit-Änderung nach `2.1.48`: 830 Haupttests und 18 Servertests erfolgreich; Lint ohne Fehler. Echter Electron-Fokustest sowie GB-Speicher-, Import- und Upload-Grenztests erfolgreich. Änderungen noch nicht als Update veröffentlicht.
 
 - Release `2.1.48`: Titel, Sprachen, Veröffentlichung, jeweils vier Assets und Update-Metadaten beider Plattformen verifiziert. Alle acht Assets erneut heruntergeladen und per Größe/SHA-512 mit lokalen Dateien verglichen. Eingebauter Updater mit Version `2.1.47` erkennt `2.1.48`, übernimmt englische Release Notes und akzeptiert das Forgejo-Manifest. Release-Commit `7a49a19`, annotierter Tag `b8df102` auf beiden Remotes identisch. Anleitung auf dem Desktop aktualisiert.

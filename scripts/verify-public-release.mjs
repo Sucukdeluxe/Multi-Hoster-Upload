@@ -164,6 +164,7 @@ const sourceFiles = [
   'tests/upload-confirmation.test.js',
   'tests/upload-diagnostics.test.js',
   'tests/upload-manager.test.js',
+  'tests/vidmoly-upload.test.js',
   'tests/session-report.test.js',
   'tests/validate-credentials.test.js',
   'tests/webhook-notify.test.js'
