@@ -6377,57 +6377,64 @@ function renderSettings() {
           <strong id="automationLastError"></strong>
         </div>
       </section>
+      <div class="automation-form-fields">
       <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
-      <div class="settings-row automation-retry-row">
+      <div class="settings-row automation-retry-row automation-field-row">
         <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
-        <div class="automation-retry-control">
+        <div class="automation-retry-control automation-field-control">
           <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
           <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
         </div>
       </div>
-      <div class="settings-row automation-retry-row">
+      <div class="settings-row automation-retry-row automation-field-row">
         <label for="autoRetryDelayMinInput">Wartezeit zwischen Runden</label>
-        <div class="automation-retry-control">
+        <div class="automation-retry-control automation-field-control">
           <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
           <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
         </div>
       </div>
       <div class="settings-section-label">Ordnerüberwachung</div>
-      <div class="settings-row">
-        <label>Ordnerpfad</label>
-        <input type="text" class="key-input settings-autosave" id="fmFolderPathInput" value="${escapeAttr(fm.folderPath || '')}" placeholder="Ordner wählen..." style="flex:1">
+      <div class="settings-row automation-field-row">
+        <label for="fmFolderPathInput">Ordnerpfad</label>
+        <div class="automation-inline-controls automation-folder-controls">
+        <input type="text" class="key-input settings-autosave" id="fmFolderPathInput" value="${escapeAttr(fm.folderPath || '')}" placeholder="Ordner wählen...">
         <button class="btn btn-xs btn-secondary" id="fmChooseFolderBtn">Wählen</button>
+        </div>
       </div>
-      <div class="settings-row automation-capacity-row">
+      <div class="settings-row automation-capacity-row automation-field-row">
         <label for="fmQueueLimitInput">Maximale automatische Queue-Größe</label>
+        <div class="automation-field-control">
         <input type="number" class="hs-input settings-autosave" id="fmQueueLimitInput" value="${normalizedFm.queueLimitJobs}" min="0" step="1">
         <span class="hint">0 = unbegrenzt</span>
+        </div>
       </div>
-      <div class="settings-row automation-interval-row">
+      <div class="settings-row automation-interval-row automation-field-row">
         <label for="fmReconcileIntervalInput">Abgleichintervall</label>
+        <span class="automation-select-control">
         <select class="hs-input settings-autosave" id="fmReconcileIntervalInput">
           ${[1, 5, 15, 30, 60].map(value => `<option value="${value}" ${normalizedFm.reconcileIntervalMinutes === value ? 'selected' : ''}>${value === 1 ? '1 Minute' : `${value} Minuten`}</option>`).join('')}
         </select>
+        </span>
       </div>
-      <div class="settings-row automation-test-action-row">
-        <div class="automation-test-action-copy">
-          <strong>Ordnerüberwachung testen</strong>
-          <span class="hint">Prüft den aktuellen Ordner schreibgeschützt mit denselben Regeln.</span>
-        </div>
-        <button class="btn btn-secondary" id="automationTestBtn" type="button">Ordnerüberwachung testen</button>
-      </div>
-      <div class="settings-row">
-        <label>Dateierweiterungen</label>
-        <select class="hs-input settings-autosave" id="fmFilterModeInput" style="width:auto;margin-right:6px">
+      <div class="settings-row automation-field-row">
+        <label for="fmFilterModeInput">Dateierweiterungen</label>
+        <div class="automation-inline-controls automation-filter-controls">
+        <span class="automation-select-control">
+        <select class="hs-input settings-autosave" id="fmFilterModeInput">
           <option value="include" ${fm.filterMode === 'include' ? 'selected' : ''}>Nur diese</option>
           <option value="exclude" ${fm.filterMode === 'exclude' ? 'selected' : ''}>Alle außer</option>
         </select>
-        <input type="text" class="key-input settings-autosave" id="fmExtensionsInput" value="${escapeAttr(fm.extensions || '')}" placeholder="mp4,mkv,avi" style="flex:1">
+        </span>
+        <input type="text" class="key-input settings-autosave" id="fmExtensionsInput" aria-label="Dateierweiterungen" value="${escapeAttr(fm.extensions || '')}" placeholder="mp4,mkv,avi">
+        </div>
       </div>
-      <div class="settings-row">
-        <label>Verzögerung (Sekunden)</label>
-        <input type="number" class="hs-input settings-autosave" id="fmDelaySecInput" value="${fm.delaySec ?? 3}" min="1" max="300" style="width:80px">
+      <div class="settings-row automation-field-row">
+        <label for="fmDelaySecInput">Verzögerung (Sekunden)</label>
+        <div class="automation-field-control">
+        <input type="number" class="hs-input settings-autosave" id="fmDelaySecInput" value="${fm.delaySec ?? 3}" min="1" max="300">
         <span class="hint">Warten bis Datei fertig geschrieben</span>
+        </div>
+      </div>
       </div>
       <div class="settings-section-label">Verhalten</div>
       <div class="settings-grid-mini">
@@ -6466,6 +6473,13 @@ function renderSettings() {
         </div>`).join('')}
       </div>
       ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Vorauswahl = manuelle Hoster-Auswahl für neu erkannte Dateien.</p>'}
+      <div class="settings-row automation-test-action-row">
+        <div class="automation-test-action-copy">
+          <strong>Ordnerüberwachung testen</strong>
+          <span class="hint">Prüft den aktuellen Ordner schreibgeschützt mit denselben Regeln.</span>
+        </div>
+        <button class="btn btn-secondary" id="automationTestBtn" type="button">Ordnerüberwachung testen</button>
+      </div>
   `;
 
   pages.benachrichtigungen.innerHTML = `

@@ -222,6 +222,54 @@ app.whenReady().then(async () => {
   assert.equal(data.ok, true);
 });
 
+test('automation fields share a responsive grid and leave hints below their controls', { skip: process.platform !== 'win32' }, t => {
+  const root = path.resolve(__dirname, '..');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-automation-layout-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const probe = path.join(directory, 'probe.cjs');
+  const result = path.join(directory, 'result.json');
+  fs.writeFileSync(probe, `
+const {app,BrowserWindow}=require('electron');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+app.whenReady().then(async()=>{
+  const root=process.env.MHU_AUTOMATION_ROOT;
+  const css=fs.readFileSync(path.join(root,'renderer/styles.css'),'utf8');
+  const source=fs.readFileSync(path.join(root,'renderer/app.js'),'utf8');
+  const context={pages:{automatik:{}},pageHeader:()=>'',folderMonitorHelp:()=>'',globalSettings:{},fm:{},normalizedFm:{queueLimitJobs:15000,reconcileIntervalMinutes:5},configuredAccounts:[],escapeAttr:String,escapeHtml:String};
+  vm.runInNewContext(source.slice(source.indexOf('pages.automatik.innerHTML ='),source.indexOf('pages.benachrichtigungen.innerHTML =')),context);
+  const win=new BrowserWindow({show:false,width:1000,height:1100,webPreferences:{backgroundThrottling:false}});
+  const wc=win.webContents;
+  for(const width of [1000,760,360]){
+    win.setContentSize(width,1100);
+    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><div class="settings-subpage" style="display:block;width:100%">'+context.pages.automatik.innerHTML+'</div></main>'));
+    await wc.executeJavaScript('document.querySelector(".automation-status-card").remove()');
+    const data=await wc.executeJavaScript('(() => { const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height}};const rows=Array.from(document.querySelectorAll(".automation-field-row")).map(row=>({label:rect(row.querySelector("label")),input:rect(row.querySelector("input,select")),hint:row.querySelector(".hint")?rect(row.querySelector(".hint")):null}));return {rows,numbers:Array.from(document.querySelectorAll(".automation-field-row input[type=number]")).map(rect),selects:Array.from(document.querySelectorAll(".automation-select-control")).map(e=>({width:rect(e).width,arrow:getComputedStyle(e,"::after").right})),overflow:document.documentElement.scrollWidth>innerWidth,last:document.querySelector(".settings-subpage").lastElementChild.classList.contains("automation-test-action-row")};})()');
+    assert.equal(data.overflow,false);
+    assert.equal(data.last,true);
+    const left=data.rows[0].input.left;
+    for(const row of data.rows){
+      assert.ok(Math.abs(row.input.left-left)<1);
+      assert.equal(row.input.height,40);
+      if(width===360) assert.ok(row.input.top>=row.label.bottom);
+      else assert.ok(row.label.right<=row.input.left);
+      if(row.hint){assert.ok(row.hint.top>=row.input.bottom+6);assert.ok(Math.abs(row.hint.left-row.input.left)<1)}
+    }
+    for(const number of data.numbers) assert.equal(number.width,120);
+    for(const select of data.selects){assert.ok(select.width<=240);assert.equal(select.arrow,'14px')}
+    if(process.env.MHU_AUTOMATION_SCREENSHOT && width===1000){await new Promise(resolve=>setTimeout(resolve,500));fs.writeFileSync(process.env.MHU_AUTOMATION_SCREENSHOT,(await wc.capturePage()).toPNG())}
+  }
+  win.destroy();fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({ok:true}));app.exit(0);
+}).catch(error=>{fs.writeFileSync(process.env.MHU_AUTOMATION_RESULT,JSON.stringify({error:error.stack}));app.exit(1)});
+`);
+  const execution = spawnSync(path.join(root, 'node_modules/electron/dist/electron.exe'), [probe, '--user-data-dir=' + path.join(directory, 'profile')], {
+    cwd: root, windowsHide: true, encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, MHU_AUTOMATION_ROOT: root, MHU_AUTOMATION_RESULT: result }
+  });
+  const data = fs.existsSync(result) ? JSON.parse(fs.readFileSync(result, 'utf8')) : {};
+  assert.equal(execution.status, 0, data.error || execution.stderr);
+  assert.equal(data.ok, true);
+});
+
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
     super();

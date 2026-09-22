@@ -4889,3 +4889,110 @@ input[type="checkbox"] {
   }
   .automation-queue-bar { transition: none; }
 }
+
+.automation-form-fields {
+  container: automation-fields / inline-size;
+  min-width: 0;
+}
+
+.settings-subpage .settings-row.automation-field-row {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.settings-subpage .settings-row.automation-field-row > label {
+  min-width: 0;
+  padding-top: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.settings-subpage .automation-field-control {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-subpage .automation-field-control > .hint {
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+.settings-subpage .automation-field-row :is(.hs-input, .key-input) {
+  min-width: 0;
+  max-width: none;
+  width: 100%;
+  min-height: 40px;
+  border-radius: 6px;
+}
+
+.settings-subpage .automation-field-row input[type="number"] {
+  width: 120px;
+}
+
+.automation-inline-controls {
+  display: grid;
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.automation-folder-controls {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.automation-filter-controls {
+  grid-template-columns: minmax(0, 180px) minmax(0, 1fr);
+}
+
+.automation-select-control {
+  display: block;
+  position: relative;
+  width: 100%;
+  max-width: 240px;
+  min-width: 0;
+}
+
+.automation-select-control::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: translateY(-65%) rotate(45deg);
+  pointer-events: none;
+}
+
+.settings-subpage .automation-select-control > select {
+  appearance: none;
+  padding-right: 38px;
+  user-select: none;
+}
+
+.settings-subpage .automation-test-action-row {
+  margin-top: 20px;
+}
+
+@container automation-fields (max-width: 620px) {
+  .settings-subpage .settings-row.automation-field-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .settings-subpage .settings-row.automation-field-row > label {
+    padding-top: 0;
+  }
+}
+
+@container automation-fields (max-width: 380px) {
+  .automation-filter-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
