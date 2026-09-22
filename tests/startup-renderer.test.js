@@ -44,15 +44,25 @@ const fs = require('node:fs');
 const assert = require('node:assert/strict');
 app.whenReady().then(async () => {
   const css = fs.readFileSync(process.env.MHU_CHECKBOX_CSS, 'utf8');
-  const win = new BrowserWindow({ show: false, width: 500, height: 400 });
+  const win = new BrowserWindow({ show: false, width: 500, height: 400, webPreferences: { backgroundThrottling: false } });
   const wc = win.webContents;
+  async function waitForState(expression, accepts, action) {
+    const deadline = Date.now() + 3000;
+    let state;
+    do {
+      state = await wc.executeJavaScript(expression);
+      if (accepts(state)) return state;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    throw new Error(action + ' did not complete: ' + JSON.stringify(state));
+  }
   await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<style>' + css + '</style><button id="before">Before</button><input id="check" class="hs-input" type="checkbox"><input id="number" class="hs-input" type="number" value="5">'));
   wc.focus();
   const point = await wc.executeJavaScript('(() => { const r = document.getElementById("check").getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()');
   for (const expected of [true, false]) {
     wc.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
     wc.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
-    const state = await wc.executeJavaScript('(() => { const c = document.getElementById("check"); const s = getComputedStyle(c); return { checked: c.checked, shadow: s.boxShadow, outline: s.outlineStyle }; })()');
+    const state = await waitForState('(() => { const c = document.getElementById("check"); const s = getComputedStyle(c); return { checked: c.checked, shadow: s.boxShadow, outline: s.outlineStyle }; })()', state => state.checked === expected, 'Checkbox mouse click');
     assert.equal(state.checked, expected);
     assert.equal(state.shadow, 'none');
     assert.equal(state.outline, 'none');
@@ -60,13 +70,13 @@ app.whenReady().then(async () => {
   await wc.executeJavaScript('document.getElementById("before").focus()');
   wc.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
   wc.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
-  const keyboard = await wc.executeJavaScript('(() => { const c = document.getElementById("check"); return { active: document.activeElement === c, visible: c.matches(":focus-visible"), outline: getComputedStyle(c).outlineStyle }; })()');
+  const keyboard = await waitForState('(() => { const c = document.getElementById("check"); return { active: document.activeElement === c, visible: c.matches(":focus-visible"), outline: getComputedStyle(c).outlineStyle }; })()', state => state.active, 'Checkbox Tab focus');
   assert.equal(keyboard.active, true);
   assert.equal(keyboard.visible, true);
   assert.notEqual(keyboard.outline, 'none');
   wc.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
   wc.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
-  assert.equal(await wc.executeJavaScript('document.getElementById("check").checked'), true);
+  assert.equal(await waitForState('document.getElementById("check").checked', checked => checked, 'Checkbox Space toggle'), true);
   assert.notEqual(await wc.executeJavaScript('document.getElementById("number").focus(); getComputedStyle(document.getElementById("number")).boxShadow'), 'none');
   win.destroy();
   fs.writeFileSync(process.env.MHU_CHECKBOX_RESULT, JSON.stringify({ ok: true }));
@@ -4889,7 +4899,7 @@ async function waitFor(read, timeoutMs = 20000) {
     rendererState = await waitFor(async () => {
       try {
         const state = await window.webContents.executeJavaScript("(() => { if (typeof queueJobs === 'undefined' || typeof automationEventQueue === 'undefined') return null; return { candidateNames: queueJobs.filter(job => job.fileName === 'scenario-ready.mkv').map(job => job.fileName), draining: Boolean(automationEventDrainPromise), pendingCandidates: automationEventQueue.size }; })()");
-        return state && !state.draining && state.pendingCandidates === 0 ? state : null;
+        return state && state.candidateNames.length > 0 && !state.draining && state.pendingCandidates === 0 ? state : null;
       } catch {
         return null;
       }
