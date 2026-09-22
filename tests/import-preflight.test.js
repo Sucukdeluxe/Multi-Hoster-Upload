@@ -45,6 +45,14 @@ test('inspects duplicates, unavailable files, accepted files, and configured siz
   assert.equal(inspection.accepted[0].mtimeMs, 1787828400123);
 });
 
+test('5 GB host limit excludes oversized import pairs but preserves other hosts and exact boundary', () => {
+  const { isImportPairEligible } = require('../lib/import-preflight');
+  const settings = { 'doodstream.com': { maxSizeMb: 5120 }, 'voe.sx': { maxSizeMb: 0 } };
+  assert.equal(isImportPairEligible({ size: 5 * 1024 ** 3 }, 'doodstream.com', settings), true);
+  assert.equal(isImportPairEligible({ size: 5 * 1024 ** 3 + 1 }, 'doodstream.com', settings), false);
+  assert.equal(isImportPairEligible({ size: 5 * 1024 ** 3 + 1 }, 'voe.sx', settings), true);
+});
+
 test('connects the import preflight through the main process, preload, renderer, and hoster dialog', () => {
   const root = path.join(__dirname, '..');
   const main = fs.readFileSync(path.join(root, 'main.js'), 'utf8');

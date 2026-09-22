@@ -7302,6 +7302,7 @@ async function performSaveSettings(options = {}) {
       const field = input.dataset.hs;
       if (input.type === 'checkbox') hs[field] = input.checked;
       else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1024));
+      else if (field === 'maxSizeGb') hs.maxSizeMb = Math.max(0, (Number(input.value) || 0) * 1024);
       else hs[field] = parseInt(input.value, 10) || 0;
     });
     newHosterSettings[name] = hs;
@@ -7613,6 +7614,7 @@ async function performHosterSettingsSave() {
       const field = input.dataset.hs;
       if (input.type === 'checkbox') hs[field] = input.checked;
       else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1024));
+      else if (field === 'maxSizeGb') hs.maxSizeMb = Math.max(0, (Number(input.value) || 0) * 1024);
       else hs[field] = parseInt(input.value, 10) || 0;
     });
     newHosterSettings[name] = hs;
@@ -7694,9 +7696,9 @@ function _buildHosterSettingsHtml(name) {
           <input id="${fieldPrefix}-interval" type="number" class="hs-input" data-hoster="${name}" data-hs="timeIntervalSec" value="${hs.timeIntervalSec ?? 0}" min="0">
         </div>
         <div class="settings-row">
-          <label for="${fieldPrefix}-max-size">Maximale Größe (MB)</label>
-          <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeMb" value="${hs.maxSizeMb ?? 0}" min="0">
-          <span class="hint">0 = unbegrenzt</span>
+          <label for="${fieldPrefix}-max-size">Dateigrößenlimit (GB)</label>
+          <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeGb" value="${Math.max(0, (Number(hs.maxSizeMb) || 0) / 1024)}" min="0" step="any">
+          <span class="hint">0 = unbegrenzt. 1 GB = 1024 MB. Größere Dateien werden für diesen Hoster übersprungen.</span>
         </div>
         <div class="settings-row">
           <label for="${fieldPrefix}-log">Links in Log schreiben</label>

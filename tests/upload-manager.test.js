@@ -340,6 +340,30 @@ describe('UploadManager', () => {
     assert.ok(!statuses.includes('uploading'), 'should not attempt upload');
   });
 
+  it('enforces a 5 GB host limit before uploads or account fallback and allows the boundary', async () => {
+    const limit = 5 * 1024 ** 3;
+    const mgr = new UploadManager({
+      'doodstream.com': { maxSizeMb: 5 * 1024, retries: 3, parallelCount: 1 },
+      'voe.sx': { maxSizeMb: 0, retries: 0, parallelCount: 1 }
+    });
+    const events = [];
+    mgr.on('progress', event => events.push(event));
+    fakeFileSize = limit + 1;
+    await mgr.startBatch([
+      { file: '/test/too-large.mp4', hoster: 'doodstream.com', apiKey: 'key1' },
+      { file: '/test/too-large.mp4', hoster: 'voe.sx', apiKey: 'key2' }
+    ]);
+    assert.equal(mockUploadFile.mock.callCount(), 1);
+    assert.equal(mockUploadFile.mock.calls[0].arguments[0], 'voe.sx');
+    const skipped = events.find(event => event.hoster === 'doodstream.com' && event.status === 'skipped');
+    assert.ok(skipped);
+    assert.equal(skipped.attempt, 0);
+    fakeFileSize = limit;
+    await mgr.startBatch([{ file: '/test/exactly-five-gb.mp4', hoster: 'doodstream.com', apiKey: 'key1' }]);
+    assert.equal(mockUploadFile.mock.callCount(), 2);
+    assert.ok(events.some(event => event.hoster === 'doodstream.com' && event.status === 'done'));
+  });
+
   it('per-hoster semaphore limits concurrency', async () => {
     let concurrent = 0;
     let maxConcurrent = 0;

@@ -7,6 +7,81 @@ const os = require('node:os');
 const path = require('node:path');
 const { createStartupWindow, resolveStartupLanguage, createStartupQuery } = require('../lib/startup-renderer');
 
+test('host file-size settings display GB and save compatible MB values without truncating decimals', async () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  const saveFunction = source.slice(source.indexOf('async function performHosterSettingsSave()'), source.indexOf('\nasync function recoverSerializedSave'));
+  const buildFunction = source.slice(source.indexOf('function _buildHosterSettingsHtml(name)'), source.indexOf('\nfunction _buildAccountHosterGroupHtml'));
+  let saved;
+  const input = { dataset: { hs: 'maxSizeGb' }, type: 'number', value: '5' };
+  const context = vm.createContext({
+    config: { hosterSettings: { 'doodstream.com': { maxSizeMb: 5120 }, 'voe.sx': { maxSizeMb: 1024 } } },
+    hosterSettings: {}, HOSTERS: ['doodstream.com', 'voe.sx'],
+    document: { querySelectorAll: selector => selector.includes('doodstream.com') ? [input] : [] },
+    saveHosterSettingsTracked: async value => { saved = value; }
+  });
+  vm.runInContext(saveFunction + '\n' + buildFunction, context);
+  assert.match(vm.runInContext("_buildHosterSettingsHtml('doodstream.com')", context), /data-hs="maxSizeGb" value="5"/);
+  for (const [gb, mb] of [['5', 5120], ['2.5', 2560], ['0', 0], ['0.0009765625', 1]]) {
+    input.value = gb;
+    await vm.runInContext('performHosterSettingsSave()', context);
+    assert.equal(saved['doodstream.com'].maxSizeMb, mb);
+    assert.equal(saved['voe.sx'].maxSizeMb, 1024);
+    assert.equal(Object.hasOwn(saved['doodstream.com'], 'maxSizeGb'), false);
+  }
+  assert.equal((source.match(/field === 'maxSizeGb'/g) || []).length, 2);
+});
+
+test('account checkboxes have no text-field shadow on mouse clicks and keep keyboard focus', { skip: process.platform !== 'win32' }, t => {
+  const root = path.resolve(__dirname, '..');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mhu-checkbox-focus-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const probe = path.join(directory, 'probe.cjs');
+  const result = path.join(directory, 'result.json');
+  fs.writeFileSync(probe, `
+const { app, BrowserWindow } = require('electron');
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+app.whenReady().then(async () => {
+  const css = fs.readFileSync(process.env.MHU_CHECKBOX_CSS, 'utf8');
+  const win = new BrowserWindow({ show: false, width: 500, height: 400 });
+  const wc = win.webContents;
+  await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<style>' + css + '</style><button id="before">Before</button><input id="check" class="hs-input" type="checkbox"><input id="number" class="hs-input" type="number" value="5">'));
+  wc.focus();
+  const point = await wc.executeJavaScript('(() => { const r = document.getElementById("check").getBoundingClientRect(); return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; })()');
+  for (const expected of [true, false]) {
+    wc.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point });
+    wc.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point });
+    const state = await wc.executeJavaScript('(() => { const c = document.getElementById("check"); const s = getComputedStyle(c); return { checked: c.checked, shadow: s.boxShadow, outline: s.outlineStyle }; })()');
+    assert.equal(state.checked, expected);
+    assert.equal(state.shadow, 'none');
+    assert.equal(state.outline, 'none');
+  }
+  await wc.executeJavaScript('document.getElementById("before").focus()');
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+  const keyboard = await wc.executeJavaScript('(() => { const c = document.getElementById("check"); return { active: document.activeElement === c, visible: c.matches(":focus-visible"), outline: getComputedStyle(c).outlineStyle }; })()');
+  assert.equal(keyboard.active, true);
+  assert.equal(keyboard.visible, true);
+  assert.notEqual(keyboard.outline, 'none');
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+  assert.equal(await wc.executeJavaScript('document.getElementById("check").checked'), true);
+  assert.notEqual(await wc.executeJavaScript('document.getElementById("number").focus(); getComputedStyle(document.getElementById("number")).boxShadow'), 'none');
+  win.destroy();
+  fs.writeFileSync(process.env.MHU_CHECKBOX_RESULT, JSON.stringify({ ok: true }));
+  app.exit(0);
+}).catch(error => { fs.writeFileSync(process.env.MHU_CHECKBOX_RESULT, JSON.stringify({ error: error.message })); app.exit(1); });
+`);
+  const execution = spawnSync(path.join(root, 'node_modules/electron/dist/electron.exe'), [probe, '--user-data-dir=' + path.join(directory, 'profile')], {
+    cwd: root, windowsHide: true, encoding: 'utf8', timeout: 20000,
+    env: { ...process.env, MHU_CHECKBOX_CSS: path.join(root, 'renderer/styles.css'), MHU_CHECKBOX_RESULT: result }
+  });
+  const data = fs.existsSync(result) ? JSON.parse(fs.readFileSync(result, 'utf8')) : {};
+  assert.equal(execution.status, 0, data.error || execution.stderr);
+  assert.equal(data.ok, true);
+});
+
 class TestBrowserWindow extends EventEmitter {
   constructor(options) {
     super();

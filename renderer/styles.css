@@ -3665,7 +3665,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .key-input:focus,
-.hs-input:focus,
+.hs-input:not([type="checkbox"]):focus,
 #settingsSearchInput:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(186, 208, 252, .12);

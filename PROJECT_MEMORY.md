@@ -6,6 +6,9 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows, die große 
 
 ## Aktueller Zustand
 
+- Nach `2.1.48` lokal geändert, noch nicht veröffentlicht: Checkboxen in den Hoster-Einstellungen übernehmen beim Mausklick nicht mehr den Fokus-Schatten von Textfeldern. Tastatur-Fokusmarkierung bleibt erhalten; echter isolierter Electron-Test prüft An-/Abhaken, Tabulator, Leertaste und unveränderten Zahlenfeld-Fokus.
+- Hoster-Dateigrößenlimit wird direkt in GB eingegeben (`0` unbegrenzt, `1 GB = 1024 MB`). Beide Speicherwege rechnen verlustfrei in das bestehende `maxSizeMb`-Format um; bestehende Einstellungen und Backups bleiben kompatibel. Import-Vorprüfung und Upload-Manager überspringen zu große Dateien pro Hoster, lassen die exakte Grenze und andere Hoster zu. Regressionen prüfen 5 GB, einen Byte darüber sowie Dezimalwerte. Vorab übersprungene Jobs melden korrekt 0 Versuche statt der konfigurierten Höchstzahl.
+
 - IP-Erweiterung am 22.09.2026 nach gesondertem Go aktiviert: Backup-API `2.0.6` produktiv; App `2.1.48` auf beiden Plattformen veröffentlicht. Vorheriger Live-Iststand: Dienst `2.0.5`, 13 Datensätze. Sicherung `/var/backups/mhu-backup-api/20260922-pre-ip.tar.gz` enthält Daten, Konfiguration, öffentlichen Wiederherstellungsschlüssel, Dienstdefinition und bisherigen Dienststand. Archivtest erfolgreich; SHA-256 `7be0a9f4497cae20d89606e4872d41eb555fd66bf4613503e6f84e4aa5300e7f` entspricht der geschützten lokalen Kopie `server-backup-pre-ip-20260922.tar.gz` im Wiederherstellungsordner.
 - Staging `staging-ip`: Alle 13 Bestandsdatensätze unverändert lesbar; Erstellen eines Version-4-Testbackups mit Herkunfts-IP, private Wiederherstellung, normaler Import und gezieltes Löschen erfolgreich. Anschließend sämtliche 13 Live-Dateien per SHA-256 mit der getesteten Kopie abgeglichen. Keine Live-Datensätze verändert.
 - Lokaler Build `2.1.48`: Installer 98.032.605 Bytes, Portable 97.807.985 Bytes, Produktversion jeweils `2.1.48`. Verpackte Quellmodule und Update-Manifest geprüft; keine Schlüssel oder Nutzerdaten enthalten. Englische/deutsche Release-Texte veröffentlicht. Dienstpfad `/opt/mhu-backup-api/releases/20260922-v2.0.6` aktiviert und Dienst neu gestartet. Live-Smoke bestätigt serverseitige öffentliche Herkunfts-IP, privaten Wiederherstellungsweg und normalen Import. Ausschließlich eigenen Testdatensatz danach gelöscht; alle 13 Bestandsdatensätze per SHA-256 unverändert bestätigt. Kein pauschaler Rollback auf `2.0.5`, sobald neue Version-4-Datensätze vorhanden sind; Daten müssen erhalten bleiben.
@@ -81,6 +84,8 @@ npm audit --omit=dev
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
 
 ## Zuletzt verifiziert
+
+- Checkbox-/GB-Limit-Änderung nach `2.1.48`: 830 Haupttests und 18 Servertests erfolgreich; Lint ohne Fehler. Echter Electron-Fokustest sowie GB-Speicher-, Import- und Upload-Grenztests erfolgreich. Änderungen noch nicht als Update veröffentlicht.
 
 - Release `2.1.48`: Titel, Sprachen, Veröffentlichung, jeweils vier Assets und Update-Metadaten beider Plattformen verifiziert. Alle acht Assets erneut heruntergeladen und per Größe/SHA-512 mit lokalen Dateien verglichen. Eingebauter Updater mit Version `2.1.47` erkennt `2.1.48`, übernimmt englische Release Notes und akzeptiert das Forgejo-Manifest. Release-Commit `7a49a19`, annotierter Tag `b8df102` auf beiden Remotes identisch. Anleitung auf dem Desktop aktualisiert.
 

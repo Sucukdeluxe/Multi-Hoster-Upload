@@ -22,6 +22,8 @@
     ['Maximale Geschwindigkeit (MB/s)', 'Maximum speed (MB/s)'],
     ['Neustart unter (kB/s)', 'Restart below (kB/s)'],
     ['Maximale Größe (MB)', 'Maximum size (MB)'],
+    ['Dateigrößenlimit (GB)', 'File size limit (GB)'],
+    ['0 = unbegrenzt. 1 GB = 1024 MB. Größere Dateien werden für diesen Hoster übersprungen.', '0 = unlimited. 1 GB = 1024 MB. Larger files are skipped for this host.'],
     ['Bildschirm und Eingabesteuerung bleiben gesperrt.', 'Screen and input control remain locked.'],
     ['Bindet nur an', 'Binds only to'],
     ['Bindet an', 'Binds to'],
