@@ -80,6 +80,7 @@ npm audit --omit=dev
 
 ## Offene nächste Schritte
 
+- Vidmoly-Livediagnose: separate lokale Testinstanz mit temporärem Profil und kopierten Vidmoly-Accounts gestartet; keine automatischen Accountchecks, Ordnerüberwachung oder Remote-Steuerung. Unveröffentlichter Stand `f890c2f`. Lokaler Launcher `.artifacts/vidmoly-dev.cjs` erfasst nur HTTP-Status, feste Fehlercodes und Strukturmerkmale in `.artifacts/vidmoly-live-diagnostic.jsonl`; keine Passwörter, OTP-, Cookie- oder Sessionwerte. Manueller Loginversuch steht noch aus; installierte Anwendung unverändert.
 - DoodStream: Am 12.09.2026 wurde das authentifizierte Dashboard ohne `sess_id` live bestätigt. Der alte Upload-Aufruf lieferte eine andere Seite ohne Upload-Felder. Ein zwischenzeitlich getesteter API-Ausweichweg bestätigte zwar den Account, wurde auf Nutzerwunsch wieder entfernt; dessen Uploadversuch scheiterte serverseitig mit `No servers available for uploads`. Der aktuelle Web-Upload muss noch live auf Serververfügbarkeit und erfolgreichen Dateitransfer geprüft werden. Die lokale Seitendiagnose protokolliert ausschließlich Strukturmerkmale ohne Formularwerte, OTP oder Cookie-Werte.
 - Keine offenen Veröffentlichungsschritte für Release `v2.1.48`; ein Server-Rollback muss Version-4-Datensätze erhalten und lesen können. Das oben dokumentierte DoodStream-Uploadproblem bleibt offen. Privaten Wiederherstellungsschlüssel zusätzlich unabhängig vom lokalen PC sichern.
 - Bei Bedarf einen Arbeitsweg ohne `&` im absoluten Pfad verwenden oder die npm-Aufrufe weiterhin direkt ausführen.
