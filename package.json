@@ -6,9 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "node scripts/dev-runner.cjs",
-    "test": "node --test tests/*.test.js tests/ui-smoke.js",
-    "test:backup-api": "npm --prefix services/backup-api test",
-    "verify": "npm run lint && npm test && npm run test:backup-api && npm audit --omit=dev",
+    "verify": "npm run lint && npm audit --omit=dev",
     "lint": "eslint .",
     "dist": "electron-builder --publish never --win",
     "release:win": "electron-builder --publish never --win nsis portable"

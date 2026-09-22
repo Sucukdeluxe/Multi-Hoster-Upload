@@ -11,6 +11,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows zum Hochlade
 - Version `2.1.50` enthält verbesserte Sicherungsmenüs, getrennte Online-Backup-Bereiche, einheitliche Automatik- und Log-Einstellungen sowie korrigierte Such- und Update-Anzeigen.
 - Ordnerüberwachung lässt sich unabhängig von ihrem Aktivierungszustand mit gespeicherten Regeln schreibgeschützt testen. Testscans starten keine Uploads und verändern keine laufende Überwachung.
 - Nach dem Release wurden ausschließlich Wartebedingungen zweier Electron-Tests korrigiert. Die Anwendungsversion bleibt unverändert.
+- Regressionstests sind in das private Repository `Multi-Hoster-Upload-Tests` ausgelagert. Beide privaten Remotes enthalten Desktop- und Backup-API-Tests. Öffentliche CI führt nur Lint, Abhängigkeitsprüfung und Build aus. Historische Commits und Tags bleiben unverändert.
 
 ## Entscheidungen
 
@@ -43,14 +44,12 @@ Bei Problemen mit Shell-Sonderzeichen im Projektpfad können die Prüfungen dire
 
 ```powershell
 node node_modules/eslint/bin/eslint.js .
-$testFiles = @((Get-ChildItem tests -Filter '*.test.js').FullName) + (Resolve-Path tests/ui-smoke.js).Path
-node --test @testFiles
-node --test services/backup-api/test/server.test.mjs
 npm audit --omit=dev
 ```
 
 ## Bekannte Probleme und nächste Schritte
 
+- Nach jedem App-Push die private Testsuite mit dem vollständigen App-Commit starten: `gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
 - Die DoodStream-Web-Upload-Serverermittlung ist weiterhin gesondert zu prüfen. Ein erfolgreicher Accountcheck bestätigt keinen erfolgreichen Dateitransfer.
 - Der optionale Langzeit-UI-Smoke hat bekannte Timing-/Fixture-Abweichungen außerhalb der regulären CI. Diese getrennt untersuchen; reguläre Regressionen nicht überspringen.
 - Die CI meldet eine Laufzeit-Abkündigung für die verwendeten Checkout-/Node-Setup-Actions. Ein Versionswechsel ist separat zu prüfen.

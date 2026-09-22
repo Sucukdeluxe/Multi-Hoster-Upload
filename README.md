@@ -287,12 +287,13 @@ npm install
 npm start
 ```
 
-Run the test suite and lint checks:
+Run the public lint and dependency checks:
 
 ```powershell
-npm test
-npm run lint
+npm run verify
 ```
+
+The regression suite is maintained and executed in a separate private repository against an exact application commit. Public CI runs lint, dependency checks and Windows builds; it does not run the private tests. Maintainers must also verify the private regression run before releasing. Historical commits and release tags have not been rewritten.
 
 Create both Windows release targets without publishing them:
 

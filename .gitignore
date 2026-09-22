@@ -1,4 +1,6 @@
 node_modules/
+/tests/
+/services/backup-api/test/
 .dev-runner.lock
 release/
 .artifacts/
