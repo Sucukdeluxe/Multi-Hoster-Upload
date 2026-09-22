@@ -180,12 +180,17 @@ app.whenReady().then(async () => {
   const root=process.env.MHU_RETENTION_ROOT;
   const css=fs.readFileSync(path.join(root,'renderer/styles.css'),'utf8');
   const source=fs.readFileSync(path.join(root,'renderer/app.js'),'utf8');
-  const footer=source.match(/<footer class="online-backup-footer"[\\s\\S]*?<\\/footer>/)[0];
-  const win=new BrowserWindow({show:false,width:1000,height:500,webPreferences:{backgroundThrottling:false}});
+  const panel=source.slice(source.indexOf('<section class="online-backup-panel"'),source.indexOf('<div class="settings-section-label">Lokales Datei-Backup</div>'));
+  const win=new BrowserWindow({show:false,width:1000,height:800,webPreferences:{backgroundThrottling:false}});
   const wc=win.webContents;
   for(const width of [1000,600,360]) {
-    win.setContentSize(width,500);
-    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%"><section class="online-backup-panel"><h3>Verschlüsseltes Online-Backup</h3><div class="online-backup-key-row"><label>Schlüssel importieren</label><input class="key-input"><button class="btn btn-secondary">Importieren</button></div><div class="online-backup-status"></div>'+footer+'</section></main>'));
+    win.setContentSize(width,800);
+    await wc.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<style>'+css+'</style><main id="settings-view" style="display:block;padding:16px;width:100%">'+panel+'</main>'));
+    assert.deepEqual(await wc.executeJavaScript('Array.from(document.querySelectorAll(".online-backup-module")).map(module=>({heading:module.getAttribute("aria-labelledby"),create:!!module.querySelector("#createOnlineBackupBtn"),import:!!module.querySelector("#restoreOnlineBackupBtn"),manage:!!module.querySelector("#managedOnlineBackupList")}))'),[
+      {heading:'onlineBackupCreateHeading',create:true,import:false,manage:false},
+      {heading:'onlineBackupImportHeading',create:false,import:true,manage:false},
+      {heading:'managedOnlineBackupHeading',create:false,import:false,manage:true}
+    ]);
     const layout=await wc.executeJavaScript('(() => { const s=document.querySelector("select"), b=document.querySelector("footer button"), l=document.querySelector(".online-backup-retention-field label"), i=document.querySelector(".key-input"); const rect=e=>{const r=e.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,height:r.height}}; return {select:rect(s),button:rect(b),input:rect(i),labelFont:getComputedStyle(l).fontSize,selectFont:getComputedStyle(s).fontSize,buttonFont:getComputedStyle(b).fontSize,arrowRight:getComputedStyle(s.parentElement,"::after").right,empty:getComputedStyle(document.querySelector(".online-backup-status")).display,scroll:document.documentElement.scrollWidth,viewport:innerWidth}; })()');
     assert.equal(layout.select.height,40);
     assert.equal(layout.button.height,40);

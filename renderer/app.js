@@ -6609,21 +6609,8 @@ function renderSettings() {
           <h3 id="onlineBackupHeading">Verschlüsseltes Online-Backup</h3>
           <p>Die Verschlüsselung findet ausschließlich auf diesem Gerät statt. Der Server speichert nur verschlüsselte Daten.</p>
         </div>
-        <div class="online-backup-key-row" data-settings-search-entry data-settings-search-section="Online-Backup">
-          <label for="onlineBackupKeyInput">Schlüssel importieren</label>
-          <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
-          <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Importieren</button>
-        </div>
-        <p class="online-backup-warning">Behandle den Schlüssel wie ein Passwort. Wer ihn besitzt, kann die verschlüsselten Einstellungen entschlüsseln.</p>
-        <section class="online-backup-managed" aria-labelledby="managedOnlineBackupHeading" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Online-Backups verwalten" data-settings-search-control="managedOnlineBackupHeading">
-          <h4 id="managedOnlineBackupHeading" tabindex="-1">Auf diesem Gerät erstellt</h4>
-          <div class="online-backup-managed-list" id="managedOnlineBackupList"></div>
-          <div class="online-backup-refresh-status" id="managedOnlineBackupRefreshStatus" role="status" hidden>
-            <span id="managedOnlineBackupRefreshMessage"></span>
-            <button class="btn btn-secondary" id="reloadManagedOnlineBackupsBtn" type="button">Erneut laden</button>
-          </div>
-        </section>
-        <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
+        <section class="online-backup-module" aria-labelledby="onlineBackupCreateHeading">
+          <h4 id="onlineBackupCreateHeading">Schlüssel erstellen</h4>
         <footer class="online-backup-footer" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Neuen Schlüssel erzeugen">
           <div class="online-backup-retention-field">
             <label for="onlineBackupRetentionSelect">Gültigkeitsdauer</label>
@@ -6639,6 +6626,25 @@ function renderSettings() {
           </div>
           <button class="btn btn-primary" id="createOnlineBackupBtn">Neuen Schlüssel erzeugen</button>
         </footer>
+        </section>
+        <section class="online-backup-module" aria-labelledby="onlineBackupImportHeading">
+          <h4 id="onlineBackupImportHeading">Schlüssel importieren</h4>
+          <div class="online-backup-key-row" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Schlüssel importieren">
+            <label for="onlineBackupKeyInput">Online-Schlüssel</label>
+            <input type="password" class="key-input" id="onlineBackupKeyInput" maxlength="75" pattern="MHU2-[A-Za-z0-9_-]{70}" spellcheck="false" autocomplete="off" placeholder="MHU2-…">
+            <button class="btn btn-secondary" id="restoreOnlineBackupBtn" disabled>Importieren</button>
+          </div>
+        </section>
+        <p class="online-backup-warning">Behandle den Schlüssel wie ein Passwort. Wer ihn besitzt, kann die verschlüsselten Einstellungen entschlüsseln.</p>
+        <div class="online-backup-status" id="onlineBackupStatus" role="status" aria-live="polite"></div>
+        <section class="online-backup-module online-backup-managed" aria-labelledby="managedOnlineBackupHeading" data-settings-search-entry data-settings-search-section="Online-Backup" data-settings-search-label="Online-Backups verwalten" data-settings-search-control="managedOnlineBackupHeading">
+          <h4 id="managedOnlineBackupHeading" tabindex="-1">Auf diesem Gerät erstellt</h4>
+          <div class="online-backup-managed-list" id="managedOnlineBackupList"></div>
+          <div class="online-backup-refresh-status" id="managedOnlineBackupRefreshStatus" role="status" hidden>
+            <span id="managedOnlineBackupRefreshMessage"></span>
+            <button class="btn btn-secondary" id="reloadManagedOnlineBackupsBtn" type="button">Erneut laden</button>
+          </div>
+        </section>
       </section>
       <div class="settings-section-label">Lokales Datei-Backup</div>
       <div class="settings-row local-backup-password-row">

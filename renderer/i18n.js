@@ -380,6 +380,8 @@
     ['Verschlüsseltes Online-Backup', 'Encrypted online backup'],
     ['Die Verschlüsselung findet ausschließlich auf diesem Gerät statt. Der Server speichert nur verschlüsselte Daten.', 'Encryption takes place only on this device. The server stores encrypted data only.'],
     ['Neuen Schlüssel erzeugen', 'Generate new key'],
+    ['Schlüssel erstellen', 'Create key'],
+    ['Online-Schlüssel', 'Online key'],
     ['Gültigkeitsdauer', 'Validity period'],
     ['24 Stunden', '24 hours'],
     ['3 Tage', '3 days'],
