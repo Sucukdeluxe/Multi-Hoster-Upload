@@ -804,6 +804,7 @@
     if (exact) return `${leading}${exact}${trailing}`;
     const patterns = target === 'en'
       ? [
+          [/^Update v([\d.]+) verfügbar \(([^)]+)\)$/, 'Update v$1 available ($2)'],
           [/^Update v(.+) verfügbar$/, 'Update v$1 available'],
           [/^Wiederhergestellte Warteschlange startet in (.+) s \((.+) Jobs\)\.$/, 'Restored queue starts in $1 s ($2 jobs).'],
           [/^Login ok, Upload-Form bereit \(Dateifeld: (.+)\)$/, 'Login successful, upload form ready (file field: $1)'],
@@ -912,6 +913,7 @@
           [/^Update v(.+) verfügbar\. Klicken zum Installieren\.$/, 'Update v$1 available. Click to install.']
         ]
       : [
+          [/^Update v([\d.]+) available \(([^)]+)\)$/, 'Update v$1 verfügbar ($2)'],
           [/^Update v(.+) available$/, 'Update v$1 verfügbar'],
           [/^Sleep in (\d+)s\.\.\.$/, 'Ruhezustand in $1s...'],
           [/^Shut down in (\d+)s\.\.\.$/, 'Herunterfahren in $1s...'],

@@ -231,6 +231,7 @@ test('update preparation refreshes a cached release before downloading the insta
     name: `Multi-Hoster-Upload v${version}`,
     tag_name: `v${version}`,
     html_url: `https://update.invalid/releases/${version}`,
+    published_at: '2026-09-22T17:30:00Z',
     body: `Release ${version}`,
     assets: [
       {
@@ -288,6 +289,7 @@ test('update preparation refreshes a cached release before downloading the insta
     };
     const oldCheck = await isolatedUpdater.checkForUpdate();
     assert.equal(oldCheck.remoteVersion, oldVersion);
+    assert.equal(oldCheck.publishedAt, '2026-09-22T17:30:00Z');
 
     global.fetch = async url => {
       const value = String(url);

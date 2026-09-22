@@ -9558,6 +9558,14 @@ function _renderUpdateReleaseNotes(container, value) {
   return container.childElementCount > 0;
 }
 
+function formatUpdatePublicationDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  const pad = number => String(number).padStart(2, '0');
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} - ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function showUpdateBanner(info) {
   if (!info) return;
   _knownUpdateInfo = { ...info, available: true };
@@ -9575,7 +9583,8 @@ function showUpdateBanner(info) {
   const installButton = document.getElementById('installUpdateBtn');
   if (title) title.textContent = 'Eine neue Version ist verfügbar!';
   if (message) {
-    message.textContent = `Update v${version} verfügbar`;
+    const publishedAt = formatUpdatePublicationDate(info.publishedAt);
+    message.textContent = `Update v${version} verfügbar${publishedAt ? ` (${publishedAt})` : ''}`;
     message.hidden = false;
   }
   if (notes && notesBody) {

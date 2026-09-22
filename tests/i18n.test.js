@@ -176,6 +176,8 @@ test('English is the fallback language and German remains selectable', () => {
 test('translations cover static labels and interpolated status text in both languages', () => {
   assert.equal(translateText('Einstellungen', 'en'), 'Settings');
   assert.equal(translateText('Update v2.1.0 verfügbar', 'en'), 'Update v2.1.0 available');
+  assert.equal(translateText('Update v2.1.50 verfügbar (22.09.2026 - 19:30)', 'en'), 'Update v2.1.50 available (22.09.2026 - 19:30)');
+  assert.equal(translateText('Update v2.1.50 available (22.09.2026 - 19:30)', 'de'), 'Update v2.1.50 verfügbar (22.09.2026 - 19:30)');
   assert.equal(translateText('Settings', 'de'), 'Einstellungen');
   assert.equal(translateText('Update v2.1.0 available', 'de'), 'Update v2.1.0 verfügbar');
   assert.equal(translateText('Alle Status', 'en'), 'Any status');

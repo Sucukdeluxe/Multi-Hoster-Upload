@@ -5483,6 +5483,21 @@ test('upload sidebar renders and updates the remaining upload size', () => {
   assert.match(appSource, /_setUploadTelemetryText\(['"]uploadTelemetryRemainingSize['"],\s*formatBytes\(stats\.bytesRemaining\)\)/u);
 });
 
+test('update publication dates use local time and omit missing or invalid metadata', () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  const formatter = source.slice(source.indexOf('function formatUpdatePublicationDate('), source.indexOf('function showUpdateBanner('));
+  const context = vm.createContext({});
+  vm.runInContext(formatter, context);
+  assert.equal(vm.runInContext("formatUpdatePublicationDate('2026-09-22T19:30:00')", context), '22.09.2026 - 19:30');
+  for (const value of [null, undefined, '', 'invalid']) {
+    context.value = value;
+    assert.equal(vm.runInContext('formatUpdatePublicationDate(value)', context), '');
+  }
+  const css = fs.readFileSync(path.join(__dirname, '../renderer/styles.css'), 'utf8');
+  assert.match(css, /\.update-dialog-copy p\s*\{[^}]*font-size:\s*14px;/su);
+});
+
 test('header occupies its final geometry before asynchronous initialization', () => {
   const projectRoot = path.join(__dirname, '..');
   const html = fs.readFileSync(path.join(projectRoot, 'renderer', 'index.html'), 'utf8');
