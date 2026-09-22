@@ -3988,7 +3988,7 @@ async function doOnlineBackupCreate() {
   const authority = beginManagedOnlineBackupMutation();
   const createButton = document.getElementById('createOnlineBackupBtn');
   const retentionSelect = document.getElementById('onlineBackupRetentionSelect');
-  const retention = retentionSelect?.value || '7d';
+  const retention = retentionSelect?.value || 'forever';
   if (createButton) createButton.disabled = true;
   if (retentionSelect) retentionSelect.disabled = true;
   setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', authority.statusContext);
@@ -6615,9 +6615,9 @@ function renderSettings() {
               <select id="onlineBackupRetentionSelect">
                 <option value="1d">24 Stunden</option>
                 <option value="3d">3 Tage</option>
-                <option value="7d" selected>7 Tage (Standard)</option>
+                <option value="7d">7 Tage</option>
                 <option value="31d">31 Tage</option>
-                <option value="forever">Unbegrenzt</option>
+                <option value="forever" selected>Unbegrenzt (Standard)</option>
               </select>
             </span>
           </div>

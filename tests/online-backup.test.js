@@ -50,10 +50,10 @@ describe('online backup key', () => {
     assert.equal(serialized.includes('private-webhook'), false);
     assert.equal(serialized.includes(parsed.masterKey.toString('base64url')), false);
     assert.deepEqual(Object.keys(created.record).sort(), ['blob', 'deleteVerifier', 'expiresInSeconds', 'id']);
-    assert.equal(created.record.expiresInSeconds, 604_800);
+    assert.equal(created.record.expiresInSeconds, null);
   });
 
-  it('supports the allowed validity periods with seven days as the default', () => {
+  it('supports the allowed validity periods with unlimited validity as the default', () => {
     const { createOnlineBackup, normalizeOnlineBackupRetention } = require('../lib/online-backup');
     const createdAt = '2026-08-09T00:00:00.000Z';
     const expected = new Map([
@@ -64,7 +64,10 @@ describe('online backup key', () => {
       ['forever', [null, null]]
     ]);
 
-    assert.equal(createOnlineBackup(settings(), '2.1.41', createdAt).record.expiresInSeconds, 604_800);
+    assert.equal(normalizeOnlineBackupRetention(), 'forever');
+    const defaultBackup = createOnlineBackup(settings(), '2.1.41', createdAt);
+    assert.equal(defaultBackup.record.expiresInSeconds, null);
+    assert.equal(defaultBackup.expiresAt, null);
     for (const [retention, [seconds, expiresAt]] of expected) {
       const created = createOnlineBackup(settings(), '2.1.41', createdAt, retention);
       assert.equal(created.record.expiresInSeconds, seconds);

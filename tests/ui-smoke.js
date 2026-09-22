@@ -1475,7 +1475,7 @@ setTimeout(async () => {
     check('Online backup controls exist', onlineBackupControls);
 
     const onlineBackupRetentionState = await wc.executeJavaScript('(() => { const select = document.getElementById("onlineBackupRetentionSelect"); const wrapper = select.closest(".online-backup-retention-select"); return { value: select.value, options: [...select.options].map(option => option.value + ":" + option.textContent), arrowRight: getComputedStyle(wrapper, "::after").right, fontSize: getComputedStyle(select).fontSize }; })()');
-    check('Online backup validity defaults to seven days and offers every requested duration', onlineBackupRetentionState.value === '7d' && onlineBackupRetentionState.options.join('|') === '1d:24 Stunden|3d:3 Tage|7d:7 Tage (Standard)|31d:31 Tage|forever:Unbegrenzt' && onlineBackupRetentionState.arrowRight === '14px' && parseFloat(onlineBackupRetentionState.fontSize) >= 10);
+    check('Online backup validity defaults to unlimited and offers every requested duration', onlineBackupRetentionState.value === 'forever' && onlineBackupRetentionState.options.join('|') === '1d:24 Stunden|3d:3 Tage|7d:7 Tage|31d:31 Tage|forever:Unbegrenzt (Standard)' && onlineBackupRetentionState.arrowRight === '14px' && parseFloat(onlineBackupRetentionState.fontSize) >= 10);
 
     const onlineBackupKeyContract = await wc.executeJavaScript('document.getElementById("onlineBackupKeyInput")?.maxLength + "|" + document.getElementById("onlineBackupKeyInput")?.getAttribute("pattern")');
     check('Online backup input enforces the 75-character MHU key format', onlineBackupKeyContract === '75|MHU2-[A-Za-z0-9_-]{70}');

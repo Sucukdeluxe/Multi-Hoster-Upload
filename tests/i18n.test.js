@@ -6,6 +6,17 @@ const espree = require('espree');
 
 const { normalizeLanguage, translateText } = require('../renderer/i18n');
 
+test('online backup selection defaults to unlimited in both languages', () => {
+  assert.equal(translateText('Unbegrenzt (Standard)', 'en'), 'Unlimited (default)');
+  assert.equal(translateText('Unlimited (default)', 'de'), 'Unbegrenzt (Standard)');
+  assert.equal(translateText('7 Tage', 'en'), '7 days');
+  const source = fs.readFileSync(path.join(__dirname, '../renderer/app.js'), 'utf8');
+  const select = source.match(/<select id="onlineBackupRetentionSelect">([\s\S]*?)<\/select>/)[1];
+  assert.match(select, /<option value="forever" selected>Unbegrenzt \(Standard\)<\/option>/);
+  assert.equal((select.match(/ selected/g) || []).length, 1);
+  assert.match(source, /const retention = retentionSelect\?\.value \|\| 'forever';/);
+});
+
 test('translates permanent source deletion controls to English', () => {
   assert.equal(translateText('Quelldatei nach vollständigem Upload dauerhaft löschen', 'en'), 'Permanently delete source file after complete upload');
   assert.equal(translateText('Dauerhaftes Löschen aktivieren', 'en'), 'Enable permanent deletion');

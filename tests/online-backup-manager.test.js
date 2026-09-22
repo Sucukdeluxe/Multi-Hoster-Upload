@@ -182,7 +182,7 @@ describe('transactional online backup manager', () => {
     const result = await fixture.manager.createManaged();
 
     assert.deepEqual(fixture.events, ['prepare', 'upload', 'commit']);
-    assert.deepEqual(fixture.createArguments, [settings, '2.1.31', fixture.createdAt, '7d', null]);
+    assert.deepEqual(fixture.createArguments, [settings, '2.1.31', fixture.createdAt, 'forever', null]);
     assert.match(fixture.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     assert.deepEqual(result, {
       ok: true,
