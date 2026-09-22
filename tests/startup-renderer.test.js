@@ -286,7 +286,7 @@ app.whenReady().then(async()=>{
     for(const language of ['de','en']){
       await wc.executeJavaScript('document.getElementById("settingsSearchInput").placeholder='+JSON.stringify(translateText('Einstellungen durchsuchen',language)));
       const searchSize=await wc.executeJavaScript('(() => {const e=document.getElementById("settingsSearchInput"),s=getComputedStyle(e),p=getComputedStyle(e,"::placeholder"),canvas=document.createElement("canvas"),ctx=canvas.getContext("2d");ctx.font=p.font||s.font;return {available:e.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight),text:ctx.measureText(e.placeholder).width,font:parseFloat(s.fontSize),overflow:document.documentElement.scrollWidth>innerWidth};})()');
-      assert.ok(searchSize.available>=searchSize.text,JSON.stringify({width,language,searchSize}));
+      assert.ok(searchSize.available>=searchSize.text+24,JSON.stringify({width,language,searchSize}));
       assert.ok(searchSize.font>=13);
       assert.equal(searchSize.overflow,false);
       const alignment=await wc.executeJavaScript('(() => {const input=document.getElementById("settingsSearchInput"),style=getComputedStyle(input),icon=document.querySelector(".settings-search-icon"),iconStyle=getComputedStyle(icon);return {text:style.textAlign,left:style.paddingLeft,right:style.paddingRight,iconRight:iconStyle.right,iconOnRight:icon.getBoundingClientRect().left>input.getBoundingClientRect().left+input.getBoundingClientRect().width/2};})()');

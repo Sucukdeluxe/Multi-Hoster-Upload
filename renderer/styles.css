@@ -1016,6 +1016,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   line-height: 18px;
 }
 #settingsSearchInput::placeholder { color: var(--text-dim); }
+#settingsSearchInput::-webkit-search-decoration { display: none; }
+#settingsSearchInput:placeholder-shown::-webkit-search-cancel-button { display: none; }
 #settingsSearchInput:focus { border-color: var(--accent); outline: none; }
 .settings-navigation {
   position: relative;
@@ -5050,6 +5052,6 @@ input[type="checkbox"] {
 
 @media (min-width: 840px) {
   .settings-layout {
-    grid-template-columns: 260px minmax(0, 1fr);
+    grid-template-columns: 280px minmax(0, 1fr);
   }
 }
