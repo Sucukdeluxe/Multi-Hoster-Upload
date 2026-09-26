@@ -3888,14 +3888,14 @@ input[type="checkbox"] {
 .settings-nav-button {
   min-height: 36px;
   padding: 7px 10px;
-  border: 1px solid transparent;
-  border-left: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text-muted);
   font-size: 12px;
 }
 
 .settings-nav-button:hover {
+  border-color: var(--border-hover);
   background: var(--bg-raised);
 }
 
