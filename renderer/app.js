@@ -1376,7 +1376,7 @@ async function toggleAutomationPauseResume() {
       }
     }
   } catch {
-    showCopyToast(localizeUiText(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.'));
+    showCopyToast(localizeUiText(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.'), 6000, 'error');
   } finally {
     automationPauseResumeBusy = false;
     refreshAutomationControlCenter();
@@ -1463,7 +1463,7 @@ async function init() {
   renderHosterSummary();
   renderHosterModal();
   renderSettings();
-  if (!_startupQueueEvidenceAvailable) showCopyToast('Automatische Wiederaufnahme wurde wegen nicht verfügbarer Abschlussnachweise blockiert.', 9000);
+  if (!_startupQueueEvidenceAvailable) showCopyToast('Automatische Wiederaufnahme wurde wegen nicht verfügbarer Abschlussnachweise blockiert.', 9000, 'warning');
   renderAccounts();
   setupListeners();
   importEntryCoordinator.ready();
@@ -1512,7 +1512,7 @@ async function init() {
   window.api.onShutdownCountdown(handleShutdownCountdown);
   window.api.onUploadLogFallback((data) => {
     const path = data && data.fallbackPath ? data.fallbackPath : '(Fallback)';
-    showCopyToast(`Log-Pfad nicht beschreibbar — schreibe nach: ${path}`, 8000);
+    showCopyToast(`Log-Pfad nicht beschreibbar — schreibe nach: ${path}`, 8000, 'warning');
   });
   window.api.onLogPathAutoUpdated((data) => {
     if (!data || !data.logFilePath) return;
@@ -1804,8 +1804,8 @@ async function _handleMenuAction(action) {
         const res = await window.api.createSupportBundle();
         if (res && res.ok) showCopyToast(`Diagnose-Paket gespeichert (${(res.bytes / 1024).toFixed(1)} KB)`);
         else if (res && res.canceled) showCopyToast('Abgebrochen');
-        else showCopyToast(`Fehler: ${(res && res.error) || 'unbekannt'}`);
-      } catch (err) { showCopyToast(`Fehler: ${err.message || err}`); }
+        else showCopyToast(`Fehler: ${(res && res.error) || 'unbekannt'}`, 6000, 'error');
+      } catch (err) { showCopyToast(`Fehler: ${err.message || err}`, 6000, 'error'); }
       break;
     }
     case 'check-updates': {
@@ -1868,14 +1868,14 @@ async function requestUpdateCheck({ forceRefresh = true } = {}) {
     if (result && result.available) {
       showUpdateBanner(result);
     } else if (result && result.error) {
-      showCopyToast('Updateprüfung fehlgeschlagen');
+      showCopyToast('Updateprüfung fehlgeschlagen', 6000, 'error');
     } else {
       _knownUpdateInfo = null;
       showCopyToast('Kein Update verfügbar');
     }
     return result;
   } catch {
-    showCopyToast('Updateprüfung fehlgeschlagen');
+    showCopyToast('Updateprüfung fehlgeschlagen', 6000, 'error');
     return null;
   } finally {
     _updateCheckBusy = false;
@@ -2245,7 +2245,7 @@ async function applyHosterSelection() {
       }
     } catch {
       const failure = { ok: false, error: 'Automatische Aufnahme konnte nicht abgeschlossen werden.' };
-      showCopyToast(failure.error, 6500);
+      showCopyToast(failure.error, 6500, 'error');
       document.getElementById('hosterModal').style.display = 'flex';
       renderImportPlanSummary();
       return failure;
@@ -2621,7 +2621,7 @@ function coordinateImportEntries(entries, options = {}) {
       inspection = await window.api.inspectImportFiles(candidates, existingImportPaths());
     } catch {
       if (generation !== _importGeneration) return null;
-      showCopyToast('Vorabprüfung fehlgeschlagen.', 6500);
+      showCopyToast('Vorabprüfung fehlgeschlagen.', 6500, 'error');
       return null;
     }
     if (generation !== _importGeneration) return null;
@@ -3755,7 +3755,7 @@ async function persistImportedQueueState() {
 }
 
 function showImportQueuePersistenceError(error) {
-  showCopyToast(`Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden: ${error.message || error}`, 8000);
+  showCopyToast(`Import übernommen. Warteschlange konnte nicht vollständig gespeichert werden: ${error.message || error}`, 8000, 'warning');
 }
 
 function beginOnlineBackupStatusContext() {
@@ -4040,12 +4040,12 @@ async function copyManagedOnlineBackup(entry) {
     try {
       const result = await window.api.copyManagedOnlineBackup(id);
       if (!result?.ok) {
-        showCopyToast(result?.error || 'Online-Sicherung konnte nicht kopiert werden');
+        showCopyToast(result?.error || 'Online-Sicherung konnte nicht kopiert werden', 6000, 'error');
         return;
       }
       showCopyToast('Online-Schlüssel kopiert');
     } catch {
-      showCopyToast('Online-Sicherung konnte nicht kopiert werden');
+      showCopyToast('Online-Sicherung konnte nicht kopiert werden', 6000, 'error');
     }
   });
   renderManagedOnlineBackups(focusTarget);
@@ -4783,7 +4783,7 @@ async function startSelectedUpload(explicitJobs) {
         restoreUploadJobStates(originalStates);
         renderQueueTable();
         const error = sanitizeUploadControlError(err, 'Jobs konnten nicht hinzugefügt werden.');
-        showCopyToast(error);
+        showCopyToast(error, 6000, 'error');
         return { ok: false, error };
       }
 
@@ -4800,7 +4800,7 @@ async function startSelectedUpload(explicitJobs) {
         restoreUploadJobStates(originalStates);
         renderQueueTable();
         const error = sanitizeUploadControlError(result.error, 'Jobs konnten nicht hinzugefügt werden.');
-        showCopyToast(error);
+        showCopyToast(error, 6000, 'error');
         return { ok: false, error };
       }
       const outcome = applyAddJobsOutcome(addable, result, {
@@ -4812,7 +4812,7 @@ async function startSelectedUpload(explicitJobs) {
       if (!outcome.consistent) {
         persistQueueStateSoon();
         const error = 'Jobs konnten nicht eindeutig bestätigt werden.';
-        showCopyToast(error);
+        showCopyToast(error, 6000, 'error');
         return { ok: false, error };
       }
       applyAddJobsFingerprints(addRequest, result?.sourceCleanupFingerprints);
@@ -4828,7 +4828,7 @@ async function startSelectedUpload(explicitJobs) {
       if (alreadyInBatch > 0) toastParts.push(`${alreadyInBatch} bereits im Batch`);
       if (skipped > 0) toastParts.push(`${skipped} ohne gueltigen Account`);
       if (result && result.error) {
-        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${result.error}`);
+        showCopyToast(`Jobs konnten nicht hinzugefügt werden: ${result.error}`, 6000, 'error');
       } else if (toastParts.length > 0) {
         showCopyToast(`Jobs: ${toastParts.join(', ')}`);
       } else {
@@ -8351,7 +8351,7 @@ async function deleteAccount(accountId) {
   // source of perceived lag on add/delete.
   saveConfigTracked({ hosters: config.hosters }).catch((err) => {
     if (window.api && window.api.debugLog) window.api.debugLog(`deleteAccount saveConfig failed: ${err && err.message ? err.message : err}`);
-    showCopyToast('Account-Löschung konnte nicht persistiert werden — bitte erneut versuchen.');
+    showCopyToast('Account-Löschung konnte nicht persistiert werden — bitte erneut versuchen.', 6000, 'error');
   });
 }
 
@@ -8686,7 +8686,7 @@ async function confirmHistoryClear() {
     await loadHistory();
     closeHistoryClearModal();
   } catch (error) {
-    showCopyToast(error.message || String(error));
+    showCopyToast(error.message || String(error), 6000, 'error');
   } finally {
     confirmButton.disabled = false;
     cancelButton.disabled = false;
@@ -9170,12 +9170,12 @@ async function recoverWindowClose(generation, attempt, originalError) {
   try {
     restored = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: false, attempt }));
   } catch (error) {
-    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000, 'error');
     return;
   }
   if (!isCurrentClosePreparation(generation, attempt)) return;
   if (restored !== true) {
-    showCopyToast('Die Anwendung konnte nach dem fehlgeschlagenen Speichern nicht entsperrt werden', 8000);
+    showCopyToast('Die Anwendung konnte nach dem fehlgeschlagenen Speichern nicht entsperrt werden', 8000, 'error');
     return;
   }
   try {
@@ -9187,7 +9187,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
       if (failedConfigWriteOperations.length !== 0) throw new Error('Nicht alle Einstellungen konnten gespeichert werden');
     }));
   } catch (error) {
-    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000);
+    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000, 'error');
     return;
   }
   if (!isCurrentClosePreparation(generation, attempt)) return;
@@ -9195,7 +9195,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
   activeClosePreparationAttempt = null;
   closePreparationState = 'open';
   setClosePreparationUi(false);
-  showCopyToast(originalError.message || String(originalError), 8000);
+  showCopyToast(originalError.message || String(originalError), 8000, 'error');
 }
 
 function prepareForWindowClose(attempt) {
@@ -9489,7 +9489,7 @@ function setupListeners() {
       } catch (error) {
         historyRetentionSelect.value = prev;
         syncHistoryRetentionPicker();
-        showCopyToast(error.message || String(error));
+        showCopyToast(error.message || String(error), 6000, 'error');
       }
     });
   }
@@ -10105,7 +10105,7 @@ async function importUploadLog() {
     };
   }).filter(row => hasFiniteMetadata(row.size) && hasFiniteMetadata(row.mtimeMs));
   if (completionRows.length !== matchingJobs.length) {
-    showCopyToast('Abschlussnachweise konnten nicht vollständig ermittelt werden.', 7000);
+    showCopyToast('Abschlussnachweise konnten nicht vollständig ermittelt werden.', 7000, 'warning');
     return;
   }
   if (completionRows.length > 0 && typeof window.api.recordAutomationCompletions === 'function') {
@@ -10113,7 +10113,7 @@ async function importUploadLog() {
       await window.api.recordAutomationCompletions(completionRows);
       invalidateAutomationEvidenceSnapshot();
     } catch {
-      showCopyToast('Abschlussnachweise konnten nicht gespeichert werden.', 7000);
+      showCopyToast('Abschlussnachweise konnten nicht gespeichert werden.', 7000, 'error');
       return;
     }
   }
@@ -10352,9 +10352,10 @@ function escapeAttr(str) {
   return String(str).replace(_ATTR_ESC_RE, (c) => _ATTR_ESC_MAP[c]);
 }
 
-function showCopyToast(msg, durationMs) {
+function showCopyToast(msg, durationMs, state = 'success') {
   const toast = document.getElementById('copyToast');
   toast.textContent = localizeUiText(msg);
+  toast.dataset.state = state === 'error' || state === 'warning' ? state : 'success';
   toast.classList.add('show');
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => toast.classList.remove('show'), durationMs || 1500);
