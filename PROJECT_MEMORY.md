@@ -48,7 +48,7 @@ Enthält der Projektpfad Shell-Sonderzeichen wie `&`, scheitern die npm-`.cmd`-S
 
 ## Bekannte Probleme und nächste Schritte
 
-- Kleine Änderungen: Lint und private Testsuite lokal ausführen, committen und pushen, ohne auf CI zu warten. Den privaten Remote-Lauf (`gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`, mit `-f ui_smoke=true` inklusive Electron-UI-Smoke) nur vor Releases oder nach größeren Umbauten starten und abwarten. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
+- Kleine Änderungen: Lint und private Testsuite lokal ausführen (der UI-Smoke läuft dabei unsichtbar offscreen mit), committen und pushen, ohne auf CI zu warten. Den privaten Remote-Lauf (`gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`, mit `-f ui_smoke=true` inklusive Electron-UI-Smoke) nur vor Releases oder nach größeren Umbauten starten und abwarten. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
 - Der DoodStream-Web-Upload funktioniert laut Nutzerrückmeldung vom 26.09.2026 wieder.
 - Anzeigefehler auf Windows Server über RDP (Inhalt versetzt, weiße Ränder, gelegentlich beim ersten Start): Nach dem Anzeigen wird einmal ein Neu-Layout erzwungen und `window-content: …` protokolliert. Wirksamkeit auf dem Server noch zu bestätigen.
 - Wird eine vollständig abgelehnte Dateiauswahl gemeldet, zeigt der Hinweis die Vorabprüfungsbilanz statt eines kurzen Duplikathinweises. Eine verständlichere Einzeldatei-Meldung wäre möglich.
