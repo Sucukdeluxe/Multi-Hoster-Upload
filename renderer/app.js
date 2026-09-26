@@ -10090,13 +10090,27 @@ function formatTime(seconds) {
 
 function pad(n) { return String(Math.floor(n)).padStart(2, '0'); }
 
+const _dateTimeFormatters = new Map();
+
+function getDateTimeFormatters(locale) {
+  let formatters = _dateTimeFormatters.get(locale);
+  if (!formatters) {
+    formatters = {
+      date: new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: 'numeric' }),
+      time: new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    };
+    _dateTimeFormatters.set(locale, formatters);
+  }
+  return formatters;
+}
+
 function formatDateTime(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return { ts: 0, text: localizeUiText('Unbekannt') };
+  const formatters = getDateTimeFormatters(getUiLocale());
   return {
     ts: date.getTime(),
-    text: date.toLocaleDateString(getUiLocale(), { day: '2-digit', month: '2-digit', year: 'numeric' })
-      + ' ' + date.toLocaleTimeString(getUiLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    text: formatters.date.format(date) + ' ' + formatters.time.format(date)
   };
 }
 
