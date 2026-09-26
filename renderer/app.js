@@ -5924,6 +5924,7 @@ function updateHistorySidebarSummary() {
   const labels = {
     all: 'Alles behalten',
     '7d': 'Letzte 7 Tage',
+    '14d': 'Letzte 14 Tage',
     '30d': 'Letzte 30 Tage',
     '90d': 'Letzte 90 Tage',
     '1000': 'Letzte 1000 Uploads',
@@ -8595,6 +8596,7 @@ function syncHistoryRetentionPicker() {
   const labels = {
     all: 'Alles behalten',
     '7d': 'Letzte 7 Tage',
+    '14d': 'Letzte 14 Tage',
     '30d': 'Letzte 30 Tage',
     '90d': 'Letzte 90 Tage',
     '1000': 'Letzte 1000 Uploads',
