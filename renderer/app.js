@@ -6706,7 +6706,7 @@ function renderSettings() {
   pages.diagnose.innerHTML = `
       ${pageHeader('Diagnose-Zugriff', 'Zeitlich kontrollierter Lesezugriff für Fehleranalyse und Support.')}
       <div class="settings-section-label">Diagnose-Zugriff (nur lesen) <span class="panel-status" id="diagStatusBadge">…</span></div>
-      <p class="hint" style="margin:0 0 12px;padding:8px 10px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08)">
+      <p class="hint" style="margin:0 0 12px;padding:9px 11px;border:1px solid rgba(245,158,11,0.35);border-radius:6px;background:rgba(245,158,11,0.08)">
         Erlaubt <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und bereinigte Einstellungen. Passwörter, API-Keys und Tokens werden maskiert. <strong>Bildschirm und Eingabesteuerung bleiben gesperrt.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> und damit nur über einen SSH- oder VPN-Tunnel erreichbar.
       </p>
       <div class="settings-grid-mini">
@@ -6721,14 +6721,16 @@ function renderSettings() {
       </div>
       <div class="settings-row">
         <label>Sichtbarkeit</label>
+        <span class="settings-select-control">
         <select class="hs-input settings-autosave" id="diagBindModeInput" style="width:auto">
           <option value="local">Nur lokal (127.0.0.1) — Tunnel/VPN</option>
           <option value="network">Im Netzwerk (0.0.0.0) — Allowlist nötig</option>
         </select>
+        </span>
       </div>
       <div class="settings-row">
         <label>Adresse für den Code</label>
-        <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1">
+        <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1 1 320px;min-width:0;max-width:560px">
       </div>
       <div class="settings-row" id="diagSuggestRow" style="display:none">
         <label></label>
