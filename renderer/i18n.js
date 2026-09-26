@@ -417,6 +417,8 @@
     ['Ohne dieses Passwort kann das Backup nicht importiert werden.', 'The backup cannot be imported without this password.'],
     ['Passwort (mindestens 8 Zeichen)', 'Password (at least 8 characters)'],
     ['Passwort wiederholen', 'Repeat password'],
+    ['Mindestens 8 Zeichen', 'At least 8 characters'],
+    ['Passwort erneut eingeben', 'Enter the password again'],
     ['Das Backup-Passwort muss mindestens 8 Zeichen lang sein.', 'The backup password must be at least 8 characters long.'],
     ['Die beiden Backup-Passwörter stimmen nicht überein.', 'The two backup passwords do not match.'],
     ['Passwort prüfen', 'Check password'],

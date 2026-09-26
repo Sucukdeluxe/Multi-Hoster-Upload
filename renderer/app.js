@@ -6800,21 +6800,29 @@ function renderSettings() {
         </section>
       </section>
       <div class="settings-section-label">Lokales Datei-Backup</div>
-      <div class="settings-row local-backup-password-row">
-        <div class="settings-copy">
-          <label for="protectLocalBackupInput">Mit eigenem Passwort schützen</label>
-          <span class="hint">Ohne dieses Passwort kann das Backup nicht importiert werden.</span>
+      <section class="online-backup-module local-backup-module" aria-label="Lokales Datei-Backup">
+        <label class="local-backup-toggle" for="protectLocalBackupInput">
+          <span class="local-backup-toggle-copy">
+            <span class="local-backup-toggle-title">Mit eigenem Passwort schützen</span>
+            <span class="local-backup-toggle-hint">Ohne dieses Passwort kann das Backup nicht importiert werden.</span>
+          </span>
+          <input type="checkbox" id="protectLocalBackupInput">
+        </label>
+        <div class="local-backup-password-fields" id="localBackupPasswordFields" hidden>
+          <label class="local-backup-field" for="localBackupPasswordInput">
+            <span>Passwort</span>
+            <input type="password" class="key-input" id="localBackupPasswordInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Mindestens 8 Zeichen">
+          </label>
+          <label class="local-backup-field" for="localBackupPasswordConfirmInput">
+            <span>Passwort wiederholen</span>
+            <input type="password" class="key-input" id="localBackupPasswordConfirmInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort erneut eingeben">
+          </label>
         </div>
-        <input type="checkbox" id="protectLocalBackupInput">
-      </div>
-      <div class="local-backup-password-fields" id="localBackupPasswordFields" hidden>
-        <input type="password" class="key-input" id="localBackupPasswordInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort (mindestens 8 Zeichen)">
-        <input type="password" class="key-input" id="localBackupPasswordConfirmInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort wiederholen">
-      </div>
-      <div class="backup-file-actions">
-        <button class="btn btn-secondary" id="exportBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei exportieren">Datei exportieren</button>
-        <button class="btn btn-secondary" id="importBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei importieren">Datei importieren</button>
-      </div>
+        <footer class="online-backup-footer backup-file-actions">
+          <button class="btn btn-secondary" id="importBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei importieren">Datei importieren</button>
+          <button class="btn btn-primary" id="exportBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei exportieren">Datei exportieren</button>
+        </footer>
+      </section>
   `;
 
   const activateSettingsPage = (target, focus = false) => {
