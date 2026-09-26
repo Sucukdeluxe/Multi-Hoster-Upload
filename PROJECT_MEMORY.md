@@ -25,6 +25,10 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows zum Hochlade
 - Nicht vorhandene Überwachungspfade bleiben gespeichert; die Überwachung wird bis zur Korrektur deaktiviert.
 - Erfolgreiche Uploads erhalten einen persistenten Abschlussnachweis. Bei einem Speicherfehler bleibt die Warteschlange erhalten, um unbeabsichtigte Wiederholungen zu vermeiden.
 - Dropdowns benötigen ausreichenden Pfeilabstand und müssen auch in schmalen Fenstern bedienbar bleiben. Kopierbare Inhalte und Eingabefelder behalten ihre Textauswahl.
+- Fokusringe erscheinen nur im Tastaturmodus (`html.keyboard-navigation`, gesetzt durch Tab oder Pfeiltasten in Menüs, entfernt durch Mausklick). Automatischer Fokus in Dialogen, Escape und Entf zeigen keinen Ring; Textfelder erhalten beim Fokus keinen farbigen Rahmen. Informationstexte sind nicht markierbar.
+- Beschreibungen zu Einstellungen stehen in Info-Tooltips (`.info-tip`), die fixiert positioniert werden und nicht von Containern abgeschnitten werden.
+- Meldungen erscheinen als Toast oben rechts mit Zustand `success`, `warning` oder `error`. Online-Backup-Erfolge und -Fehler laufen darüber; der Inline-Status zeigt nur laufende Vorgänge.
+- Die Content-Security-Policy bleibt bei `default-src 'self'`; Symbole daher per CSS statt Data-URI.
 - Update-Metadaten müssen zu den tatsächlich veröffentlichten Dateinamen, Größen und Prüfsummen passen. Versionsmeldungen zeigen gültige Veröffentlichungszeitpunkte in lokaler Gerätezeit.
 - Release-Changelogs sind auf GitHub englisch und auf Forgejo deutsch, bei inhaltlich gleichem Umfang.
 - Die aktive Arbeitslinie ist `master`; der zweite Remote verwendet `sync/github-master`. Eine getrennte ältere Historie darf nicht überschrieben werden.
@@ -46,6 +50,7 @@ Enthält der Projektpfad Shell-Sonderzeichen wie `&`, scheitern die npm-`.cmd`-S
 
 - Nach jedem App-Push die private Testsuite mit dem vollständigen App-Commit starten: `gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`. Mit `-f ui_smoke=true` läuft zusätzlich der Electron-UI-Smoke auf dem Runner. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
 - Der DoodStream-Web-Upload funktioniert laut Nutzerrückmeldung vom 26.09.2026 wieder.
+- Anzeigefehler auf Windows Server über RDP (Inhalt versetzt, weiße Ränder, gelegentlich beim ersten Start): Nach dem Anzeigen wird einmal ein Neu-Layout erzwungen und `window-content: …` protokolliert. Wirksamkeit auf dem Server noch zu bestätigen.
 - Wird eine vollständig abgelehnte Dateiauswahl gemeldet, zeigt der Hinweis die Vorabprüfungsbilanz statt eines kurzen Duplikathinweises. Eine verständlichere Einzeldatei-Meldung wäre möglich.
 - Öffentliche Dokumentation auf Architektur, Verhalten und reproduzierbare Entwicklung beschränken. Keine betrieblichen Einzelfalldaten ergänzen.
 
@@ -56,4 +61,5 @@ Enthält der Projektpfad Shell-Sonderzeichen wie `&`, scheitern die npm-`.cmd`-S
 - CI-Timingkorrektur: beide betroffenen Tests zehnmal hintereinander erfolgreich. Gesamte lokale Suite und GitHub-CI einschließlich Windows-Build erfolgreich. Tests warten mit Zeitlimit auf verarbeitete Eingaben beziehungsweise den angekommenen Dateikandidaten, ohne Zustandsprüfungen abzuschwächen.
 - Öffentliche Dokumentation von konkreten Betriebs-, Sicherungs- und Diagnosedetails bereinigt. Keine Anwendungscodeänderung und keine Umschreibung der Git-Historie; ältere Dokumentfassungen bleiben historisch erreichbar.
 - 26.09.2026: Das Recent-Panel wird zusätzlich neu begrenzt, wenn sich Höhen innerhalb der Warteschlangenansicht ändern (z. B. umbrechende Werkzeugleiste). Vorher konnte die Warteschlange bei kleinem Fenster auf 69 px schrumpfen. UI-Smoke lokal dreimal hintereinander mit 303/303 erfolgreich. CI-Actions auf `checkout@v7` und `setup-node@v7` (Node 24) umgestellt. `npm run verify` lokal mit `script-shell=pwsh` erfolgreich.
+- 26.09.2026 (UI-Überarbeitung, noch nicht veröffentlicht): Sprachwechsel mit 3.314 Verlaufseinträgen von 1,1–1,8 s auf 30–50 ms beschleunigt (gecachte Datumsformatierer, identische Ausgabe). Fokusringe, Textauswahl, Toasts, Online-Backup-Ablauf, Upload-Einstellungen, 14-Tage-Verlaufsoption und Diagnose-Adressfeld überarbeitet. 844 Haupttests, 18 Servertests und Lint erfolgreich; Darstellung per Offscreen-Screenshots bei 1100×750 und 820×560 geprüft.
 - 26.09.2026: Schließt sich der Update-Dialog ohne brauchbares Rücksprungziel, landet der Fokus auf dem Update-Button im Header statt auf einem ausgeblendeten Dialogbutton. Private Suite einschließlich UI-Smoke auf dem Windows-Runner zweimal gegen `bbc4a98` erfolgreich; öffentliche CI grün.
