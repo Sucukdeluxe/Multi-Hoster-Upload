@@ -40,19 +40,13 @@ npm run dev
 npm run verify
 ```
 
-Bei Problemen mit Shell-Sonderzeichen im Projektpfad können die Prüfungen direkt ausgeführt werden:
-
-```powershell
-node node_modules/eslint/bin/eslint.js .
-npm audit --omit=dev
-```
+Enthält der Projektpfad Shell-Sonderzeichen wie `&`, scheitern die npm-`.cmd`-Shims unter `cmd.exe`. Dann eine lokale, nicht versionierte `.npmrc` mit `script-shell=pwsh` anlegen (über `.git/info/exclude` ausschließen); danach funktionieren alle npm-Skripte.
 
 ## Bekannte Probleme und nächste Schritte
 
-- Nach jedem App-Push die private Testsuite mit dem vollständigen App-Commit starten: `gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
-- Die DoodStream-Web-Upload-Serverermittlung ist weiterhin gesondert zu prüfen. Ein erfolgreicher Accountcheck bestätigt keinen erfolgreichen Dateitransfer.
-- Der optionale Langzeit-UI-Smoke hat bekannte Timing-/Fixture-Abweichungen außerhalb der regulären CI. Diese getrennt untersuchen; reguläre Regressionen nicht überspringen.
-- Die CI meldet eine Laufzeit-Abkündigung für die verwendeten Checkout-/Node-Setup-Actions. Ein Versionswechsel ist separat zu prüfen.
+- Nach jedem App-Push die private Testsuite mit dem vollständigen App-Commit starten: `gh workflow run tests.yml --repo Sucukdeluxe/Multi-Hoster-Upload-Tests -f source_ref=<Commit>`. Mit `-f ui_smoke=true` läuft zusätzlich der Electron-UI-Smoke auf dem Runner. Ein erfolgreicher öffentlicher Build ersetzt diesen Testlauf nicht. Lokale Ausführung ist in der privaten README dokumentiert.
+- Der DoodStream-Web-Upload funktioniert laut Nutzerrückmeldung vom 26.09.2026 wieder.
+- Wird eine vollständig abgelehnte Dateiauswahl gemeldet, zeigt der Hinweis die Vorabprüfungsbilanz statt eines kurzen Duplikathinweises. Eine verständlichere Einzeldatei-Meldung wäre möglich.
 - Öffentliche Dokumentation auf Architektur, Verhalten und reproduzierbare Entwicklung beschränken. Keine betrieblichen Einzelfalldaten ergänzen.
 
 ## Zuletzt verifiziert
@@ -61,3 +55,4 @@ npm audit --omit=dev
 - Release `2.1.50`: 845 Haupttests und 18 Servertests erfolgreich; Lint und Abhängigkeitsprüfung erfolgreich. Installer, portable Anwendung und Update-Metadaten beider Plattformen einschließlich Download-Prüfsummen geprüft.
 - CI-Timingkorrektur: beide betroffenen Tests zehnmal hintereinander erfolgreich. Gesamte lokale Suite und GitHub-CI einschließlich Windows-Build erfolgreich. Tests warten mit Zeitlimit auf verarbeitete Eingaben beziehungsweise den angekommenen Dateikandidaten, ohne Zustandsprüfungen abzuschwächen.
 - Öffentliche Dokumentation von konkreten Betriebs-, Sicherungs- und Diagnosedetails bereinigt. Keine Anwendungscodeänderung und keine Umschreibung der Git-Historie; ältere Dokumentfassungen bleiben historisch erreichbar.
+- 26.09.2026: Das Recent-Panel wird zusätzlich neu begrenzt, wenn sich Höhen innerhalb der Warteschlangenansicht ändern (z. B. umbrechende Werkzeugleiste). Vorher konnte die Warteschlange bei kleinem Fenster auf 69 px schrumpfen. UI-Smoke lokal dreimal hintereinander mit 303/303 erfolgreich. CI-Actions auf `checkout@v7` und `setup-node@v7` (Node 24) umgestellt. `npm run verify` lokal mit `script-shell=pwsh` erfolgreich.
