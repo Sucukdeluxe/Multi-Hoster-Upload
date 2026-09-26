@@ -1792,7 +1792,7 @@ async function _handleMenuAction(action) {
     case 'add-folder': document.getElementById('addFolderBtn')?.click(); break;
     case 'backup-export': doBackupExport(); break;
     case 'backup-import': doBackupImport(); break;
-    case 'online-backup-create': doOnlineBackupCreate(); break;
+    case 'online-backup-create': openOnlineBackupCreate(); break;
     case 'online-backup-restore': openOnlineBackupRestore(); break;
     case 'restart': if (await showAppConfirm({ title: 'Anwendung neu starten?', message: 'Nicht gespeicherte laufende Aktionen werden beendet.', confirmText: 'Neustart', danger: true })) window.api.restartApp(); break;
     case 'quit': window.api.quitApp(); break;
@@ -3780,8 +3780,17 @@ function setOnlineBackupStatus(message, state = '', statusContext = null) {
   const context = statusContext === null ? beginOnlineBackupStatusContext() : statusContext;
   if (context !== onlineBackupStatusContextGeneration) return false;
   const status = document.getElementById('onlineBackupStatus');
+  const text = String(message || '').replace(/MHU2-[A-Za-z0-9_-]{70}/gu, localizeUiText('Geschützter Schlüssel'));
+  if (state === 'success' || state === 'error' || state === 'warning') {
+    if (status) {
+      status.textContent = '';
+      status.dataset.state = '';
+    }
+    showCopyToast(text, 5000, state);
+    return true;
+  }
   if (!status) return false;
-  status.textContent = String(message || '').replace(/MHU2-[A-Za-z0-9_-]{70}/gu, localizeUiText('Geschützter Schlüssel'));
+  status.textContent = text;
   status.dataset.state = state;
   return true;
 }
@@ -3904,12 +3913,14 @@ function renderManagedOnlineBackups(focusTarget = undefined) {
       const created = document.createElement('span');
       created.className = 'online-backup-managed-created';
       const createdLabel = document.createElement('span');
-      createdLabel.textContent = `${localizeUiText('Erstellt')}: ${formatDateTime(entry.createdAt).text} | ${entry.sourceIp ? `IP: ${entry.sourceIp}` : localizeUiText('IP unbekannt')}`;
+      createdLabel.textContent = `${localizeUiText('Erstellt')}: ${formatDateTime(entry.createdAt).text}`;
+      const sourceLabel = document.createElement('span');
+      sourceLabel.textContent = entry.sourceIp ? `IP: ${entry.sourceIp}` : localizeUiText('IP unbekannt');
       const expirationLabel = document.createElement('span');
       expirationLabel.textContent = entry.expiresAt
         ? `${localizeUiText('Gültig bis')}: ${formatDateTime(entry.expiresAt).text}`
         : localizeUiText('Unbegrenzt gültig');
-      created.append(createdLabel, expirationLabel);
+      created.append(createdLabel, sourceLabel, expirationLabel);
       const actions = document.createElement('div');
       actions.className = 'online-backup-managed-actions';
       const copyButton = document.createElement('button');
@@ -4109,7 +4120,10 @@ async function doOnlineBackupCreate() {
   const createButton = document.getElementById('createOnlineBackupBtn');
   const retentionSelect = document.getElementById('onlineBackupRetentionSelect');
   const retention = retentionSelect?.value || 'forever';
-  if (createButton) createButton.disabled = true;
+  if (createButton) {
+    createButton.disabled = true;
+    createButton.textContent = localizeUiText('Wird erstellt…');
+  }
   if (retentionSelect) retentionSelect.disabled = true;
   setOnlineBackupStatus('Verschlüssele und speichere Einstellungen…', 'busy', authority.statusContext);
   try {
@@ -4125,10 +4139,20 @@ async function doOnlineBackupCreate() {
     setOnlineBackupStatus('Online-Sicherung konnte nicht erstellt werden', 'error', authority.statusContext);
   } finally {
     endManagedOnlineBackupMutation();
-    if (createButton?.isConnected) createButton.disabled = false;
+    if (createButton?.isConnected) {
+      createButton.disabled = false;
+      createButton.textContent = localizeUiText('Neuen Schlüssel erzeugen');
+    }
     if (retentionSelect?.isConnected) retentionSelect.disabled = false;
     doOnlineBackupCreate.busy = false;
   }
+}
+
+function openOnlineBackupCreate() {
+  openOnlineBackupView();
+  const createModule = document.getElementById('onlineBackupCreateHeading')?.closest('.online-backup-module');
+  createModule?.scrollIntoView({ block: 'nearest' });
+  document.getElementById('createOnlineBackupBtn')?.focus();
 }
 
 function openOnlineBackupView(focusRestore = false) {

@@ -2180,8 +2180,9 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
 .online-backup-managed-row {
   display: grid;
-  grid-template-columns: 168px 238px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "key actions" "created actions";
+  gap: 6px 16px;
   align-items: center;
   min-width: 0;
   padding: 10px 12px;
@@ -2191,6 +2192,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .online-backup-managed-key {
+  grid-area: key;
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--text);
@@ -2199,6 +2201,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .online-backup-managed-created {
+  grid-area: created;
   display: grid;
   overflow-wrap: anywhere;
   gap: 3px;
@@ -2209,6 +2212,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .online-backup-managed-actions {
+  grid-area: actions;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -4042,6 +4046,10 @@ input[type="checkbox"] {
   .online-backup-key-row,
   .online-backup-managed-row {
     grid-template-columns: 1fr;
+  }
+
+  .online-backup-managed-row {
+    grid-template-areas: "key" "created" "actions";
   }
 
   .online-backup-managed-actions {
