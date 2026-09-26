@@ -36,11 +36,11 @@ body {
   flex-direction: column;
 }
 
-:where(button, select, option, label, .app-header, .menu-bar, .view-sidebar, .settings-sidebar, .queue-table th, .recent-files-table th, .history-table th, .resize-handle, .context-menu, .modal-header, .modal-footer, .account-card-drag-handle, .account-hoster-group-header, .account-hoster-settings-header, .status-badge, .status-badge *) {
+:where(body, button, select, option, label, .app-header, .menu-bar, .view-sidebar, .settings-sidebar, .queue-table th, .recent-files-table th, .history-table th, .resize-handle, .context-menu, .modal-header, .modal-footer, .account-card-drag-handle, .account-hoster-group-header, .account-hoster-settings-header, .status-badge, .status-badge *) {
   user-select: none;
 }
 
-:where(.health-badge, .account-status, .panel-status, .account-modal-status, .online-backup-status, .health-check-results, .account-hoster-group-meta.error, .recent-file-row.error, .history-row.error, .log-file-path-row .key-input, .log-paths-list, .log-paths-list *, #jobLogBody, .update-release-notes, .update-release-notes *, .history-link-text, .copy-toast) {
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, [contenteditable="true"], code, .account-status, .account-modal-status, .health-check-results, .account-hoster-group-meta.error, .recent-file-row.error, .history-row.error, .log-file-path-row .key-input, .log-paths-list, .log-paths-list *, #jobLogBody, .update-release-notes, .update-release-notes *, .history-link-text) {
   user-select: text;
 }
 
@@ -1018,7 +1018,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 #settingsSearchInput::placeholder { color: var(--text-dim); }
 #settingsSearchInput::-webkit-search-decoration { display: none; }
 #settingsSearchInput:placeholder-shown::-webkit-search-cancel-button { display: none; }
-#settingsSearchInput:focus { border-color: var(--accent); outline: none; }
+#settingsSearchInput:focus { border-color: var(--border-hover); outline: none; }
 .settings-navigation {
   position: relative;
   isolation: isolate;
@@ -1204,7 +1204,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   background: none;
   border: none;
 }
-.key-input:focus, .hs-input:focus { border-color: var(--accent); outline: none; }
+.key-input:focus, .hs-input:focus { border-color: var(--border-hover); outline: none; }
 .hs-input { max-width: 100px; }
 select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .hint { font-size: 10px; color: var(--text-dim); }
@@ -1944,7 +1944,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   cursor: pointer;
 }
 .history-copy-link:hover,
-.history-copy-link:focus-visible {
+:where(html.keyboard-navigation) .history-copy-link:focus-visible {
   color: var(--text);
   border-color: var(--accent);
   background: var(--bg-hover);
@@ -2041,18 +2041,22 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
 
 :where(button, input, select, textarea, [tabindex]):focus-visible {
+  outline: none;
+}
+
+:where(html.keyboard-navigation) :where(button, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--accent-end);
   outline-offset: 2px;
 }
 
-.key-input:focus-visible,
-.hs-input:focus-visible {
+:where(html.keyboard-navigation) .key-input:focus-visible,
+:where(html.keyboard-navigation) .hs-input:focus-visible {
   border-color: var(--accent);
   outline: 2px solid rgba(101, 216, 255, 0.45);
   outline-offset: 1px;
 }
 
-.menu-spinner input[type="text"]:focus-visible {
+:where(html.keyboard-navigation) .menu-spinner input[type="text"]:focus-visible {
   outline: 2px solid var(--accent-end);
   outline-offset: -2px;
 }
@@ -2315,6 +2319,11 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .online-backup-retention-select select:focus {
+  border-color: var(--border-hover);
+  outline: none;
+}
+
+:where(html.keyboard-navigation) .online-backup-retention-select select:focus-visible {
   border-color: var(--accent);
   outline: 2px solid color-mix(in srgb, var(--accent) 32%, transparent);
   outline-offset: 1px;
@@ -2679,7 +2688,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 .header-update-button:hover::after,
-.header-update-button:focus-visible::after {
+:where(html.keyboard-navigation) .header-update-button:focus-visible::after {
   opacity: 1;
   transform: translate(-50%, 0);
 }
@@ -3719,8 +3728,8 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .key-input:focus,
 .hs-input:not([type="checkbox"]):focus,
 #settingsSearchInput:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(186, 208, 252, .12);
+  border-color: var(--border-hover);
+  box-shadow: none;
 }
 
 input[type="checkbox"] {
@@ -3900,7 +3909,7 @@ input[type="checkbox"] {
   color: var(--accent-ink);
 }
 
-.language-option:focus-visible {
+:where(html.keyboard-navigation) .language-option:focus-visible {
   outline: 2px solid var(--accent-end);
   outline-offset: -2px;
 }
@@ -4469,7 +4478,7 @@ input[type="checkbox"] {
   background: #5c5c5c;
 }
 
-:where(button, input, select, textarea, [tabindex]):focus-visible {
+:where(html.keyboard-navigation) :where(button, input, select, textarea, [tabindex]):focus-visible {
   outline-color: var(--accent);
 }
 

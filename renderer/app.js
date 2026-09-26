@@ -58,6 +58,106 @@ const HOSTER_ADD_OPTIONS = [
   { value: 'clouddrop.cc', label: 'Clouddrop (API)', hoster: 'clouddrop.cc', authType: 'api' }
 ];
 
+const KEYBOARD_NAVIGATION_ARROW_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End']);
+const KEYBOARD_NAVIGATION_CONTAINERS = '[role="menu"], [role="menubar"], [role="listbox"], [role="tablist"], [role="radiogroup"], .menu-dropdown, .menu-submenu-dropdown, .context-menu';
+
+document.addEventListener('keydown', (event) => {
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+  const navigatesByArrow = KEYBOARD_NAVIGATION_ARROW_KEYS.has(event.key) && event.target instanceof window.Element && event.target.closest(KEYBOARD_NAVIGATION_CONTAINERS);
+  if (event.key === 'Tab' || navigatesByArrow) document.documentElement.classList.add('keyboard-navigation');
+}, true);
+
+document.addEventListener('pointerdown', () => {
+  document.documentElement.classList.remove('keyboard-navigation');
+}, true);
+
+{
+  let tooltip = null;
+  let anchor = null;
+  let pinned = false;
+  const ensureTooltip = () => {
+    if (!tooltip) {
+      tooltip = document.createElement('div');
+      tooltip.id = 'infoTooltip';
+      tooltip.className = 'info-tooltip';
+      tooltip.setAttribute('role', 'tooltip');
+      document.body.append(tooltip);
+    }
+    return tooltip;
+  };
+  const positionTooltip = () => {
+    if (!anchor || !tooltip) return;
+    const margin = 12;
+    const anchorRect = anchor.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(margin, Math.min(anchorRect.left + anchorRect.width / 2 - tooltipRect.width / 2, window.innerWidth - tooltipRect.width - margin));
+    let top = anchorRect.bottom + 8;
+    if (top + tooltipRect.height > window.innerHeight - margin) top = Math.max(margin, anchorRect.top - tooltipRect.height - 8);
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+  };
+  const hideTooltip = () => {
+    if (!tooltip) return;
+    tooltip.classList.remove('is-visible');
+    anchor?.removeAttribute('aria-describedby');
+    anchor = null;
+    pinned = false;
+  };
+  let followGeneration = 0;
+  const followAnchor = (generation) => {
+    if (generation !== followGeneration || !anchor) return;
+    if (!anchor.isConnected || anchor.getClientRects().length === 0) {
+      hideTooltip();
+      return;
+    }
+    positionTooltip();
+    window.requestAnimationFrame(() => followAnchor(generation));
+  };
+  const showTooltip = (target, pin) => {
+    if (anchor && anchor !== target) hideTooltip();
+    const element = ensureTooltip();
+    anchor = target;
+    pinned = pin;
+    element.textContent = target.getAttribute('data-tooltip') || '';
+    target.setAttribute('aria-describedby', element.id);
+    element.classList.add('is-visible');
+    positionTooltip();
+    const generation = ++followGeneration;
+    window.requestAnimationFrame(() => followAnchor(generation));
+  };
+  const infoTipFrom = (node) => (node instanceof window.Element ? node.closest('.info-tip') : null);
+  document.addEventListener('mouseover', (event) => {
+    const target = infoTipFrom(event.target);
+    if (target && !pinned && target !== anchor) showTooltip(target, false);
+  });
+  document.addEventListener('mouseout', (event) => {
+    const target = infoTipFrom(event.target);
+    if (target && target === anchor && !pinned && !target.contains(event.relatedTarget)) hideTooltip();
+  });
+  document.addEventListener('click', (event) => {
+    const target = infoTipFrom(event.target);
+    if (target) {
+      event.preventDefault();
+      if (target === anchor && pinned) hideTooltip();
+      else showTooltip(target, true);
+    } else if (pinned) {
+      hideTooltip();
+    }
+  });
+  document.addEventListener('focusin', (event) => {
+    const target = infoTipFrom(event.target);
+    if (target && document.documentElement.classList.contains('keyboard-navigation')) showTooltip(target, false);
+  });
+  document.addEventListener('focusout', (event) => {
+    if (event.target === anchor && !pinned) hideTooltip();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && anchor) hideTooltip();
+  }, true);
+  window.addEventListener('scroll', () => { if (anchor) hideTooltip(); }, true);
+  window.addEventListener('resize', () => { if (anchor) hideTooltip(); });
+}
+
 // --- State ---
 let selectedFiles = []; // { path, name, size }
 let selectedUploadHosters = [];
