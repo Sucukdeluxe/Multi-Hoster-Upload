@@ -6808,7 +6808,8 @@ function renderSettings() {
           </span>
           <input type="checkbox" id="protectLocalBackupInput">
         </label>
-        <div class="local-backup-password-fields" id="localBackupPasswordFields" hidden>
+        <div class="local-backup-password-collapse" id="localBackupPasswordFields" aria-hidden="true" inert>
+        <div class="local-backup-password-fields">
           <label class="local-backup-field" for="localBackupPasswordInput">
             <span>Passwort</span>
             <input type="password" class="key-input" id="localBackupPasswordInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Mindestens 8 Zeichen">
@@ -6817,6 +6818,7 @@ function renderSettings() {
             <span>Passwort wiederholen</span>
             <input type="password" class="key-input" id="localBackupPasswordConfirmInput" minlength="8" maxlength="1024" autocomplete="new-password" placeholder="Passwort erneut eingeben">
           </label>
+        </div>
         </div>
         <footer class="online-backup-footer backup-file-actions">
           <button class="btn btn-secondary" id="importBackupBtn" data-settings-search-entry data-settings-search-section="Lokales Datei-Backup" data-settings-search-label="Datei importieren">Datei importieren</button>
@@ -7256,8 +7258,11 @@ function renderSettings() {
   document.getElementById('protectLocalBackupInput').addEventListener('change', (event) => {
     const fields = document.getElementById('localBackupPasswordFields');
     if (!fields) return;
-    fields.hidden = !event.target.checked;
-    if (event.target.checked) document.getElementById('localBackupPasswordInput')?.focus();
+    const open = event.target.checked;
+    fields.classList.toggle('is-open', open);
+    fields.setAttribute('aria-hidden', open ? 'false' : 'true');
+    fields.inert = !open;
+    if (open) document.getElementById('localBackupPasswordInput')?.focus();
   });
   document.getElementById('createOnlineBackupBtn').addEventListener('click', () => doOnlineBackupCreate());
   renderManagedOnlineBackups();

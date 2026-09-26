@@ -2552,10 +2552,31 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   cursor: pointer;
 }
 
+.local-backup-password-collapse {
+  display: grid;
+  align-self: start;
+  grid-template-rows: 0fr;
+  margin-top: -14px;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 240ms cubic-bezier(.2, .8, .2, 1), margin-top 240ms cubic-bezier(.2, .8, .2, 1), opacity 180ms ease, visibility 0s linear 240ms;
+}
+
+.local-backup-password-collapse.is-open {
+  grid-template-rows: 1fr;
+  margin-top: 0;
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
 .local-backup-password-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+  min-height: 0;
+  overflow: clip;
+  overflow-clip-margin: 4px;
 }
 
 .local-backup-field {
@@ -2574,8 +2595,10 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   font-size: 14px;
 }
 
-.local-backup-password-fields[hidden] {
-  display: none;
+@media (prefers-reduced-motion: reduce) {
+  .local-backup-password-collapse {
+    transition: none;
+  }
 }
 
 .upload-speed-sparkline {
