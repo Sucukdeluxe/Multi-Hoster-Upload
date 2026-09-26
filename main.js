@@ -1549,6 +1549,27 @@ async function runHosterHealthCheck(config, requestedChecks, onResult = null) {
   return { checkedAt: new Date().toISOString(), results };
 }
 
+async function settleWindowContentAfterShow(window) {
+  if (!window || window.isDestroyed() || window.isMinimized() || window.isMaximized() || window.isFullScreen()) return;
+  let viewport = null;
+  try {
+    viewport = await window.webContents.executeJavaScript('[window.innerWidth, window.innerHeight]');
+  } catch {}
+  if (window.isDestroyed()) return;
+  const [contentWidth, contentHeight] = window.getContentSize();
+  const zoom = window.webContents.getZoomFactor() || 1;
+  const measured = Array.isArray(viewport) && viewport.length === 2;
+  const mismatch = !measured
+    || Math.abs(Math.round(viewport[0] * zoom) - contentWidth) > 2
+    || Math.abs(Math.round(viewport[1] * zoom) - contentHeight) > 2;
+  const remoteSession = process.platform === 'win32' && /^RDP-/i.test(process.env.SESSIONNAME || '');
+  logInfo(`window-content: viewport=${measured ? viewport.join('x') : 'unknown'} content=${contentWidth}x${contentHeight} zoom=${zoom} rdp=${remoteSession}`);
+  if (!mismatch && !remoteSession) return;
+  const bounds = window.getBounds();
+  window.setBounds({ ...bounds, width: bounds.width + 1 });
+  window.setBounds(bounds);
+}
+
 function createWindow() {
   const startupWindow = createStartupWindow(BrowserWindow, {
     title: 'Multi Hoster Uploader',
@@ -1591,6 +1612,10 @@ function createWindow() {
   });
 
   mainWindow.webContents.setBackgroundThrottling(false);
+  const shownWindow = mainWindow;
+  mainWindow.once('show', () => {
+    setTimeout(() => { void settleWindowContentAfterShow(shownWindow); }, 250);
+  });
 
   mainWindow.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
     if (isInPlace || !isMainFrame) return;
