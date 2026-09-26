@@ -10282,10 +10282,21 @@ function showCopyToast(msg, durationMs) {
       if (Math.abs(nextHeight - requestedHeight) > 0.5) panel.style.flex = `0 0 ${nextHeight}px`;
     };
 
-    window.addEventListener('resize', () => {
+    const scheduleRecentPanelClamp = () => {
       window.cancelAnimationFrame(resizeFrame);
       resizeFrame = window.requestAnimationFrame(clampRecentPanelHeight);
-    });
+    };
+
+    window.addEventListener('resize', scheduleRecentPanelClamp);
+
+    const shell = panel.closest('.queue-shell');
+    if (shell && typeof window.ResizeObserver === 'function') {
+      const shellLayoutObserver = new window.ResizeObserver(scheduleRecentPanelClamp);
+      shellLayoutObserver.observe(shell);
+      for (const element of shell.children) {
+        if (element !== panel && element.id !== 'queueContainer') shellLayoutObserver.observe(element);
+      }
+    }
 
     resizer.addEventListener('mousedown', (e) => {
       e.preventDefault();
