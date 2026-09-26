@@ -9750,7 +9750,12 @@ function _setUpdateDialogVisible(visible) {
     _setUpdateBackgroundInert(false);
     const returnFocus = _updateDialogReturnFocus;
     _updateDialogReturnFocus = null;
-    if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
+    if (returnFocus && returnFocus !== document.body && returnFocus.isConnected && typeof returnFocus.focus === 'function') returnFocus.focus();
+    if (overlay.contains(document.activeElement)) {
+      const headerButton = document.getElementById('headerUpdateBtn');
+      if (headerButton && !headerButton.disabled && headerButton.getClientRects().length > 0) headerButton.focus();
+      if (overlay.contains(document.activeElement)) document.activeElement.blur();
+    }
   }
 }
 
