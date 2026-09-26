@@ -6,7 +6,7 @@ Multi-Hoster-Upload ist eine Electron-Desktopanwendung für Windows zum Hochlade
 
 ## Aktueller Zustand
 
-- Veröffentlicht: Version `2.1.50`.
+- Veröffentlicht: Version `2.1.51`.
 - Einstiegspunkt: `main.js`; Oberfläche: `renderer/`; Fachlogik: `lib/`; optionaler Sicherungsdienst: `services/backup-api/`.
 - Version `2.1.50` enthält verbesserte Sicherungsmenüs, getrennte Online-Backup-Bereiche, einheitliche Automatik- und Log-Einstellungen sowie korrigierte Such- und Update-Anzeigen.
 - Ordnerüberwachung lässt sich unabhängig von ihrem Aktivierungszustand mit gespeicherten Regeln schreibgeschützt testen. Testscans starten keine Uploads und verändern keine laufende Überwachung.
@@ -56,10 +56,11 @@ Enthält der Projektpfad Shell-Sonderzeichen wie `&`, scheitern die npm-`.cmd`-S
 
 ## Zuletzt verifiziert
 
+- Release `2.1.51` (26.09.2026, Tag auf `103139d`): 845 Haupttests einschließlich UI-Smoke lokal und auf dem Windows-Runner, 18 Servertests, Lint und Abhängigkeitsprüfung erfolgreich. Paketinhalt gegen Quellstand geprüft. Beide Plattformen mit je vier Dateien veröffentlicht; Downloads per Größe und SHA-512 bestätigt; der Updater erkennt 2.1.51 ausgehend von 2.1.50. Changelogs beginnen ohne Titelzeile direkt mit dem Einleitungssatz.
 - Stand: 22.09.2026.
 - Release `2.1.50`: 845 Haupttests und 18 Servertests erfolgreich; Lint und Abhängigkeitsprüfung erfolgreich. Installer, portable Anwendung und Update-Metadaten beider Plattformen einschließlich Download-Prüfsummen geprüft.
 - CI-Timingkorrektur: beide betroffenen Tests zehnmal hintereinander erfolgreich. Gesamte lokale Suite und GitHub-CI einschließlich Windows-Build erfolgreich. Tests warten mit Zeitlimit auf verarbeitete Eingaben beziehungsweise den angekommenen Dateikandidaten, ohne Zustandsprüfungen abzuschwächen.
 - Öffentliche Dokumentation von konkreten Betriebs-, Sicherungs- und Diagnosedetails bereinigt. Keine Anwendungscodeänderung und keine Umschreibung der Git-Historie; ältere Dokumentfassungen bleiben historisch erreichbar.
 - 26.09.2026: Das Recent-Panel wird zusätzlich neu begrenzt, wenn sich Höhen innerhalb der Warteschlangenansicht ändern (z. B. umbrechende Werkzeugleiste). Vorher konnte die Warteschlange bei kleinem Fenster auf 69 px schrumpfen. UI-Smoke lokal dreimal hintereinander mit 303/303 erfolgreich. CI-Actions auf `checkout@v7` und `setup-node@v7` (Node 24) umgestellt. `npm run verify` lokal mit `script-shell=pwsh` erfolgreich.
-- 26.09.2026 (UI-Überarbeitung, noch nicht veröffentlicht): Sprachwechsel mit 3.314 Verlaufseinträgen von 1,1–1,8 s auf 30–50 ms beschleunigt (gecachte Datumsformatierer, identische Ausgabe). Fokusringe, Textauswahl, Toasts, Online-Backup-Ablauf, Upload-Einstellungen, 14-Tage-Verlaufsoption und Diagnose-Adressfeld überarbeitet. 844 Haupttests, 18 Servertests und Lint erfolgreich; Darstellung per Offscreen-Screenshots bei 1100×750 und 820×560 geprüft.
+- 26.09.2026 (UI-Überarbeitung, veröffentlicht als 2.1.51): Sprachwechsel mit 3.314 Verlaufseinträgen von 1,1–1,8 s auf 30–50 ms beschleunigt (gecachte Datumsformatierer, identische Ausgabe). Fokusringe, Textauswahl, Toasts, Online-Backup-Ablauf, Upload-Einstellungen, 14-Tage-Verlaufsoption und Diagnose-Adressfeld überarbeitet. 844 Haupttests, 18 Servertests und Lint erfolgreich; Darstellung per Offscreen-Screenshots bei 1100×750 und 820×560 geprüft.
 - 26.09.2026: Schließt sich der Update-Dialog ohne brauchbares Rücksprungziel, landet der Fokus auf dem Update-Button im Header statt auf einem ausgeblendeten Dialogbutton. Private Suite einschließlich UI-Smoke auf dem Windows-Runner zweimal gegen `bbc4a98` erfolgreich; öffentliche CI grün.
