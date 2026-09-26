@@ -2515,6 +2515,41 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   flex: 0 0 auto;
 }
 
+.settings-subpage .settings-select-control > select.hs-input,
+.settings-subpage .automation-select-control > select.hs-input {
+  width: 100%;
+  padding-right: 38px;
+}
+
+.settings-select-control.diag-bind-select {
+  max-width: 360px;
+}
+
+.diag-enabled-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0 0 0 auto;
+}
+
+.settings-subpage .settings-row > .hint:empty {
+  display: none;
+}
+
+.settings-subpage .settings-row > .diag-suggestions {
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-subpage .settings-row > .diag-suggestions:not([style*="none"]) {
+  display: flex;
+}
+
+.diag-suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .local-backup-module {
   gap: 14px;
 }

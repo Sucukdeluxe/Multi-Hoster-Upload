@@ -6709,11 +6709,9 @@ function renderSettings() {
       <p class="hint" style="margin:0 0 12px;padding:9px 11px;border:1px solid rgba(245,158,11,0.35);border-radius:6px;background:rgba(245,158,11,0.08)">
         Erlaubt <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und bereinigte Einstellungen. Passwörter, API-Keys und Tokens werden maskiert. <strong>Bildschirm und Eingabesteuerung bleiben gesperrt.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> und damit nur über einen SSH- oder VPN-Tunnel erreichbar.
       </p>
-      <div class="settings-grid-mini">
-        <div class="settings-row checkbox-row">
-          <label>Aktiviert</label>
-          <input type="checkbox" class="settings-autosave" id="diagEnabledInput">
-        </div>
+      <div class="settings-row diag-enabled-row">
+        <label for="diagEnabledInput">Aktiviert</label>
+        <input type="checkbox" class="settings-autosave" id="diagEnabledInput">
       </div>
       <div class="settings-row">
         <label>Port</label>
@@ -6721,33 +6719,33 @@ function renderSettings() {
       </div>
       <div class="settings-row">
         <label>Sichtbarkeit</label>
-        <span class="settings-select-control">
-        <select class="hs-input settings-autosave" id="diagBindModeInput" style="width:auto">
+        <span class="settings-select-control diag-bind-select">
+        <select class="hs-input settings-autosave" id="diagBindModeInput">
           <option value="local">Nur lokal (127.0.0.1) — Tunnel/VPN</option>
           <option value="network">Im Netzwerk (0.0.0.0) — Allowlist nötig</option>
         </select>
         </span>
+        <span class="hint" id="diagBindHint"></span>
       </div>
       <div class="settings-row">
-        <label>Adresse für den Code</label>
+        <label for="diagPublicHostInput">Adresse für den Code</label>
         <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1 1 320px;min-width:0;max-width:560px">
-      </div>
-      <div class="settings-row" id="diagSuggestRow" style="display:none">
-        <label></label>
-        <div id="diagSuggestChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        <div class="hint diag-suggestions" id="diagSuggestRow" style="display:none">
+          <span>Vorschläge:</span>
+          <div id="diagSuggestChips" class="diag-suggestion-chips"></div>
+        </div>
       </div>
       <div class="settings-row" id="diagAllowlistRow" style="display:none;align-items:flex-start">
         <label>Allowlist (IP/CIDR, eine pro Zeile)</label>
         <textarea class="hs-input settings-autosave" id="diagAllowlistInput" rows="3" style="flex:1;font-family:monospace" placeholder="100.64.0.0/10&#10;203.0.113.5"></textarea>
       </div>
-      <div class="settings-row"><span class="hint" id="diagBindHint"></span></div>
       <div class="settings-row">
         <label>Verbindungs-Code</label>
         <input type="text" class="key-input" id="diagCodeInput" value="" readonly style="flex:1" placeholder="(aktivieren zum Erzeugen)">
         <button class="btn btn-xs btn-secondary" id="diagCopyCodeBtn" title="Kopieren">Kopieren</button>
         <button class="btn btn-xs btn-secondary" id="diagRegenerateBtn" title="Neu generieren (macht alte Codes ungültig)">Neu</button>
+        <span class="hint" id="diagCodeIssued"></span>
       </div>
-      <div class="settings-row"><span class="hint" id="diagCodeIssued"></span></div>
       <div class="settings-section-label">Status</div>
       <div class="settings-row">
         <span id="diagConnectionStatus" style="color:#94a3b8">Prüfe…</span>
