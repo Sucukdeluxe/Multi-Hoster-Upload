@@ -7835,10 +7835,20 @@ async function flushPendingSettingsSaves() {
   alwaysOnTopState = !!(config.globalSettings && config.globalSettings.alwaysOnTop);
 }
 
+function infoTipHtml(text) {
+  return `<button type="button" class="info-tip" data-tooltip="${escapeAttr(text)}" aria-label="${escapeAttr(text)}"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6"></path><path d="M12 7.5h.01"></path></svg></button>`;
+}
+
 function _buildHosterSettingsHtml(name) {
   const hs = (config.hosterSettings && config.hosterSettings[name]) || {};
   const maxSpeedMbs = hs.maxSpeedKbs > 0 ? String(+(hs.maxSpeedKbs / 1024).toFixed(2)) : '0';
   const fieldPrefix = `hoster-${name.replace(/[^a-z0-9]/gi, '-')}`;
+  const row = (id, label, control, info = '') => `<div class="hoster-setting-row">
+          <div class="hoster-setting-label"><label for="${fieldPrefix}-${id}">${label}</label>${info ? infoTipHtml(info) : ''}</div>
+          ${control}
+        </div>`;
+  const number = (id, key, value, attributes) => `<input id="${fieldPrefix}-${id}" type="number" class="hs-input" data-hoster="${name}" data-hs="${key}" value="${value}" ${attributes}>`;
+  const checkbox = (id, key, checked) => `<input id="${fieldPrefix}-${id}" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="${key}" ${checked ? 'checked' : ''}>`;
   return `<div class="account-hoster-settings">
     <div class="account-hoster-settings-header" data-hoster-settings-toggle="${name}" role="button" tabindex="0" aria-expanded="false">
       <span class="panel-arrow">&#9654;</span>
@@ -7846,49 +7856,16 @@ function _buildHosterSettingsHtml(name) {
     </div>
     <div class="account-hoster-settings-body account-collapse" aria-hidden="true" inert>
       <div class="account-collapse-content">
-        <div class="account-hoster-settings-body-inner settings-grid-mini">
-        <div class="settings-row">
-          <label for="${fieldPrefix}-retries">Wiederholungen</label>
-          <input id="${fieldPrefix}-retries" type="number" class="hs-input" data-hoster="${name}" data-hs="retries" value="${hs.retries ?? 3}" min="0" max="500">
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-max-speed">Maximale Geschwindigkeit (MB/s)</label>
-          <input id="${fieldPrefix}-max-speed" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSpeedMbs" value="${maxSpeedMbs}" min="0" step="0.1">
-          <span class="hint">0 = unbegrenzt</span>
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-parallel">Parallele Uploads</label>
-          <input id="${fieldPrefix}-parallel" type="number" class="hs-input" data-hoster="${name}" data-hs="parallelCount" value="${hs.parallelCount ?? 2}" min="1" max="100">
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-restart">Neustart unter (kB/s)</label>
-          <input id="${fieldPrefix}-restart" type="number" class="hs-input" data-hoster="${name}" data-hs="restartBelowKbs" value="${hs.restartBelowKbs ?? 0}" min="0">
-          <span class="hint">0 = aus</span>
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-interval">Intervall (s)</label>
-          <input id="${fieldPrefix}-interval" type="number" class="hs-input" data-hoster="${name}" data-hs="timeIntervalSec" value="${hs.timeIntervalSec ?? 0}" min="0">
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-max-size">Dateigrößenlimit (GB)</label>
-          <input id="${fieldPrefix}-max-size" type="number" class="hs-input" data-hoster="${name}" data-hs="maxSizeGb" value="${Math.max(0, (Number(hs.maxSizeMb) || 0) / 1024)}" min="0" step="any">
-          <span class="hint">0 = unbegrenzt. 1 GB = 1024 MB. Größere Dateien werden für diesen Hoster übersprungen.</span>
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-log">Links in Log schreiben</label>
-          <input id="${fieldPrefix}-log" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="logToFile" ${hs.logToFile !== false ? 'checked' : ''}>
-          <span class="hint">Erfolgreiche Links in fileuploader.log.</span>
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-rotate">Accounts rotieren</label>
-          <input id="${fieldPrefix}-rotate" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="rotateAccounts" ${hs.rotateAccounts === true ? 'checked' : ''}>
-          <span class="hint">Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.</span>
-        </div>
-        <div class="settings-row">
-          <label for="${fieldPrefix}-size-memo">Größen-Limit merken</label>
-          <input id="${fieldPrefix}-size-memo" type="checkbox" class="hs-input" data-hoster="${name}" data-hs="sizeMemoEnabled" ${hs.sizeMemoEnabled !== false ? 'checked' : ''}>
-          <span class="hint">Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.</span>
-        </div>
+        <div class="account-hoster-settings-body-inner hoster-settings-grid">
+        ${row('retries', 'Wiederholungen', number('retries', 'retries', hs.retries ?? 3, 'min="0" max="500"'), 'Anzahl weiterer Versuche pro Datei, bevor der Upload als fehlgeschlagen gilt.')}
+        ${row('max-speed', 'Maximale Geschwindigkeit (MB/s)', number('max-speed', 'maxSpeedMbs', maxSpeedMbs, 'min="0" step="0.1"'), '0 = unbegrenzt')}
+        ${row('parallel', 'Parallele Uploads', number('parallel', 'parallelCount', hs.parallelCount ?? 2, 'min="1" max="100"'))}
+        ${row('restart', 'Neustart unter (kB/s)', number('restart', 'restartBelowKbs', hs.restartBelowKbs ?? 0, 'min="0"'), '0 = aus')}
+        ${row('interval', 'Intervall (s)', number('interval', 'timeIntervalSec', hs.timeIntervalSec ?? 0, 'min="0"'))}
+        ${row('max-size', 'Dateigrößenlimit (GB)', number('max-size', 'maxSizeGb', Math.max(0, (Number(hs.maxSizeMb) || 0) / 1024), 'min="0" step="any"'), '0 = unbegrenzt. 1 GB = 1024 MB. Größere Dateien werden für diesen Hoster übersprungen.')}
+        ${row('log', 'Links in Log schreiben', checkbox('log', 'logToFile', hs.logToFile !== false), 'Erfolgreiche Links in fileuploader.log.')}
+        ${row('rotate', 'Accounts rotieren', checkbox('rotate', 'rotateAccounts', hs.rotateAccounts === true), 'Verteilt die Dateien reihum auf alle aktiven Accounts dieses Hosters (Datei 1 → Account 1, Datei 2 → Account 2 …). Hält z. B. byse-Accounts aktiv. Nur ein Account = kein Effekt.')}
+        ${row('size-memo', 'Größen-Limit merken', checkbox('size-memo', 'sizeMemoEnabled', hs.sizeMemoEnabled !== false), 'Überspringt nach zwei verdächtigen Ablehnungen auf einem Account größere Dateien dort vorab ("Bekanntes Größen-Limit"). Abschalten = jede Datei wird immer wirklich versucht.')}
         </div>
       </div>
     </div>

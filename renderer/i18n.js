@@ -292,6 +292,7 @@
     ['Verfügbare Jobs bis zum Queue-Limit', 'Available jobs before queue limit'],
     ['Aktuell zurückzustellende Dateien', 'Files currently deferred'],
     ['0 = unbegrenzt', '0 = unlimited'],
+    ['0 = aus', '0 = off'],
     ['Unbegrenzt', 'Unlimited'],
     ['1 Minute', '1 minute'],
     ['5 Minuten', '5 minutes'],
