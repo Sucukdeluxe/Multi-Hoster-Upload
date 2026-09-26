@@ -3078,7 +3078,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   margin: 0;
   padding: 0;
   align-self: auto;
-  color: var(--text-muted);
+  color: #fff;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
