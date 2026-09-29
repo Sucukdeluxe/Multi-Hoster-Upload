@@ -62,7 +62,19 @@
     const used = formatAmount(storage?.used);
     const total = formatAmount(storage?.total);
     if (!used || !total || storage.total.value <= 0) return null;
-    return `${used} ${String(locale).startsWith('de') ? 'von' : 'of'} ${total}`;
+    const toBytes = amount => {
+      const exponent = 'BKMGTPE'.indexOf(amount.unit[0]);
+      const base = amount.unit.includes('I') ? 1024 : storage.unitBase;
+      if (exponent > 0 && base !== 1024 && base !== 1000) return null;
+      return amount.value * (exponent === 0 ? 1 : base ** exponent);
+    };
+    const usedBytes = toBytes(storage.used);
+    const totalBytes = toBytes(storage.total);
+    const percent = Number.isFinite(usedBytes) && Number.isFinite(totalBytes) && totalBytes > 0 ? usedBytes / totalBytes * 100 : null;
+    const percentageText = percent !== null && Number.isFinite(percent)
+      ? ` (${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(percent)}%)`
+      : '';
+    return `${used} ${String(locale).startsWith('de') ? 'von' : 'of'} ${total}${percentageText}`;
   }
 
   const accountStatus = {

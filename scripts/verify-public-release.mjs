@@ -70,6 +70,7 @@ const sourceFiles = [
   'lib/upload-manager.js',
   'lib/vidmoly-upload.js',
   'lib/voe-upload.js',
+  'lib/voe-account-storage.js',
   'lib/webhook-notify.js',
   'main.js',
   'package-lock.json',
