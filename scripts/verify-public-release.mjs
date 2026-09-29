@@ -69,7 +69,6 @@ const sourceFiles = [
   'lib/upload-diagnostics.js',
   'lib/upload-manager.js',
   'lib/vidmoly-upload.js',
-  'lib/voe-account-storage.js',
   'lib/voe-upload.js',
   'lib/webhook-notify.js',
   'main.js',

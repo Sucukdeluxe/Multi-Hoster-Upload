@@ -62,11 +62,7 @@
     const used = formatAmount(storage?.used);
     const total = formatAmount(storage?.total);
     if (!used || !total || storage.total.value <= 0) return null;
-    const amountInBytes = amount => amount.value * (amount.unit.includes('I') ? 1024 : 1000) ** 'BKMGTPE'.indexOf(amount.unit[0]);
-    const percent = amountInBytes(storage.used) / amountInBytes(storage.total) * 100;
-    if (!Number.isFinite(percent)) return null;
-    const percentage = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(percent);
-    return `${used} ${String(locale).startsWith('de') ? 'von' : 'of'} ${total} (${percentage}%)`;
+    return `${used} ${String(locale).startsWith('de') ? 'von' : 'of'} ${total}`;
   }
 
   const accountStatus = {
