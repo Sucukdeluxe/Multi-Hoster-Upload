@@ -7614,7 +7614,7 @@ function _buildAccountCardHtml(name, account, idx) {
   const checkLabel = statusPresentation.requiresOtp ? 'Neuen Code anfordern' : 'Prüfen';
   const storageText = name === 'voe.sx' ? window.AccountStatus.formatAccountStorage(st.storage, getUiLocale()) : null;
   const storageHtml = storageText
-    ? `<div class="account-card-storage">${escapeHtml(localizeUiText('Speicher'))}: ${escapeHtml(storageText)}</div>`
+    ? `<div class="account-card-storage"><svg class="account-storage-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4.5h14l2 10v5H3v-5l2-10Z"></path><path d="M3 14.5h18M6.5 17h.01M10 17h.01M8 8h8"></path></svg><span>${escapeHtml(localizeUiText('Speicher'))}: ${escapeHtml(storageText)}</span></div>`
     : '';
 
   const sessionPauseKey = `${name}:${account.id}`;
