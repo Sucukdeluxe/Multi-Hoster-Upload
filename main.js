@@ -15,7 +15,7 @@ const VidmolyUploader = require('./lib/vidmoly-upload');
 const VoeUploader = require('./lib/voe-upload');
 const DoodstreamUploader = require('./lib/doodstream-upload');
 const { createDoodstreamOtpCoordinator, selectUploadAuth } = require('./lib/account-auth');
-const { createAccountCooldownController, createAccountPicker } = require('./lib/account-rotation');
+const { createAccountCooldownController, createAccountPicker, selectFallbackAccount } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
@@ -1156,16 +1156,19 @@ function hosterAccountHasCreds(name, account) {
 }
 
 function getNextFallbackAccount(config, hosterName, failedAccountId) {
-  const accounts = config.hosters[hosterName];
-  if (!Array.isArray(accounts)) return null;
-  const failedIndex = accounts.findIndex(a => a.id === failedAccountId);
-  if (failedIndex < 0) return null;
-  for (let i = failedIndex + 1; i < accounts.length; i++) {
-    if (accounts[i].enabled !== false && hosterAccountHasCreds(hosterName, accounts[i])) {
-      return accounts[i];
-    }
-  }
-  return null;
+  const failedKeys = new Set([
+    ..._accountCooldowns.activeKeys(),
+    ...(uploadManager?.getFailedAccountKeys() || [])
+  ]);
+  const preferred = uploadManager?.getOverride(hosterName) || _sessionAccountOverrides.get(hosterName);
+  return selectFallbackAccount({
+    accounts: config.hosters?.[hosterName],
+    hoster: hosterName,
+    currentAccountId: failedAccountId,
+    failedKeys,
+    preferredAccountId: preferred?.id,
+    hasCreds: hosterAccountHasCreds
+  });
 }
 
 function buildAccountPools(config) {
@@ -1912,7 +1915,6 @@ ipcMain.handle('save-config', async (_event, config) => {
         if (sep < 0) continue;
         const hoster = key.slice(0, sep);
         const failedAccountId = key.slice(sep + 1);
-        if (uploadManager.getOverride(hoster)) continue; // already has a fallback
         const fallback = getNextFallbackAccount(cfg, hoster, failedAccountId);
         if (fallback) {
           rotLog(`main: config-updated → late fallback ${fallback.id} for ${hoster} (was stuck on ${failedAccountId})`);
@@ -2396,7 +2398,6 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // _failedAccounts), so jobs still start on the primary as expected.
   const hostersInBatch = new Set(tasks.map(t => t.hoster).filter(Boolean));
   for (const hoster of hostersInBatch) {
-    if (_sessionAccountOverrides.has(hoster)) continue; // already learned from past batch
     const accounts = config.hosters && config.hosters[hoster];
     if (!Array.isArray(accounts) || accounts.length < 2) continue;
     const primary = accounts.find(a => a && a.enabled !== false && hosterAccountHasCreds(hoster, a));
