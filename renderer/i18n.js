@@ -684,6 +684,8 @@
     ['Prüfsummen-Metadaten gehören nicht zum ausgewählten Installer', 'Checksum metadata does not belong to the selected installer'],
     ['Prüfsummen-Metadaten enthalten eine abweichende Dateigröße', 'Checksum metadata contains a different file size'],
     ['Heruntergeladene Datei hat eine abweichende Größe', 'The downloaded file has a different size'],
+    ['Heruntergeladene Datei ist unvollständig', 'The downloaded file is incomplete'],
+    ['Update-Download nach 3 Versuchen unterbrochen. Bitte Verbindung prüfen oder den Installer manuell herunterladen.', 'Update download interrupted after 3 attempts. Check your connection or download the installer manually.'],
     ['Die installierte Anwendung ist nicht gültig digital signiert', 'The installed application is not validly digitally signed'],
     ['Download hängt — seit 45 s keine Daten (Netzwerk/Server überlastet). Bitte laufende Uploads stoppen und erneut versuchen.', 'The download stalled because no data was received for 45 seconds. Stop active uploads and try again.'],
     ['Datei nicht gefunden', 'File not found'],

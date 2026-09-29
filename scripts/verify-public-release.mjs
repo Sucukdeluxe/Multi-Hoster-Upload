@@ -10,7 +10,6 @@ const publicActionsDir = `.${['git', 'hub'].join('')}`;
 const privateActionsDir = `.${['gi', 'tea'].join('')}`;
 const sourceFiles = [
   '.gitignore',
-  'PROJECT_MEMORY.md',
   'README.md',
   'SECURITY.md',
   'assets/app_icon.ico',

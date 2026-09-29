@@ -1,6 +1,7 @@
 node_modules/
 /tests/
 /services/backup-api/test/
+PROJECT_MEMORY.md
 .dev-runner.lock
 release/
 .artifacts/
