@@ -1531,6 +1531,7 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 .account-card:hover { background: var(--bg-card-hover); }
 .account-card-info { flex: 1; min-width: 0; }
+.account-card-storage { font-size: 12px; color: var(--text-muted); margin-top: 4px; overflow-wrap: anywhere; }
 .account-card-title { font-size: 14px; font-weight: 600; }
 .account-card-subtitle { font-size: 11px; color: var(--text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-otp-action { display: flex; align-items: center; gap: 6px; margin-top: 8px; }

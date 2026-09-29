@@ -1395,7 +1395,7 @@ async function checkVoeHealth(hosterConfig) {
 
   const uploader = new VoeUploader();
   await uploader.login(username, password);
-  const { csrfToken } = await uploader._getUploadParams();
+  const { csrfToken, storage } = await uploader._getUploadParams();
 
   if (!csrfToken) {
     return { status: 'error', message: 'Login ok, aber Upload-Seite liefert kein CSRF-Token' };
@@ -1403,7 +1403,8 @@ async function checkVoeHealth(hosterConfig) {
 
   return {
     status: 'ok',
-    message: 'Login ok, Upload-Seite bereit'
+    message: 'Login ok, Upload-Seite bereit',
+    storage
   };
 }
 

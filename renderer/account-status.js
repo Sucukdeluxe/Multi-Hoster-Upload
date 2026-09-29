@@ -52,7 +52,21 @@
     if (typeof api?.getSessionFailedAccounts === 'function') apply(await api.getSessionFailedAccounts());
   }
 
+  function formatAccountStorage(storage, locale = 'en-US') {
+    const formatAmount = amount => {
+      if (!amount || typeof amount.value !== 'number' || !Number.isFinite(amount.value) || amount.value < 0
+          || !/^(B|[KMGTPE]I?B)$/.test(amount.unit || '')) return null;
+      const unit = amount.unit.replace('IB', 'iB');
+      return `${new Intl.NumberFormat(locale, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(amount.value)} ${unit}`;
+    };
+    const used = formatAmount(storage?.used);
+    const total = formatAmount(storage?.total);
+    if (!used || !total || storage.total.value <= 0) return null;
+    return `${used} ${String(locale).startsWith('de') ? 'von' : 'of'} ${total}`;
+  }
+
   const accountStatus = {
+    formatAccountStorage,
     formatAccountPauseRemaining,
     getAccountGroupStatus,
     getAccountPausePresentation,

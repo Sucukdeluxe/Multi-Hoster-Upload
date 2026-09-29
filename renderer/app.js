@@ -6212,6 +6212,7 @@ async function executeHealthCheck(hosters, _mode, generations) {
     accountStatuses[key] = {
       status: row.status || 'unchecked',
       message: row.message || '',
+      storage: row.storage || null,
       checkedAt: row.checkedAt || checkedAt
     };
     if (row.accountId) updateAccountCard(row.accountId);
@@ -7611,6 +7612,10 @@ function _buildAccountCardHtml(name, account, idx) {
   const toggleLabel = isDisabled ? 'Aktivieren' : 'Deaktivieren';
   const priorityLabel = idx === 0 ? 'Primär' : `Fallback #${idx}`;
   const checkLabel = statusPresentation.requiresOtp ? 'Neuen Code anfordern' : 'Prüfen';
+  const storageText = name === 'voe.sx' ? window.AccountStatus.formatAccountStorage(st.storage, getUiLocale()) : null;
+  const storageHtml = storageText
+    ? `<div class="account-card-storage">${escapeHtml(localizeUiText('Speicher'))}: ${escapeHtml(storageText)}</div>`
+    : '';
 
   const sessionPauseKey = `${name}:${account.id}`;
   const sessionPause = _sessionFailedAccountStates.get(sessionPauseKey)
@@ -7632,6 +7637,7 @@ function _buildAccountCardHtml(name, account, idx) {
       <div class="account-card-info">
         <div class="account-card-title">${escapeHtml(getAccountDisplayName(name, account))} <span class="account-priority-badge">${priorityLabel}</span> ${sessionPausedBadge}</div>
         <div class="account-card-subtitle" title="${escapeAttr(subtitleText)}">${escapeHtml(subtitleText)}${st.message && !isDisabled ? ` • ${escapeHtml(st.message)}` : ''}${checkedText}</div>
+        ${storageHtml}
         ${otpAction}
       </div>
       <span class="account-status status-${statusClass}">
@@ -8152,7 +8158,7 @@ async function checkSingleAccount(accountId) {
     const row = rows.find(r => r.accountId === accountId);
     const checkedAt = result?.checkedAt || new Date().toISOString();
     nextStatus = row
-      ? { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || checkedAt }
+      ? { status: row.status || 'error', message: row.message || '', storage: row.storage || null, checkedAt: row.checkedAt || checkedAt }
       : { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
   } catch (err) {
     nextStatus = { status: 'error', message: err.message || 'Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
@@ -8197,7 +8203,7 @@ async function submitAccountOtp(accountId) {
       : null;
     const checkedAt = result?.checkedAt || new Date().toISOString();
     nextStatus = row
-      ? { status: row.status || 'error', message: row.message || '', checkedAt: row.checkedAt || checkedAt }
+      ? { status: row.status || 'error', message: row.message || '', storage: row.storage || null, checkedAt: row.checkedAt || checkedAt }
       : { status: 'error', message: 'Keine Antwort vom Hoster erhalten', checkedAt };
   } catch (err) {
     nextStatus = { status: 'error', message: err.message || 'OTP-Prüfung fehlgeschlagen', checkedAt: new Date().toISOString() };
@@ -8570,7 +8576,7 @@ function _applyCommittedAccount(persisted, validation) {
   const { accountId, candidateHosters, isEdit } = persisted;
   config.hosters = candidateHosters;
   _invalidateAccountStatusGeneration(accountId);
-  accountStatuses[accountId] = { status: validation.status, message: validation.message || '', checkedAt: validation.checkedAt || new Date().toISOString() };
+  accountStatuses[accountId] = { status: validation.status, message: validation.message || '', storage: validation.storage || null, checkedAt: validation.checkedAt || new Date().toISOString() };
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   if (isEdit) {

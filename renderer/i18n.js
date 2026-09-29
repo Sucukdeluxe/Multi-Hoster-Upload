@@ -4,6 +4,7 @@
   if (root) root.I18n = api;
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   const pairs = [
+    ['Speicher', 'Storage'],
     ['Alternative', 'Alternate'],
     ['Arbeitsbereich', 'Workspace'],
     ['Accounts verwalten', 'Manage accounts'],
