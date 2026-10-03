@@ -1271,6 +1271,9 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   box-shadow: 0 14px 32px rgba(0, 0, 0, .14);
 }
 .automation-status-card * { min-width: 0; }
+.automation-status-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.automation-status-controls .btn { white-space: normal; font-size: 12px; }
+.automation-pause-notice { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .automation-status-header {
   display: grid;
   grid-template-columns: auto minmax(240px, 1fr);

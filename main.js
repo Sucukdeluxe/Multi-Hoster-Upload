@@ -3196,6 +3196,7 @@ async function _scanOwnUploadLog() {
       for await (const entry of directoryHandle) {
         directoryEntries++;
         if (directoryEntries > 50000) throw new Error('Upload-Log-Verzeichnis enthält zu viele Einträge');
+        if (typeof entry.isFile === 'function' && !entry.isFile()) continue;
         const file = entry.name;
         if (
           isManagedUploadLogFileName(file, { baseName: name, ext })
@@ -3205,7 +3206,7 @@ async function _scanOwnUploadLog() {
         }
       }
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
     }
   }
   if (_activeLogPath) logFiles.add(_activeLogPath);
@@ -3237,7 +3238,7 @@ async function _scanOwnUploadLog() {
         if (entries.size > 250000) throw new Error('Upload-Log enthält zu viele eindeutige Einträge');
       }
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
     }
   }
   return [...entries.values()];
@@ -3450,8 +3451,33 @@ ipcMain.handle('complete-upload-finalization', async (_event, payload) => {
   }
 });
 
+async function validateUploadLogPath(filePath) {
+  const value = String(filePath || '').trim();
+  if (!value) return;
+  let candidate = path.resolve(value);
+  let isTarget = true;
+  while (true) {
+    try {
+      const stat = await fs.promises.stat(candidate);
+      if (isTarget ? !stat.isFile() : !stat.isDirectory()) {
+        throw new Error(shellText('Upload-Log-Pfad ungültig: Datei und Ordner verwechselt.', 'Invalid upload log path: file and directory do not match.'));
+      }
+      return;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return;
+    candidate = parent;
+    isTarget = false;
+  }
+}
+
 ipcMain.handle('save-global-settings', async (_event, globalSettings) => {
   assertConfigWriteAllowed();
+  if (String(globalSettings?.logFilePath || '').trim() !== String(configStore.load().globalSettings?.logFilePath || '').trim()) {
+    await validateUploadLogPath(globalSettings?.logFilePath);
+  }
   await configStore.saveRendererGlobalSettings(globalSettings);
   globalSettings = configStore.load().globalSettings;
   _invalidateLogSettings(globalSettings);

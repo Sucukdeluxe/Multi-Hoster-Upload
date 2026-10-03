@@ -658,11 +658,24 @@ function createAutomationStatusSnapshot() {
   return freezeAutomationValue(snapshot);
 }
 
+function automationErrorDetail(error) {
+  const message = String(error?.message || error || 'Unbekannter Fehler');
+  if (/(?:token|password|cookie|authorization|api[_-]?key|session)\s*[:=]/i.test(message)) return localizeUiText('Fehlerdetails enthalten geschützte Daten.');
+  return _sanitizeFailureClipboardValue(message, 700);
+}
+
 async function loadAutomationEvidenceSnapshot() {
+  const readEvidence = async (label, read) => {
+    try {
+      return await read();
+    } catch (error) {
+      throw new Error(`${localizeUiText(label)}: ${automationErrorDetail(error)}`);
+    }
+  };
   const [history, uploadLog, automationCompletions] = await Promise.all([
-    window.api.getHistory(),
-    window.api.readOwnUploadLog(),
-    typeof window.api.getAutomationCompletions === 'function' ? window.api.getAutomationCompletions() : Promise.resolve([])
+    readEvidence('Verlauf konnte nicht gelesen werden', () => window.api.getHistory()),
+    readEvidence('Upload-Log konnte nicht gelesen werden', () => window.api.readOwnUploadLog()),
+    readEvidence('Abschlussnachweis konnte nicht gelesen werden', () => typeof window.api.getAutomationCompletions === 'function' ? window.api.getAutomationCompletions() : Promise.resolve([]))
   ]);
   return { history, uploadLog, automationCompletions };
 }
@@ -716,7 +729,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     uploadLogRows: uploadLog
   });
   const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
-  for (const path of processedPaths) reasons.set(path, 'processed');
+  for (const path of processedPaths) reasons.set(path, processed.reasons[path] || 'processed');
   const unprocessed = matched.filter(candidate => !processedPaths.has(normalizeAutomationPath(candidate.path)));
   const inspection = await window.api.inspectImportFiles(
     unprocessed,
@@ -750,7 +763,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
   const completedHostersByPath = new Map(completionState.completedByPath.map(entry => [normalizeAutomationPath(entry.path), new Set(entry.hosters)]));
   for (const path of ledgerProcessedPaths) {
     processedPaths.add(path);
-    reasons.set(path, 'processed');
+    reasons.set(path, 'completion');
   }
   const plannedCandidates = initialPlannedCandidates
     .filter(candidate => !ledgerProcessedPaths.has(normalizeAutomationPath(candidate.path)))
@@ -791,11 +804,16 @@ async function evaluateAutomationCandidates(files, options = {}) {
     name: candidate.name,
     reason: reasons.get(normalizeAutomationPath(candidate.path)) || 'unavailable'
   }));
-  const skippedReasons = new Set(['filter-rejected', 'processed', 'inspection-duplicate', 'unavailable', 'size-limited']);
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited']);
   const summary = {
     found: candidates.length,
     filterMatched: matched.length,
     alreadyProcessed: processed.processedPaths.length + inspectionDuplicatePaths.size + ledgerProcessedPaths.size,
+    processedByCompletion: ledgerProcessedPaths.size,
+    processedByHistory: classifications.filter(entry => entry.reason === 'history').length,
+    processedByUploadLog: classifications.filter(entry => entry.reason === 'upload-log').length,
+    inQueue: classifications.filter(entry => entry.reason === 'in-queue' || entry.reason === 'inspection-duplicate').length,
+    filterRejected: classifications.filter(entry => entry.reason === 'filter-rejected').length,
     unavailable: unavailablePaths.size,
     sizeLimitedJobs,
     acceptedFiles: selectedHosters.length === 0 ? plannedCandidates.length : actionableCandidates.length,
@@ -804,6 +822,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     availableSlots,
     deferredFiles: deferredFiles.length
   };
+  if (options.dryRun !== true) window.api.debugLog(`automation-eval trigger=${String(options.trigger || 'watcher')} found=${summary.found} admitted=${admittedFiles.length} completion=${summary.processedByCompletion} history=${summary.processedByHistory} log=${summary.processedByUploadLog} queue=${summary.inQueue} filter=${summary.filterRejected} unavailable=${summary.unavailable} sizeLimitedJobs=${summary.sizeLimitedJobs} deferred=${summary.deferredFiles}`);
   return freezeAutomationValue({
     dryRun: options.dryRun === true,
     trigger: String(options.trigger || 'watcher'),
@@ -941,13 +960,14 @@ async function applyAutomationEvaluation(evaluation) {
   const classifications = (evaluation.classifications || []).map(entry => dynamicPaths.has(normalizeAutomationPath(entry.path))
     ? { ...entry, reason: dynamicReasons.get(normalizeAutomationPath(entry.path)) }
     : entry);
-  const skippedReasons = new Set(['filter-rejected', 'processed', 'inspection-duplicate', 'unavailable', 'size-limited']);
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited']);
   const telemetryDelta = {
     detected: classifications.length,
     queued: admittedFiles.length,
     skipped: classifications.filter(entry => skippedReasons.has(entry.reason)).length,
     deferred: deferredFiles.length,
-    lastDetectedName: evaluation.telemetryDelta?.lastDetectedName || ''
+    lastDetectedName: evaluation.telemetryDelta?.lastDetectedName || '',
+    lastError: ''
   };
   if (admittedFiles.length === 0) {
     const telemetryResult = await persistAutomationTelemetry(telemetryDelta);
@@ -1028,8 +1048,7 @@ async function applyAutomationEvaluation(evaluation) {
 async function runFolderMonitorTestScan() {
   const result = await window.api.folderMonitorTestScan();
   if (result?.error) {
-    const knownErrors = ['Kein Ordnerpfad angegeben', 'Ordner nicht erreichbar', 'Ordnerscan fehlgeschlagen'];
-    throw new Error(knownErrors.includes(result.error) ? result.error : 'Ordnerüberwachung konnte nicht getestet werden.');
+    throw new Error(localizeUiText(result.error) + (result.errorCode ? ` (${result.errorCode})` : ''));
   }
   return evaluateAutomationCandidates(result?.files || [], { dryRun: true, trigger: result?.trigger || 'test' });
 }
@@ -1047,6 +1066,11 @@ const automationTestMetricDefinitions = Object.freeze([
   Object.freeze(['found', 'Gefundene Dateien']),
   Object.freeze(['filterMatched', 'Passend zum Dateifilter']),
   Object.freeze(['alreadyProcessed', 'Bereits verarbeitet']),
+  Object.freeze(['processedByCompletion', 'Bereits hochgeladen laut Abschlussnachweis']),
+  Object.freeze(['processedByHistory', 'Bereits im Verlauf']),
+  Object.freeze(['processedByUploadLog', 'Bereits im Upload-Log']),
+  Object.freeze(['inQueue', 'Bereits in Warteschlange oder Auswahl']),
+  Object.freeze(['filterRejected', 'Vom Dateifilter ausgeschlossen']),
   Object.freeze(['unavailable', 'Fehlend, leer oder nicht lesbar']),
   Object.freeze(['sizeLimitedJobs', 'Durch Größenlimits ausgeschlossen']),
   Object.freeze(['acceptedFiles', 'Akzeptierte Dateien']),
@@ -1127,6 +1151,11 @@ function renderAutomationStatusSnapshot(snapshot) {
   const errorText = String(snapshot.error || telemetry.lastError || '');
   if (errorRow) errorRow.hidden = errorText.length === 0;
   setAutomationText('automationLastError', errorText ? localizeUiText(errorText) : '');
+  const pauseNotice = document.getElementById('automationPauseNotice');
+  if (pauseNotice) {
+    pauseNotice.hidden = !snapshot.paused;
+    pauseNotice.textContent = snapshot.paused ? `${localizeUiText('Automatik pausiert seit')} ${formatAutomationDateTime(snapshot.pausedAt)}. ${localizeUiText('Fortsetzen aktiviert die Ordnerüberwachung und die Warteschlange. Aktive Uploads werden beim Pausieren noch abgeschlossen.')}` : '';
+  }
   return snapshot;
 }
 
@@ -1147,7 +1176,7 @@ function ensureAutomationPauseResumeButton() {
 function syncAutomationPauseResumeButton(snapshot) {
   const button = ensureAutomationPauseResumeButton();
   if (!button || !snapshot) return;
-  const label = snapshot.paused === true ? 'Fortsetzen' : 'Abschließen und pausieren';
+  const label = snapshot.paused === true ? 'Automatik fortsetzen' : 'Automatik pausieren';
   const localized = localizeUiText(label);
   const text = button.querySelector('.automation-pause-resume-label');
   if (text) text.textContent = localized;
@@ -1155,6 +1184,12 @@ function syncAutomationPauseResumeButton(snapshot) {
   button.setAttribute('aria-label', localized);
   button.classList.toggle('automation-resume', snapshot.paused === true);
   button.disabled = automationPauseResumeBusy;
+  const settingsButton = document.getElementById('automationSettingsPauseResumeBtn');
+  if (settingsButton) {
+    settingsButton.textContent = localized;
+    settingsButton.disabled = automationPauseResumeBusy || snapshot.statusAvailable !== true;
+    settingsButton.title = localizeUiText('Fortsetzen aktiviert die Ordnerüberwachung und die Warteschlange. Aktive Uploads werden beim Pausieren noch abgeschlossen.');
+  }
 }
 
 function syncAutomationContextStartControls(blocked) {
@@ -1330,9 +1365,10 @@ async function runAutomationTestOverlay() {
     if (generation !== automationTestGeneration) return;
     renderAutomationTestViewState({ loading: false, summary: evaluation.summary, error: '' });
   } catch (error) {
+    const detail = automationErrorDetail(error);
+    window.api.debugLog(`automation-test failed: ${detail}`);
     if (generation !== automationTestGeneration) return;
-    const knownErrors = ['Kein Ordnerpfad angegeben', 'Ordner nicht erreichbar', 'Ordnerscan fehlgeschlagen'];
-    renderAutomationTestViewState({ loading: false, summary: null, error: knownErrors.includes(error?.message) ? error.message : 'Ordnerüberwachung konnte nicht getestet werden.' });
+    renderAutomationTestViewState({ loading: false, summary: null, error: `${localizeUiText('Ordnerüberwachung konnte nicht getestet werden.')} ${localizeUiText(detail)}` });
   }
 }
 
@@ -1374,6 +1410,7 @@ async function toggleAutomationPauseResume() {
         lastUploadStats.state = 'stopping';
         updateStatusBar();
       }
+      showCopyToast(localizeUiText('Automatik und Warteschlange pausiert. Fortsetzen ist unter Einstellungen → Automatik jederzeit möglich.'), 6500);
     }
   } catch {
     showCopyToast(localizeUiText(resume ? 'Automatik konnte nicht fortgesetzt werden.' : 'Automatik konnte nicht pausiert werden.'), 6000, 'error');
@@ -1539,7 +1576,11 @@ async function init() {
   });
 
   window.api.onFolderMonitorNewFiles(files => {
-    handleFolderMonitorFiles(files).catch(error => window.api.debugLog(`folder-monitor renderer evaluation failed: ${error.message || String(error)}`));
+    handleFolderMonitorFiles(files).catch(error => {
+      const message = automationErrorDetail(error);
+      window.api.debugLog(`folder-monitor renderer evaluation failed: ${message}`);
+      persistAutomationTelemetry({ lastError: message }).then(refreshAutomationControlCenter);
+    });
   });
   window.api.signalFolderMonitorReady();
   if (typeof window.api.onAutomationStatus === 'function') {
@@ -6482,7 +6523,10 @@ function renderSettings() {
       ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
       <section class="automation-status-card" id="automationStatusCard" aria-live="polite">
         <div class="automation-status-header">
-          <span class="automation-state-badge state-inactive" id="automationStateBadge">Inaktiv</span>
+          <div class="automation-status-controls">
+            <span class="automation-state-badge state-inactive" id="automationStateBadge">Inaktiv</span>
+            <button class="btn btn-secondary" id="automationSettingsPauseResumeBtn" type="button">Automatik pausieren</button>
+          </div>
           <div class="automation-queue-summary">
             <span class="automation-queue-label">Aktuelle Queue-Auslastung</span>
             <strong class="automation-status-value automation-queue-value" id="automationQueueMeter">0 / 15.000</strong>
@@ -6491,14 +6535,16 @@ function renderSettings() {
             </div>
           </div>
         </div>
+        <p class="automation-pause-notice" id="automationPauseNotice" hidden></p>
+        <p class="hint">Die Tageszähler zählen Prüfungen und Aufnahmen. Wiederholte Abgleiche derselben Datei werden erneut gezählt.</p>
         <div class="automation-status-metrics">
           <div class="automation-status-metric"><span>Überwachung läuft seit</span><strong class="automation-status-value" id="automationMonitoringSince">Nie</strong></div>
           <div class="automation-status-metric"><span>Ordner erreichbar</span><strong class="automation-status-value" id="automationFolderReachable">—</strong></div>
           <div class="automation-status-metric"><span>Letzte erkannte Datei</span><strong class="automation-status-value" id="automationLastDetectedFile">Keine Datei erkannt</strong></div>
-          <div class="automation-status-metric"><span>Heute erkannt</span><strong class="automation-status-value" id="automationDetectedToday">0</strong></div>
+          <div class="automation-status-metric"><span>Dateiprüfungen heute</span><strong class="automation-status-value" id="automationDetectedToday">0</strong></div>
           <div class="automation-status-metric"><span>Heute eingereiht</span><strong class="automation-status-value" id="automationQueuedToday">0</strong></div>
-          <div class="automation-status-metric"><span>Heute übersprungen</span><strong class="automation-status-value" id="automationSkippedToday">0</strong></div>
-          <div class="automation-status-metric"><span>Wegen Queue-Limit zurückgestellt</span><strong class="automation-status-value" id="automationDeferredToday">0</strong></div>
+          <div class="automation-status-metric"><span>Übersprungene Prüfungen heute</span><strong class="automation-status-value" id="automationSkippedToday">0</strong></div>
+          <div class="automation-status-metric"><span>Zurückstellungen wegen Queue-Limit heute</span><strong class="automation-status-value" id="automationDeferredToday">0</strong></div>
           <div class="automation-status-metric"><span>Letzter Abgleich</span><strong class="automation-status-value" id="automationLastReconcile">Nie</strong></div>
           <div class="automation-status-metric"><span>Nächster Abgleich</span><strong class="automation-status-value" id="automationNextReconcile">Nie</strong></div>
         </div>
@@ -6581,7 +6627,7 @@ function renderSettings() {
         <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Vorhandene Dateien einmalig einlesen</label>
           <input type="checkbox" class="settings-autosave" id="fmIncludeExistingInput" ${fm.includeExisting ? 'checked' : ''}>
-          ${folderMonitorHelp('existing', 'Fügt beim nächsten Start der Überwachung alle bereits vorhandenen passenden Dateien hinzu. Die Option wird danach automatisch deaktiviert.')}
+          ${folderMonitorHelp('existing', 'Bezieht beim Start bereits vorhandene Dateien ein. Bereits hochgeladene Dateien werden weiterhin übersprungen. Regelmäßige Abgleiche prüfen den gesamten Ordner erneut.')}
         </div>
         <div class="settings-row checkbox-row folder-monitor-help-row">
           <label>Duplikate überspringen</label>
@@ -7108,6 +7154,7 @@ function renderSettings() {
     }
   });
   document.getElementById('automationTestBtn')?.addEventListener('click', runAutomationTestOverlay);
+  document.getElementById('automationSettingsPauseResumeBtn')?.addEventListener('click', toggleAutomationPauseResume);
   ensureAutomationTestOverlay();
   refreshAutomationControlCenter();
 
@@ -7323,9 +7370,9 @@ function syncLanguagePicker(value) {
 }
 
 async function chooseLogFilePath() {
-  const folders = await window.api.selectFolder();
-  if (!folders || !folders[0]) return;
-  const normalized = folders[0].replace(/[\\\/]+$/, '');
+  const folder = await window.api.folderMonitorSelectFolder();
+  if (!folder) return;
+  const normalized = folder.replace(/[\\\/]+$/, '');
   document.getElementById('logFilePathInput').value = `${normalized}\\fileuploader.log`;
   markSettingsDirty();
 }
