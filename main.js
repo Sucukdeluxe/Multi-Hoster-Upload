@@ -1256,6 +1256,7 @@ async function registerAutomationCompletionJobs(manager, jobs) {
       const sourceMtimeMs = job.sourceMtimeMs ?? job.automationMtimeMs;
       let size = hasFiniteMetadata(sourceSize) ? Number(sourceSize) : Number.NaN;
       let mtimeMs = hasFiniteMetadata(sourceMtimeMs) ? Number(sourceMtimeMs) : Number.NaN;
+      const fileIdentity = job.sourceFileIdentity || '';
       if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) {
         try {
           const stat = await fs.promises.stat(job.file);
@@ -1268,6 +1269,7 @@ async function registerAutomationCompletionJobs(manager, jobs) {
         path: job.file,
         size,
         mtimeMs,
+        ...(fileIdentity ? { fileIdentity } : {}),
         hoster: job.hoster
       });
     }

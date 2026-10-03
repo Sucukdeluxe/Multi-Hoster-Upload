@@ -16,5 +16,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      - name: Lint application sources
+        run: npm run lint
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
       - run: npm run dist

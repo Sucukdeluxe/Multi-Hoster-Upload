@@ -697,6 +697,13 @@ async function loadReusableAutomationEvidenceSnapshot() {
   }
 }
 
+function automationBlockingPaths(candidates) {
+  const identities = new Map(candidates.map(file => [normalizeAutomationPath(file.path), file.fileIdentity]));
+  const blocks = (path, identity, terminal) => !terminal || !identities.get(normalizeAutomationPath(path)) || identity === identities.get(normalizeAutomationPath(path));
+  return [...queueJobs.filter(job => blocks(job.file, job.sourceFileIdentity, ['done', 'error', 'skipped', 'aborted'].includes(job.status))).map(job => job.file),
+    ...selectedFiles.filter(file => blocks(file.path, file.fileIdentity, true)).map(file => file.path)];
+}
+
 async function evaluateAutomationCandidates(files, options = {}) {
   const source = Array.isArray(files) ? files : [];
   const normalizedCandidates = source.map(normalizeAutomationCandidate);
@@ -716,31 +723,32 @@ async function evaluateAutomationCandidates(files, options = {}) {
     .map(value => String(value || '').trim())
     .filter(Boolean)));
   const { history, uploadLog, automationCompletions } = options.evidenceSnapshot || await loadAutomationEvidenceSnapshot();
-  const currentPaths = new Set([...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)].map(normalizeAutomationPath));
+  const inspection = await window.api.inspectImportFiles(
+    matched,
+    _pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
+  );
+  const inspectedCandidates = Array.isArray(inspection?.accepted) ? inspection.accepted : [];
+  const blockingPaths = automationBlockingPaths(inspectedCandidates);
+  const currentPaths = new Set(blockingPaths.map(normalizeAutomationPath));
   const durableCompletionPaths = new Set((Array.isArray(automationCompletions) ? automationCompletions : []).map(row => normalizeAutomationPath(row?.path)).filter(Boolean));
-  const legacyCandidates = matched.filter(candidate => {
+  const legacyCandidates = inspectedCandidates.filter(candidate => {
     const key = normalizeAutomationPath(candidate.path);
     return currentPaths.has(key) || !durableCompletionPaths.has(key);
   });
   const processed = window.AutomationControl.classifyProcessedCandidates({
     candidates: legacyCandidates,
-    queuePaths: [...queueJobs.map(job => job.file), ...selectedFiles.map(file => file.path)],
+    queuePaths: blockingPaths,
     historyRows: flattenAutomationHistoryRows(history),
     uploadLogRows: uploadLog
   });
   const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
   for (const path of processedPaths) reasons.set(path, processed.reasons[path] || 'processed');
-  const unprocessed = matched.filter(candidate => !processedPaths.has(normalizeAutomationPath(candidate.path)));
-  const inspection = await window.api.inspectImportFiles(
-    unprocessed,
-    _pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
-  );
-  const metadata = new Map(unprocessed.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
+  const metadata = new Map(matched.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
   const inspectionDuplicatePaths = new Set((Array.isArray(inspection?.duplicates) ? inspection.duplicates : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
   const unavailablePaths = new Set((Array.isArray(inspection?.unavailable) ? inspection.unavailable : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
   for (const path of inspectionDuplicatePaths) reasons.set(path, 'inspection-duplicate');
   for (const path of unavailablePaths) reasons.set(path, 'unavailable');
-  const accepted = (Array.isArray(inspection?.accepted) ? inspection.accepted : []).map(file => ({
+  const accepted = inspectedCandidates.filter(file => !processedPaths.has(normalizeAutomationPath(file.path))).map(file => ({
     ...(metadata.get(normalizeAutomationPath(file?.path)) || {}),
     ...file
   }));
@@ -751,6 +759,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
       name: file.name,
       size: file.size,
       mtimeMs: file.mtimeMs,
+      fileIdentity: file.fileIdentity,
       eligibleHosters,
       eligibleJobCount: eligibleHosters.length
     };
@@ -865,6 +874,7 @@ function createAutomationPreviewJob(file, hoster) {
     automationMtimeMs: file.mtimeMs,
     automationSize: file.size,
     sourceMtimeMs: file.mtimeMs,
+    sourceFileIdentity: file.fileIdentity,
     sourceSize: file.size,
     automationAdmission: true
   };
@@ -910,6 +920,7 @@ async function applyAutomationEvaluation(evaluation) {
       name: file.name,
       size: file.size,
       mtimeMs: file.mtimeMs,
+      fileIdentity: file.fileIdentity,
       eligibleHosters,
       eligibleJobCount: eligibleHosters.length,
       completedHosters: [...completedHosters]
@@ -917,14 +928,13 @@ async function applyAutomationEvaluation(evaluation) {
   });
   const ownedPendingPaths = new Set(Array.isArray(evaluation.ownedPendingPaths) ? evaluation.ownedPendingPaths : []);
   const currentPaths = new Set([
-    ...queueJobs.map(job => job.file),
-    ...selectedFiles.map(file => file.path),
+    ...automationBlockingPaths(replannedCandidates),
     ..._pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
   ].map(normalizeAutomationPath));
   const candidates = replannedCandidates.filter(candidate => !currentPaths.has(normalizeAutomationPath(candidate.path)));
   if (selectedHosters.length === 0) {
     if (candidates.length > 0) {
-      _pendingFiles.push(...candidates.map(file => ({ path: file.path, name: file.name, size: file.size, mtimeMs: file.mtimeMs })));
+      _pendingFiles.push(...candidates.map(file => ({ path: file.path, name: file.name, size: file.size, mtimeMs: file.mtimeMs, fileIdentity: file.fileIdentity })));
       mergePendingImportInspection({
         candidateCount: evaluation.summary.filterMatched,
         duplicateCount: evaluation.summary.alreadyProcessed,
@@ -983,6 +993,16 @@ async function applyAutomationEvaluation(evaluation) {
     });
   }
   const newJobs = admittedFiles.flatMap(file => file.eligibleHosters.map(hoster => createAutomationPreviewJob(file, hoster)));
+  for (const file of admittedFiles) {
+    if (!file.fileIdentity) continue;
+    const key = normalizeAutomationPath(file.path);
+    queueJobs = queueJobs.filter(job => normalizeAutomationPath(job.file) !== key || job.sourceFileIdentity === file.fileIdentity);
+    selectedFiles = selectedFiles.filter(entry => normalizeAutomationPath(entry.path) !== key || entry.fileIdentity === file.fileIdentity);
+    for (const hoster of file.eligibleHosters) {
+      _completedUploadKeys.delete(`${file.path}|${hoster}`);
+      _suppressedPreviewKeys.delete(`${file.path}|${hoster}`);
+    }
+  }
   queueJobs.push(...newJobs);
   rebuildJobIndex();
   _queueStatsCache = null;
@@ -2354,6 +2374,7 @@ function restoreQueueStateFromConfig() {
         path: file.path,
         name: file.name || file.path.split(/[\\/]/).pop(),
         size: file.size || 0,
+        fileIdentity: file.fileIdentity,
         mtimeMs: Number.isFinite(Number(file.mtimeMs)) ? Number(file.mtimeMs) : null
       }))
     : [];
@@ -2383,6 +2404,7 @@ function restoreQueueStateFromConfig() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        sourceFileIdentity: job.sourceFileIdentity,
         automationMtimeMs: Number.isFinite(Number(job.automationMtimeMs)) ? Number(job.automationMtimeMs) : null,
         automationSize: Number.isFinite(Number(job.automationSize)) ? Number(job.automationSize) : null,
         sourceMtimeMs: Number.isFinite(Number(job.sourceMtimeMs)) ? Number(job.sourceMtimeMs) : null,
@@ -2419,6 +2441,7 @@ function buildPersistedQueueState() {
         path: job.file,
         name: job.fileName,
         size: job.sourceSize ?? job.automationSize ?? job.bytesTotal ?? 0,
+        fileIdentity: job.sourceFileIdentity,
         mtimeMs: job.sourceMtimeMs ?? job.automationMtimeMs ?? null
       });
     }
@@ -2468,6 +2491,7 @@ function buildPersistedQueueState() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        sourceFileIdentity: job.sourceFileIdentity,
         automationMtimeMs: Number.isFinite(Number(job.automationMtimeMs)) ? Number(job.automationMtimeMs) : null,
         automationSize: Number.isFinite(Number(job.automationSize)) ? Number(job.automationSize) : null,
         sourceMtimeMs: Number.isFinite(Number(job.sourceMtimeMs)) ? Number(job.sourceMtimeMs) : null,
@@ -2873,6 +2897,7 @@ function buildQueuePreview() {
             file: file.path, fileName: file.name, hoster,
             status: 'preview', bytesUploaded: 0, bytesTotal: file.size || 0,
             sourceMtimeMs: file.mtimeMs,
+            sourceFileIdentity: file.fileIdentity,
             sourceSize: file.size,
             speedKbs: 0, elapsed: 0, remaining: 0,
             error: null, result: null, attempt: 0, maxAttempts: 0, link: ''
@@ -4559,6 +4584,7 @@ function serializeUploadJob(job) {
     automationMtimeMs: job.automationMtimeMs,
     automationSize: job.automationSize,
     sourceMtimeMs: job.sourceMtimeMs,
+    sourceFileIdentity: job.sourceFileIdentity,
     sourceSize: job.sourceSize
   };
 }
@@ -5648,6 +5674,7 @@ function syncSelectedFilesFromQueue() {
         path: job.file,
         name: job.fileName,
         size: job.sourceSize ?? job.automationSize ?? job.bytesTotal ?? 0,
+        fileIdentity: job.sourceFileIdentity,
         mtimeMs: job.sourceMtimeMs ?? job.automationMtimeMs ?? null
       });
     });
@@ -10071,6 +10098,7 @@ async function _autoDeduplicateFromLog() {
       path: job.file,
       size: job.sourceSize ?? job.automationSize ?? job.bytesTotal,
       mtimeMs: job.sourceMtimeMs ?? job.automationMtimeMs,
+      fileIdentity: job.sourceFileIdentity,
       eligibleHosters: [job.hoster]
     }));
     const ledgerState = window.AutomationControl.classifyAutomationCompletionLedger({
@@ -10090,8 +10118,8 @@ async function _autoDeduplicateFromLog() {
       });
     }
     if (Array.isArray(entries) && entries.length > 0) {
-      const partitioned = window.QueueDedup.partitionRestoredJobsByLog(queueJobs, entries, _restoredSnapshotSavedAt);
-      queueJobs = partitioned.kept;
+      const partitioned = window.QueueDedup.partitionRestoredJobsByLog(queueJobs.filter(job => !job.sourceFileIdentity), entries, _restoredSnapshotSavedAt);
+      queueJobs = queueJobs.filter(job => job.sourceFileIdentity).concat(partitioned.kept);
       removed.push(...partitioned.removed);
     }
     for (const job of removed) {
@@ -10102,6 +10130,7 @@ async function _autoDeduplicateFromLog() {
         path: file.path,
         size: file.size,
         mtimeMs: file.mtimeMs,
+        fileIdentity: file.fileIdentity,
         eligibleHosters: getSelectedHosters()
       })),
       completionRows
@@ -10115,7 +10144,7 @@ async function _autoDeduplicateFromLog() {
       window.api.debugLog(`auto-dedup: removed ${removed.length} completed jobs from restored queue`);
     }
     if (Array.isArray(entries) && entries.length > 0) {
-      const seedKeys = window.QueueDedup.completedSelectionKeys(selectedFiles, getSelectedHosters(), entries, _restoredSnapshotSavedAt);
+      const seedKeys = window.QueueDedup.completedSelectionKeys(selectedFiles.filter(file => !file.fileIdentity), getSelectedHosters(), entries, _restoredSnapshotSavedAt);
       if (seedKeys.length > 0) {
         for (const key of seedKeys) _completedUploadKeys.add(key);
         window.api.debugLog(`auto-dedup: seeded ${seedKeys.length} completed file|hoster keys from log so buildQueuePreview won't re-create ghosts`);
