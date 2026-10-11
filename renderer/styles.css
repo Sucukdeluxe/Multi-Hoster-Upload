@@ -4525,14 +4525,15 @@ input[type="checkbox"] {
 }
 
 .account-otp-action {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
 }
 
 .account-otp-input {
-  width: 100%;
-  min-width: 0;
-  max-width: none;
+  flex: 1 0 150px;
+  width: 150px;
+  min-width: min(150px, 100%);
+  max-width: 100%;
 }
 
 .account-hoster-group-header {
@@ -5106,7 +5107,13 @@ input[type="checkbox"] {
   }
 
   .account-otp-action {
-    grid-template-columns: minmax(0, 1fr);
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .account-otp-input {
+    flex: none;
+    width: 100%;
   }
 
   .account-otp-action .btn {
