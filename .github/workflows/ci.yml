@@ -18,6 +18,6 @@ jobs:
       - run: npm ci
       - name: Lint application sources
         run: npm run lint
-      - name: Audit production dependencies
-        run: npm audit --omit=dev
+      - name: Audit all dependencies
+        run: npm audit
       - run: npm run dist

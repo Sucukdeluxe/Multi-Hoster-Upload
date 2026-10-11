@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "node scripts/dev-runner.cjs",
-    "verify": "npm run lint && npm audit --omit=dev",
+    "verify": "npm run lint && npm audit",
     "lint": "eslint .",
     "dist": "electron-builder --publish never --win",
     "release:win": "electron-builder --publish never --win nsis portable"
@@ -17,11 +17,17 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
-    "electron": "^41.10.5",
+    "electron": "^41.10.6",
     "electron-builder": "^26.15.3",
     "eslint": "^10.8.1",
     "eslint-plugin-security": "^4.0.1",
     "rcedit": "^4.0.1"
+  },
+  "overrides": {
+    "@electron/get@3": {
+      "global-agent": "4.1.3"
+    },
+    "brace-expansion@5": "^5.0.12"
   },
   "build": {
     "appId": "com.multihoster.uploader",

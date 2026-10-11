@@ -110,7 +110,7 @@ const binaryExtensions = new Set(['.ico', '.png']);
 const expectedScripts = {
   start: 'electron .',
   dev: 'node scripts/dev-runner.cjs',
-  verify: 'npm run lint && npm audit --omit=dev',
+  verify: 'npm run lint && npm audit',
   lint: 'eslint .',
   dist: 'electron-builder --publish never --win',
   'release:win': 'electron-builder --publish never --win nsis portable'

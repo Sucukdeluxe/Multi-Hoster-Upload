@@ -2645,13 +2645,24 @@ function renderImportPlanSummary() {
 }
 
 function formatRejectedImportBalance(inspection) {
+  const duplicateCount = Number(inspection.duplicateCount) || 0;
+  const unavailableCount = Number(inspection.unavailableCount) || 0;
+  if (duplicateCount === 1 && unavailableCount === 0) {
+    return localizeUiText('Datei nicht hinzugefügt: Dieser Dateipfad ist bereits in der Warteschlange oder Auswahl enthalten.');
+  }
+  const unavailable = Array.isArray(inspection.unavailable) ? inspection.unavailable : [];
+  const reasonCount = reason => unavailable.filter(file => file.reason === reason).length;
   const values = [
-    ['Kandidaten', inspection.candidateCount],
-    ['Bereits vorhanden / dupliziert', inspection.duplicateCount],
-    ['Fehlend / unlesbar / leer', inspection.unavailableCount],
-    ['Akzeptierte Dateien', inspection.acceptedCount]
+    ['Dateipfade bereits in Warteschlange oder Auswahl', duplicateCount],
+    ['Dateien nicht gefunden', reasonCount('missing')],
+    ['Dateien nicht lesbar', reasonCount('unreadable')],
+    ['Leere Dateien (0 Bytes)', reasonCount('empty')]
   ];
-  return values.map(([label, value]) => `${localizeUiText(label)}: ${(Number(value) || 0).toLocaleString(getUiLocale())}`).join(' · ');
+  const explained = values.slice(1).reduce((sum, [, count]) => sum + count, 0);
+  if (unavailableCount > explained) values.push(['Weitere nicht verfügbare Dateien', unavailableCount - explained]);
+  const details = values.filter(([, count]) => count > 0)
+    .map(([label, count]) => `${localizeUiText(label)}: ${count.toLocaleString(getUiLocale())}`).join(' · ');
+  return [localizeUiText('Keine Dateien hinzugefügt.'), details].filter(Boolean).join(' ');
 }
 
 function mergePendingImportInspection(result) {
@@ -2707,7 +2718,7 @@ function coordinateImportEntries(entries, options = {}) {
     } else if (_pendingFiles.length > 0) {
       renderImportPlanSummary();
     } else {
-      showCopyToast(formatRejectedImportBalance(inspection), 6500);
+      showCopyToast(formatRejectedImportBalance(inspection), 6500, 'warning');
       _pendingImportInspection = null;
     }
     return inspection;
