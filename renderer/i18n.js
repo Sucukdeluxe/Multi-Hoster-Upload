@@ -656,6 +656,7 @@
     ['Online-Sicherung konnte nicht entschlüsselt werden oder ist beschädigt', 'The online backup could not be decrypted or is damaged'],
     ['Online-Sicherung konnte nicht gespeichert werden', 'Online backup could not be saved'],
     ['Online-Sicherung wurde nicht gefunden', 'Online backup was not found'],
+    ['Online-Sicherung nicht verfügbar: Sie ist abgelaufen, gelöscht oder nicht vorhanden.', 'Online backup unavailable: it has expired, been deleted, or does not exist.'],
     ['Online-Sicherung konnte nicht geladen werden', 'Online backup could not be loaded'],
     ['Online-Sicherungsdienst hat ungültige Daten geliefert', 'The online backup service returned invalid data'],
     ['Online-Sicherung konnte nicht gelöscht werden', 'Online backup could not be deleted'],

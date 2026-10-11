@@ -4236,6 +4236,22 @@ function openOnlineBackupRestore() {
   openOnlineBackupView(true);
 }
 
+function onlineBackupRestoreError(message) {
+  if (message === 'Online-Sicherung wurde nicht gefunden') return 'Online-Sicherung nicht verfügbar: Sie ist abgelaufen, gelöscht oder nicht vorhanden.';
+  const known = new Set([
+    'Online-Sicherungsschlüssel ist ungültig',
+    'Online-Sicherungsschlüssel ist beschädigt',
+    'Online-Sicherungsdienst antwortet nicht',
+    'Online-Sicherungsdienst ist nicht erreichbar',
+    'Online-Sicherung konnte nicht geladen werden',
+    'Online-Sicherungsdienst hat ungültige Daten geliefert',
+    'Online-Sicherung ist beschädigt',
+    'Online-Sicherung konnte nicht entschlüsselt werden oder ist beschädigt',
+    'Online-Sicherung enthält keine gültigen Einstellungen'
+  ]);
+  return known.has(message) ? message : 'Online-Sicherung konnte nicht importiert werden';
+}
+
 async function doOnlineBackupRestore() {
   const input = document.getElementById('onlineBackupKeyInput');
   const key = input?.value.trim() || '';
@@ -4264,8 +4280,8 @@ async function doOnlineBackupRestore() {
     if (warnings.length) setOnlineBackupStatus(`Einstellungen übernommen. Bitte prüfen: ${warnings.join(', ')}.`, 'warning');
     else setOnlineBackupStatus('Alle Accounts und Einstellungen wurden übernommen.', 'success');
     if (queuePersistenceError) showImportQueuePersistenceError(queuePersistenceError);
-  } catch {
-    setOnlineBackupStatus('Online-Sicherung konnte nicht importiert werden', 'error');
+  } catch (error) {
+    setOnlineBackupStatus(onlineBackupRestoreError(error?.message), 'error');
   } finally {
     syncOnlineBackupRestoreButton(false);
   }
