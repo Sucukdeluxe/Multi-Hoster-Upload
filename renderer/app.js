@@ -40,6 +40,7 @@ function refreshLocalizedRuntimeUi() {
   updateStatusBar();
   refreshAutomationControlCenter();
   refreshAutomationTestOverlay();
+  renderCloudLogStatus(cloudLogLastStatus);
   const activeRecentTab = document.querySelector('.recent-tab.active');
   const hint = document.getElementById('recentFilesHint');
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
@@ -6384,6 +6385,69 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
 }
 
 // --- Settings ---
+let cloudLogBusy = false;
+let cloudLogLastStatus = null;
+const cloudLogErrors = {
+  KEY_STORAGE_UNAVAILABLE: 'Der API-Key konnte nicht im sicheren Zugangsdaten-Speicher gesichert werden.',
+  INVALID_KEY: 'Der Clouddrop-API-Key ist ungültig oder wurde widerrufen.',
+  ACCESS_DENIED: 'Der API-Key hat keine Berechtigung für diese Aktion.',
+  UNRESTRICTED_KEY_REQUIRED: 'Für die Synchronisierung wird ein API-Key ohne Zielordner-Bindung benötigt.',
+  IP_UNAVAILABLE: 'Die öffentliche IP-Adresse konnte nicht ermittelt werden.',
+  CONNECTION_FAILED: 'Clouddrop ist nicht erreichbar. Ausstehende Einträge bleiben lokal gespeichert.',
+  RATE_LIMIT: 'Clouddrop begrenzt die Anfragen. Die Synchronisierung wird automatisch erneut versucht.',
+  LOCAL_WRITE_FAILED: 'Die lokale Synchronisierungsdatei konnte nicht gespeichert werden. Bitte Speicherplatz und Zugriffsrechte prüfen.',
+  LOCAL_STATE_INVALID: 'Die lokale Synchronisierungsdatei konnte nicht gelesen werden.',
+  REMOTE_ERROR: 'Clouddrop hat die Aktualisierung abgelehnt. Ausstehende Einträge bleiben lokal gespeichert.',
+  INVALID_RESPONSE: 'Clouddrop hat eine unerwartete Antwort geliefert.',
+  VERIFICATION_FAILED: 'Die Testdatei konnte nicht verifiziert werden.',
+  RESPONSE_TOO_LARGE: 'Die Clouddrop-Antwort überschreitet die zulässige Größe.',
+  LINE_TOO_LARGE: 'Ein Log-Eintrag überschreitet die zulässige Größe.'
+};
+
+function renderCloudLogStatus(status) {
+  if (status) cloudLogLastStatus = status;
+  if (!status || !document.getElementById('cloudLogPhase')) return;
+  const phases = { disabled: 'Inaktiv', checking: 'Verbindung wird geprüft…', ready: 'Aktiv', syncing: 'Wird synchronisiert…', error: 'Synchronisierung fehlgeschlagen' };
+  document.getElementById('cloudLogPhase').textContent = localizeUiText(phases[status.phase] || phases.disabled);
+  document.getElementById('cloudLogIp').textContent = status.ip ? status.ip.replaceAll(':', '_') : '—';
+  document.getElementById('cloudLogLastSync').textContent = status.lastSyncedAt
+    ? new Date(status.lastSyncedAt).toLocaleString(getUiLocale()) : localizeUiText('Noch nicht synchronisiert');
+  document.getElementById('cloudLogPending').textContent = (Number(status.pendingFiles) || 0).toLocaleString(getUiLocale());
+  const key = document.getElementById('cloudLogKeyInput');
+  key.placeholder = localizeUiText(status.hasApiKey ? 'Gespeicherten API-Key verwenden' : 'API-Key eingeben');
+  document.getElementById('cloudLogActivateBtn').disabled = cloudLogBusy;
+  document.getElementById('cloudLogDisableBtn').disabled = cloudLogBusy || !status.enabled;
+  const error = document.getElementById('cloudLogError');
+  error.hidden = !status.errorCode;
+  error.textContent = status.errorCode ? localizeUiText(cloudLogErrors[status.errorCode] || cloudLogErrors.CONNECTION_FAILED) : '';
+}
+
+async function refreshCloudLogStatus() {
+  try { renderCloudLogStatus(await window.api.getCloudLogStatus?.()); } catch {}
+}
+
+async function configureCloudLog(enabled) {
+  if (cloudLogBusy) return;
+  cloudLogBusy = true;
+  const key = document.getElementById('cloudLogKeyInput');
+  document.getElementById('cloudLogActivateBtn').disabled = true;
+  document.getElementById('cloudLogDisableBtn').disabled = true;
+  try {
+    const result = await window.api.configureCloudLog({ enabled, apiKey: key?.value.trim() || '' });
+    if (result?.ok) {
+      if (key) key.value = '';
+      showCopyToast(enabled ? 'Clouddrop-Log-Synchronisierung ist aktiv.' : 'Clouddrop-Log-Synchronisierung ist deaktiviert.');
+    } else {
+      showCopyToast(cloudLogErrors[result?.errorCode] || cloudLogErrors.CONNECTION_FAILED, 6500, 'error');
+    }
+  } catch {
+    showCopyToast(cloudLogErrors.CONNECTION_FAILED, 6500, 'error');
+  } finally {
+    cloudLogBusy = false;
+    await refreshCloudLogStatus();
+  }
+}
+
 async function _renderLogPathsList(el) {
   if (!el || !window.api || !window.api.getLogPaths) return;
   try {
@@ -6753,6 +6817,24 @@ function renderSettings() {
         <span class="hint">Pro Session = neue Datei bei jedem App-Start; nach komplettem Schließen + erneutem Öffnen beginnt eine neue Session.</span>
         </div>
       </div>
+      </div>
+      <div class="settings-section-label">Clouddrop-Log-Synchronisierung</div>
+      <div class="cloud-log-settings">
+        <p class="hint">Erfolgreiche Uploads automatisch als TXT in einem Clouddrop-Ordner mit der öffentlichen IP-Adresse dieses Geräts speichern. Die Übertragung beginnt mit der Aktivierung und folgt dem gewählten Log-Datei-Modus.</p>
+        <div class="cloud-log-key-row">
+          <label for="cloudLogKeyInput">Clouddrop-API-Key</label>
+          <input type="password" class="key-input" id="cloudLogKeyInput" autocomplete="off" spellcheck="false" placeholder="API-Key eingeben">
+          <button class="btn btn-secondary" type="button" id="cloudLogActivateBtn">Prüfen und aktivieren</button>
+          <button class="btn btn-secondary" type="button" id="cloudLogDisableBtn">Deaktivieren</button>
+        </div>
+        <p class="hint">API-Key ohne Zielordner-Bindung verwenden. Bei der Prüfung wird eine leere Testdatei im IP-Ordner erstellt. Die öffentliche IP wird über ipify ermittelt.</p>
+        <dl class="cloud-log-status" aria-live="polite">
+          <div><dt>Status</dt><dd id="cloudLogPhase">Inaktiv</dd></div>
+          <div><dt>IP-Ordner</dt><dd id="cloudLogIp">—</dd></div>
+          <div><dt>Zuletzt synchronisiert</dt><dd id="cloudLogLastSync">—</dd></div>
+          <div><dt>Ausstehende Dateien</dt><dd id="cloudLogPending">0</dd></div>
+        </dl>
+        <p class="hint" id="cloudLogError" role="status" hidden></p>
       </div>
       <div class="settings-option verbose-logging-option">
         <div class="settings-option-copy">
@@ -7146,6 +7228,9 @@ function renderSettings() {
   });
 
   _renderLogPathsList(document.getElementById('logPathsList'));
+  void refreshCloudLogStatus();
+  document.getElementById('cloudLogActivateBtn')?.addEventListener('click', () => configureCloudLog(true));
+  document.getElementById('cloudLogDisableBtn')?.addEventListener('click', () => configureCloudLog(false));
   const testWebhookBtn = document.getElementById('testWebhookBtn');
   if (testWebhookBtn) {
     testWebhookBtn.addEventListener('click', async () => {
@@ -10631,6 +10716,7 @@ function updateStatsPanel() {
 
 // --- Start ---
 window.api.onUpdateAvailable(showUpdateBanner);
+window.api.onCloudLogStatus?.(renderCloudLogStatus);
 window.api.onUpdateProgress(handleUpdateProgress);
 window.api.onPrepareClose(prepareForWindowClose);
 initializeStaticHeader();

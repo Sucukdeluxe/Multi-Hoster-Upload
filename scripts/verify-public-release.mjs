@@ -22,6 +22,8 @@ const sourceFiles = [
   'lib/automation-control.js',
   'lib/backup-crypto.js',
   'lib/clouddrop-upload.js',
+  'lib/clouddrop-log-api.js',
+  'lib/cloud-log-sync.js',
   'lib/coalesced-set.js',
   'lib/config-store.js',
   'lib/diagnostics-agent.js',

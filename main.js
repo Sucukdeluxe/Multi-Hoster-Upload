@@ -17,6 +17,7 @@ const DoodstreamUploader = require('./lib/doodstream-upload');
 const { createDoodstreamOtpCoordinator, selectUploadAuth } = require('./lib/account-auth');
 const { createAccountCooldownController, createAccountPicker, selectFallbackAccount } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
+const { CloudLogSync } = require('./lib/cloud-log-sync');
 const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
 const { downloadOnlineBackup, downloadRecoveryPublicKey, normalizeOnlineBackupRetention } = require('./lib/online-backup');
@@ -127,6 +128,17 @@ let dropTargetWindow = null;
 let tray = null;
 let _cachedLogSettings = null;
 const configStore = new ConfigStore(app);
+const cloudLogWrites = new Set();
+let cloudLogSettingsCache = null;
+const cloudLogSync = new CloudLogSync({
+  directory: path.join(app.getPath('userData'), 'cloud-log-sync'),
+  loadSettings: () => cloudLogSettingsCache || (cloudLogSettingsCache = configStore.load().globalSettings?.cloudLogSync || {}),
+  saveSettings: async settings => {
+    await configStore.saveCloudLogSettings(settings);
+    cloudLogSettingsCache = settings;
+  }
+});
+cloudLogSync.on('status', status => safeSend('cloud-log:status', status));
 configStore.setPerfLog((m) => { try { logInfo(m); } catch {} });
 const onlineBackupKeyring = createOnlineBackupKeyring({
   filePath: path.join(app.getPath('userData'), 'online-backup-keys.json')
@@ -182,6 +194,8 @@ function assertConfigWriteAllowed() {
 }
 
 async function waitForConfigStoreWrites() {
+  await Promise.all([...cloudLogWrites]);
+  await cloudLogSync.flushLocal();
   await configStore.drainWrites();
   await configStore.drainAutomationCompletionWrites();
 }
@@ -1028,7 +1042,13 @@ function shouldLogHosterToFile(hoster) {
 }
 
 function appendUploadLog(hoster, link, fileName) {
-  _uploadLogBuffer.push(formatUploadLogLine(new Date(), hoster, link, fileName));
+  const line = formatUploadLogLine(new Date(), hoster, link, fileName);
+  _uploadLogBuffer.push(line);
+  const cloudWrite = cloudLogSync.append(getLogFilePath(), line).catch(() => {
+    debugLog('cloud-log: local queue write failed');
+  });
+  cloudLogWrites.add(cloudWrite);
+  void cloudWrite.finally(() => cloudLogWrites.delete(cloudWrite));
   if (!_uploadLogFlushTimer) {
     _uploadLogFlushTimer = setTimeout(() => {
       _uploadLogFlushTimer = null;
@@ -1775,6 +1795,7 @@ app.whenReady().then(async () => {
   }
   createWindow();
   createTray();
+  void cloudLogSync.start();
 
   // Minimize to tray instead of taskbar
   mainWindow.on('minimize', () => {
@@ -1896,8 +1917,29 @@ ipcMain.handle('get-config', () => {
   return configStore.load();
 });
 
+ipcMain.handle('cloud-log:status', event => {
+  if (!isTrustedOnlineBackupIpcEvent(event)) return null;
+  return cloudLogSync.status();
+});
+
+ipcMain.handle('cloud-log:configure', async (event, payload = {}) => {
+  if (!isTrustedOnlineBackupIpcEvent(event)) return { ok: false, errorCode: 'ACCESS_DENIED' };
+  assertConfigWriteAllowed();
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || typeof payload.enabled !== 'boolean' || (payload.apiKey !== undefined && typeof payload.apiKey !== 'string')) {
+    return { ok: false, errorCode: 'INVALID_KEY' };
+  }
+  try {
+    const status = await cloudLogSync.configure({ enabled: payload.enabled, apiKey: payload.apiKey?.slice(0, 200) });
+    return { ok: true, status };
+  } catch {
+    return { ok: false, errorCode: cloudLogSync.status().errorCode || 'CONNECTION_FAILED', status: cloudLogSync.status() };
+  }
+});
+
 ipcMain.handle('save-config', async (_event, config) => {
   assertConfigWriteAllowed();
+  if (config?.globalSettings) config.globalSettings.cloudLogSync = configStore.load().globalSettings.cloudLogSync;
   await configStore.save(config);
   if (config && config.globalSettings) _invalidateLogSettings(config.globalSettings);
   try {
@@ -2967,6 +3009,15 @@ ipcMain.handle('clear-history', async () => {
 });
 
 async function syncImportedRuntime(config) {
+  cloudLogSettingsCache = config.globalSettings?.cloudLogSync || {};
+  try {
+    await cloudLogSync.configure({
+      enabled: config.globalSettings?.cloudLogSync?.enabled === true,
+      apiKey: config.globalSettings?.cloudLogSync?.apiKey || ''
+    });
+  } catch {
+    debugLog('cloud-log: imported settings could not connect');
+  }
   const warnings = [];
   try {
     setLogVerbose(!!config.globalSettings.logVerbose);

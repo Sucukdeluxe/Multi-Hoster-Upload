@@ -278,6 +278,14 @@ You can always install manually from the [GitHub releases page](https://github.c
 - Use the [latest release page](https://github.com/Sucukdeluxe/Multi-Hoster-Upload/releases/latest) for a manual download.
 - If the changelog cannot be loaded, the application can still show the fallback release description when one is available.
 
+## Clouddrop log sync
+
+Settings → Logs & Support includes an optional Clouddrop connection for upload logs. Enter an unrestricted Clouddrop API key and select **Verify and enable**. Verification creates an empty test file in a folder named after the device's public IP address; ipify provides the public IP. The key is stored using the operating system's credential encryption.
+
+New successful upload entries for hosts with file logging enabled are synchronized automatically as TXT files. The single-file, daily and per-session log modes apply. Files have unique suffixes so separate instances using the same key do not overwrite one another. Large logs are split into separate files before they reach the text API size limit. Existing local log contents are not imported automatically.
+
+The panel shows the connection state, IP folder, last successful sync and pending files. Changes are queued locally, retried after connection failures and resumed after restarting the application. Disabling sync retains pending entries but stops collecting new ones. A revoked key requires verification with a valid key. Local pending data is tied to its Clouddrop account and is never sent to another account after changing keys.
+
 ## Development and Windows builds
 
 Install dependencies and start the Electron application:

@@ -80,6 +80,13 @@ contextBridge.exposeInMainWorld('api', {
   // Log import
   readOwnUploadLog: () => ipcRenderer.invoke('read-own-upload-log'),
   importUploadLog: () => ipcRenderer.invoke('import-upload-log'),
+  getCloudLogStatus: () => ipcRenderer.invoke('cloud-log:status'),
+  configureCloudLog: (settings) => ipcRenderer.invoke('cloud-log:configure', settings),
+  onCloudLogStatus: callback => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('cloud-log:status', listener);
+    return () => ipcRenderer.removeListener('cloud-log:status', listener);
+  },
 
   // Clipboard
   copyToClipboard: (text) => ipcRenderer.invoke('copy-to-clipboard', text),
