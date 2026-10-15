@@ -1,7 +1,7 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
-const { createStartupWindow, createStartupQuery, createStartupDiagnostics, summarizeStartupPixels } = require('./lib/startup-renderer');
+const { createStartupWindow, createStartupQuery, createStartupDiagnostics, summarizeStartupPixels, createNativeStartupLog } = require('./lib/startup-renderer');
 nativeTheme.themeSource = 'dark';
 const path = require('path');
 const { pathToFileURL } = require('node:url');
@@ -363,6 +363,14 @@ function requestClosePreparation() {
 }
 
 const _hasSingleInstanceLock = app.requestSingleInstanceLock();
+const nativeStartupLog = _hasSingleInstanceLock ? createNativeStartupLog({ fs, path, directory: app.getPath('userData'), commandLine: app.commandLine }) : null;
+const startupIncidentKeys = new Set();
+if (nativeStartupLog) {
+  startupDiagnostics.write('native-logging', { enabled: nativeStartupLog.enabled });
+  const nativeLogMaintenance = setInterval(() => nativeStartupLog.maintain(), 30000);
+  nativeLogMaintenance.unref();
+  process.once('exit', () => nativeStartupLog.maintain());
+}
 if (!_hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -373,6 +381,31 @@ if (!_hasSingleInstanceLock) {
       mainWindow.focus();
     }
   });
+}
+
+function recordStartupIncident(reason) {
+  const key = `${mainWindow?.id || 0}:${folderMonitorRendererGeneration}:${reason}`;
+  if (!nativeStartupLog || startupIncidentKeys.has(key)) return;
+  startupIncidentKeys.add(key);
+  try {
+    let secrets = [];
+    try { secrets = collectSecretValues(configStore.load()); } catch {}
+    const text = buildSupportBundleText({
+      header: { Version: app.getVersion(), Electron: process.versions.electron, CreatedAt: new Date().toISOString(), Reason: reason, OS: require('os').release() },
+      sanitizedConfig: { included: false },
+      secrets,
+      files: [
+        { label: 'startup-diagnostics.jsonl (previous)', path: startupDiagnostics.filePath + '.1', maxBytes: 1024 * 1024 },
+        { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, maxBytes: 1024 * 1024 },
+        { label: 'native Chromium errors (previous)', path: nativeStartupLog.nativePath + '.previous', maxBytes: 1024 * 1024 },
+        { label: 'native Chromium errors', path: nativeStartupLog.nativePath, maxBytes: 1024 * 1024 }
+      ]
+    });
+    const saved = nativeStartupLog.saveReport(text);
+    startupDiagnostics.write(saved ? 'startup-report-saved' : 'startup-report-unavailable', { reason });
+  } catch {
+    startupDiagnostics.write('startup-report-unavailable', { reason });
+  }
 }
 // Rotation memory that survives batch-done → new UploadManager within the
 // same app session. Without this, clicking "Retry failed" after a batch
@@ -1622,6 +1655,7 @@ function createWindow() {
   const diagnosticWindow = mainWindow;
   const diagnosticTimers = [];
   let diagnosticProbeRunning = false;
+  let crashDialogOpen = false;
   const probeStartup = async (checkpoint) => {
     if (diagnosticProbeRunning || diagnosticWindow.isDestroyed() || diagnosticWindow.webContents.isDestroyed()) return;
     diagnosticProbeRunning = true;
@@ -1642,11 +1676,15 @@ function createWindow() {
       startupDiagnostics.write('dom-probe', { checkpoint, generation, initialized: closeHandshakeReady, windowVisible: diagnosticWindow.isVisible(), windowMinimized: diagnosticWindow.isMinimized(), ...dom });
     } catch {
       startupDiagnostics.write('dom-probe-unavailable', { checkpoint, generation, initialized: closeHandshakeReady });
+      if (checkpoint >= 30000 && generation === folderMonitorRendererGeneration) recordStartupIncident('renderer-no-response');
     }
+    if (checkpoint >= 30000 && !closeHandshakeReady && generation === folderMonitorRendererGeneration) recordStartupIncident('startup-incomplete');
     try {
       if (diagnosticWindow.isVisible() && !diagnosticWindow.isMinimized()) {
         const image = await bounded(diagnosticWindow.webContents.capturePage());
-        startupDiagnostics.write('paint-probe', { checkpoint, generation, ...summarizeStartupPixels(image) });
+        const pixels = summarizeStartupPixels(image);
+        startupDiagnostics.write('paint-probe', { checkpoint, generation, ...pixels });
+        if (checkpoint >= 10000 && pixels.whiteRatio >= 0.98 && generation === folderMonitorRendererGeneration) recordStartupIncident('white-window');
       } else {
         startupDiagnostics.write('paint-probe-skipped', { checkpoint, generation, windowVisible: diagnosticWindow.isVisible(), windowMinimized: diagnosticWindow.isMinimized() });
       }
@@ -1666,7 +1704,10 @@ function createWindow() {
   diagnosticWindow.on('show', () => startupDiagnostics.write('window-shown', { initialized: closeHandshakeReady }));
   diagnosticWindow.once('ready-to-show', () => startupDiagnostics.write('first-render-ready'));
   diagnosticWindow.webContents.on('dom-ready', () => startupDiagnostics.write('document-ready'));
-  diagnosticWindow.webContents.on('preload-error', () => startupDiagnostics.write('preload-failed'));
+  diagnosticWindow.webContents.on('preload-error', () => {
+    startupDiagnostics.write('preload-failed');
+    recordStartupIncident('preload-failed');
+  });
   closePreparationAttempt++;
   closeFlushApproved = false;
   closeFlushRequested = false;
@@ -1712,29 +1753,39 @@ function createWindow() {
     safeSend('folder-monitor:renderer-generation', folderMonitorRendererGeneration);
   });
 
-  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+  mainWindow.webContents.on('render-process-gone', async (_event, details) => {
     startupDiagnostics.write('renderer-gone', { reason: details.reason, exitCode: details.exitCode, initialized: closeHandshakeReady });
+    recordStartupIncident('renderer-crashed');
     folderMonitorRendererReadyGeneration = null;
     _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!diagnosticWindow.isDestroyed() && !crashDialogOpen) {
+      crashDialogOpen = true;
       try {
-        const choice = dialog.showMessageBoxSync(mainWindow, {
+        for (;;) {
+          const choice = await dialog.showMessageBox(diagnosticWindow, {
           type: 'error',
           title: shellText('Renderer abgestürzt', 'Renderer crashed'),
           message: shellText(`Der Renderer-Prozess ist abgestürzt (${details.reason}).`, `The renderer process crashed (${details.reason}).`),
-          detail: shellText('Bitte Diagnose-Paket exportieren und einsenden. Klick "Neu laden" um die UI wiederherzustellen — laufende Uploads im Main-Process bleiben aktiv.', 'Export and send a diagnostics package. Click "Reload" to restore the interface; uploads running in the main process remain active.'),
-          buttons: [shellText('Neu laden', 'Reload'), shellText('Beenden', 'Quit')],
+          detail: shellText('Der Startfehler wird protokolliert. Speichern Sie das Diagnose-Paket zur Auswertung. „Neu laden“ stellt die Oberfläche wieder her; laufende Uploads bleiben aktiv.', 'The startup failure is being logged. Save the diagnostics package for analysis. Reload restores the interface; running uploads remain active.'),
+          buttons: [shellText('Diagnose speichern', 'Save diagnostics'), shellText('Neu laden', 'Reload'), shellText('Beenden', 'Quit')],
           defaultId: 0,
-          cancelId: 1
+          cancelId: 2
         });
-        if (choice === 0) {
-          mainWindow.webContents.reload();
-        } else {
-          app.exit(1);
+          if (diagnosticWindow.isDestroyed()) break;
+          if (choice.response === 0) {
+            const exported = await createSupportBundle();
+            if (exported.error) await dialog.showMessageBox(diagnosticWindow, { type: 'error', message: shellText('Diagnose-Paket konnte nicht gespeichert werden.', 'Could not save diagnostics package.') });
+            continue;
+          }
+          if (choice.response === 1) diagnosticWindow.webContents.reload();
+          else app.exit(1);
+          break;
         }
       } catch {
-        try { mainWindow.webContents.reload(); } catch {}
+        startupDiagnostics.write('crash-dialog-unavailable');
+      } finally {
+        crashDialogOpen = false;
       }
     }
   });
@@ -1752,6 +1803,7 @@ function createWindow() {
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     startupDiagnostics.write('navigation-failed', { errorCode, isMainFrame });
+    if (isMainFrame && errorCode !== -3) recordStartupIncident('navigation-failed');
     _writeCrashLog('DID-FAIL-LOAD', new Error(errorDescription), { errorCode, validatedURL });
     debugLog(`DID-FAIL-LOAD: ${errorCode} ${errorDescription} url=${validatedURL}`);
   });
@@ -2207,6 +2259,7 @@ function refreshTrayLanguage() {
   tray.setToolTip('Multi Hoster Uploader');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: shellText('Öffnen', 'Open'), click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { label: shellText('Diagnose speichern', 'Save diagnostics'), click: () => { void createSupportBundle(); } },
     { type: 'separator' },
     { label: shellText('Beenden', 'Quit'), click: () => { app.quit(); } }
   ]));
@@ -3002,7 +3055,7 @@ ipcMain.handle('set-log-verbose', (_event, enabled) => {
   return { ok: true, verbose: _logVerbose };
 });
 
-ipcMain.handle('create-support-bundle', async () => {
+async function createSupportBundle() {
   const { dialog } = require('electron');
   try {
     if (_debugLogBuffer.length) {
@@ -3017,8 +3070,10 @@ ipcMain.handle('create-support-bundle', async () => {
       filters: [{ name: 'Text', extensions: ['txt'] }]
     });
     if (res.canceled || !res.filePath) return { ok: false, canceled: true };
-    const paths = getAllLogPaths();
-    const cfg = configStore.load();
+    let cfg;
+    try { cfg = configStore.load(); } catch { cfg = null; }
+    let paths = null;
+    try { if (cfg) paths = getAllLogPaths(); } catch {}
     const text = buildSupportBundleText({
       header: {
         App: app.getName(),
@@ -3032,19 +3087,24 @@ ipcMain.handle('create-support-bundle', async () => {
         Packaged: app.isPackaged,
         Verbose: _logVerbose,
         PID: process.pid,
-        CreatedAt: new Date().toISOString()
+        CreatedAt: new Date().toISOString(),
+        ConfigAvailable: !!cfg
       },
       sanitizedConfig: sanitizeConfig(cfg),
       secrets: collectSecretValues(cfg),
       files: [
+        ...(nativeStartupLog ? nativeStartupLog.reports().slice(0, 3).map(file => ({ ...file, maxBytes: 5 * 1024 * 1024 })) : []),
+        ...(nativeStartupLog ? nativeStartupLog.files().slice(0, 4).map(file => ({ ...file, maxBytes: 1024 * 1024 })) : []),
+        { label: 'startup-diagnostics.jsonl (previous sessions)', path: startupDiagnostics.filePath + '.1', maxBytes: 1024 * 1024 },
+        { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, maxBytes: 1024 * 1024 },
+        ...(cfg && paths ? [
         { label: 'debug.log (last 5 MB)', path: paths.debug, maxBytes: 5 * 1024 * 1024 },
         { label: 'account-rotation.log (last 2 MB)', path: paths.accountRotation, maxBytes: 2 * 1024 * 1024 },
         { label: 'doodstream-debug.log (last 2 MB)', path: paths.doodstreamDebug, maxBytes: 2 * 1024 * 1024 },
         { label: 'crash.log', path: path.join(paths.logDir || path.dirname(paths.debug), 'crash.log'), maxBytes: 1 * 1024 * 1024 },
-        { label: 'startup-diagnostics.jsonl (previous sessions)', path: startupDiagnostics.filePath + '.1', maxBytes: 1024 * 1024 },
-        { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, maxBytes: 1024 * 1024 },
         { label: 'upload-audit.log (last 2 MB)', path: paths.uploadAudit, maxBytes: 2 * 1024 * 1024 },
         { label: 'fileuploader.log (last 1 MB)', path: paths.fileuploader, maxBytes: 1 * 1024 * 1024 }
+        ] : [])
       ]
     });
     fs.writeFileSync(res.filePath, text, 'utf-8');
@@ -3054,7 +3114,9 @@ ipcMain.handle('create-support-bundle', async () => {
     debugLog(`create-support-bundle failed: ${err.message}`);
     return { ok: false, error: err.message };
   }
-});
+}
+
+ipcMain.handle('create-support-bundle', createSupportBundle);
 
 ipcMain.handle('open-log-folder', async () => {
   // Reveal the active log file (or its directory) in the OS file manager.
@@ -3480,6 +3542,7 @@ ipcMain.handle('app:quit', () => {
 ipcMain.on('app:startup-phase', (event, phase) => {
   if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return;
   startupDiagnostics.recordPhase(phase, folderMonitorRendererGeneration);
+  if (phase === 'initialization-failed') recordStartupIncident('initialization-failed');
 });
 
 ipcMain.on('app:close-handshake-ready', (event) => {
