@@ -1682,7 +1682,7 @@ function _isHistoryTabActive() {
     if (tab.dataset.view === 'upload') requestAnimationFrame(clampRecentPanelHeight);
     activeTab = tab;
     syncTabIndicator(tab);
-    const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation > .settings-nav-button.active');
+    const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation .settings-nav-button.active');
     _syncSidebarIndicator(activeSidebarButton, true);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
       loadHistory();
@@ -6499,15 +6499,16 @@ function renderSettings() {
   const remoteSettings = globalSettings.remote || {};
 
   const pageDefinitions = [
-    { id: 'allgemein', label: 'Allgemein', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
-    { id: 'uploads', label: 'Uploads', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
-    { id: 'automatik', label: 'Automatik', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
-    { id: 'benachrichtigungen', label: 'Benachrichtigungen', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
-    { id: 'logs', label: 'Logs & Support', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
-    { id: 'remote', label: 'Fernsteuerung', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
-    { id: 'diagnose', label: 'Diagnose-Zugriff', search: 'diagnose diagnostics access zugriff lesen read allowlist netzwerk network lokal local verbindung connection code support' },
-    { id: 'backup', label: 'Backup & Übertragen', search: 'backup transfer sichern export import online schlüssel key einstellungen settings accounts übertragen' }
+    { id: 'allgemein', label: 'Allgemein', group: 'base', icon: 'sliders', description: 'Fenster, Sprache und Updates', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
+    { id: 'uploads', label: 'Uploads', group: 'base', icon: 'upload', description: 'Leistung und Warteschlange', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
+    { id: 'automatik', label: 'Automatik', group: 'base', icon: 'clock', description: 'Wiederholungen und Ordner', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
+    { id: 'benachrichtigungen', label: 'Benachrichtigungen', group: 'connections', icon: 'bell', description: 'Meldungen und Webhooks', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
+    { id: 'logs', label: 'Logs & Support', group: 'management', icon: 'files', description: 'Protokolle und Supportpakete', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
+    { id: 'remote', label: 'Fernsteuerung', group: 'connections', icon: 'monitor', description: 'Server und Verbindungen', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
+    { id: 'diagnose', label: 'Diagnose-Zugriff', group: 'connections', icon: 'shield', description: 'Zugriff und Freigaben', search: 'diagnose diagnostics access zugriff lesen read allowlist netzwerk network lokal local verbindung connection code support' },
+    { id: 'backup', label: 'Backup & Übertragen', group: 'management', icon: 'archive', description: 'Sichern, importieren und exportieren', search: 'backup transfer sichern export import online schlüssel key einstellungen settings accounts übertragen' }
   ];
+  const navigationGroups = [{ id: 'base', label: 'Grundlagen' }, { id: 'connections', label: 'Verbindungen' }, { id: 'management', label: 'Verwaltung' }];
   const pageHeader = (title, description) => `
     <header class="settings-page-header">
       <h3>${title}</h3>
@@ -6515,9 +6516,13 @@ function renderSettings() {
     </header>`;
 
   const layout = document.createElement('div');
-  layout.className = 'settings-layout';
+  layout.className = 'settings-layout settings-layout-grouped';
   layout.innerHTML = `
-    <aside class="settings-sidebar">
+    <aside class="settings-sidebar settings-sidebar-grouped">
+      <header class="settings-sidebar-header">
+        <span>Konfiguration</span>
+        <h2><svg aria-hidden="true"><use href="#icon-settings"></use></svg><span>Einstellungen</span></h2>
+      </header>
       <div class="settings-search-wrap">
         <label for="settingsSearchInput">Schnell finden</label>
         <div class="settings-search-control">
@@ -6525,12 +6530,17 @@ function renderSettings() {
           <input type="search" id="settingsSearchInput" placeholder="Einstellungen durchsuchen" autocomplete="off" spellcheck="false">
         </div>
       </div>
+      <div class="settings-sidebar-body">
       <nav class="settings-navigation" aria-label="Einstellungskategorien">
         <span class="settings-nav-indicator" aria-hidden="true"></span>
-        ${pageDefinitions.map((definition, index) => `<button class="settings-nav-button${index === 0 ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.search}" aria-current="${index === 0 ? 'page' : 'false'}">${definition.label}</button>`).join('')}
+        ${navigationGroups.map(group => `<section class="settings-navigation-group" aria-label="${group.label}">
+          <h3>${group.label}</h3>
+          ${pageDefinitions.filter(definition => definition.group === group.id).map(definition => `<button class="settings-nav-button${definition.id === 'allgemein' ? ' active' : ''}" data-settings-page="${definition.id}" data-search="${definition.label.toLowerCase()} ${definition.description.toLowerCase()} ${definition.search}" aria-current="${definition.id === 'allgemein' ? 'page' : 'false'}"><svg aria-hidden="true"><use href="#icon-${definition.icon}"></use></svg><span class="settings-nav-copy"><span class="settings-nav-title">${definition.label}</span><span class="settings-nav-description">${definition.description}</span></span></button>`).join('')}
+        </section>`).join('')}
       </nav>
       <div class="settings-search-results" id="settingsSearchResults" role="list" aria-label="Suchergebnisse" hidden></div>
       <p class="settings-search-empty" id="settingsSearchEmpty" hidden>Keine passende Einstellung gefunden.</p>
+      </div>
       <span class="settings-search-status" id="settingsSearchStatus" role="status" aria-live="polite"></span>
       <div class="settings-sidebar-status">
         <span class="view-sidebar-section-label">Speicherstatus</span>
@@ -9457,7 +9467,7 @@ function setupListeners() {
   window.addEventListener('resize', () => {
     window.cancelAnimationFrame(sidebarResizeFrame);
     sidebarResizeFrame = window.requestAnimationFrame(() => {
-      document.querySelectorAll('.view.active .view-sidebar-navigation > .view-sidebar-item.active, .view.active .settings-navigation > .settings-nav-button.active').forEach(button => {
+      document.querySelectorAll('.view.active .view-sidebar-navigation > .view-sidebar-item.active, .view.active .settings-navigation .settings-nav-button.active').forEach(button => {
         _syncSidebarIndicator(button, true);
       });
     });

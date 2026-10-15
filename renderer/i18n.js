@@ -4,6 +4,17 @@
   if (root) root.I18n = api;
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   const pairs = [
+    ['Konfiguration', 'Configuration'],
+    ['Grundlagen', 'Basics'],
+    ['Verwaltung', 'Management'],
+    ['Fenster, Sprache und Updates', 'Window, language and updates'],
+    ['Leistung und Warteschlange', 'Performance and queue'],
+    ['Wiederholungen und Ordner', 'Retries and folders'],
+    ['Meldungen und Webhooks', 'Messages and webhooks'],
+    ['Protokolle und Supportpakete', 'Logs and support packages'],
+    ['Server und Verbindungen', 'Server and connections'],
+    ['Zugriff und Freigaben', 'Access and permissions'],
+    ['Sichern, importieren und exportieren', 'Back up, import and export'],
     ['Clouddrop-Log-Synchronisierung', 'Clouddrop log sync'],
     ['Der API-Key konnte nicht im sicheren Zugangsdaten-Speicher gesichert werden.', 'The API key could not be saved in secure credential storage.'],
     ['Clouddrop-API-Key', 'Clouddrop API key'],
