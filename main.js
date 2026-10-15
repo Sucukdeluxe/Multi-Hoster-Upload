@@ -1639,7 +1639,7 @@ function createWindow() {
         const bounds = header?.getBoundingClientRect();
         return { readyState: document.readyState, apiAvailable: typeof window.api === 'object', bodyBackground: body ? getComputedStyle(body).backgroundColor : null, styleSheetCount: document.styleSheets.length, headerVisible: !!bounds && bounds.width > 0 && bounds.height > 0, viewportWidth: innerWidth, viewportHeight: innerHeight };
       })()`));
-      startupDiagnostics.write('dom-probe', { checkpoint, generation, initialized: closeHandshakeReady, ...dom });
+      startupDiagnostics.write('dom-probe', { checkpoint, generation, initialized: closeHandshakeReady, windowVisible: diagnosticWindow.isVisible(), windowMinimized: diagnosticWindow.isMinimized(), ...dom });
     } catch {
       startupDiagnostics.write('dom-probe-unavailable', { checkpoint, generation, initialized: closeHandshakeReady });
     }
@@ -1647,6 +1647,8 @@ function createWindow() {
       if (diagnosticWindow.isVisible() && !diagnosticWindow.isMinimized()) {
         const image = await bounded(diagnosticWindow.webContents.capturePage());
         startupDiagnostics.write('paint-probe', { checkpoint, generation, ...summarizeStartupPixels(image) });
+      } else {
+        startupDiagnostics.write('paint-probe-skipped', { checkpoint, generation, windowVisible: diagnosticWindow.isVisible(), windowMinimized: diagnosticWindow.isMinimized() });
       }
     } catch {
       startupDiagnostics.write('paint-probe-unavailable', { checkpoint, generation });
