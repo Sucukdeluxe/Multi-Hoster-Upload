@@ -103,6 +103,17 @@ export default [
     rules: sharedRules
   },
   {
+    files: ['renderer/mcp.js'],
+    languageOptions: {
+      globals: Object.fromEntries([
+        'getUiLocale', 'config', 'hosterSettings', 'ensureAccountStatusEntries', 'syncSelectedUploadHosters', 'renderAccounts', 'renderHosterSummary',
+        'rebuildJobIndex', '_queueStatsCache', 'syncSelectedFilesFromQueue', 'renderQueueTable', 'updateUploadView', 'updateStatusBar', 'queueJobs',
+        'uploading', 'selectedFiles', 'findAccountById', 'accountStatuses', 'existingImportPaths', 'createAutomationPreviewJob', 'clearDedupKeysForPaths',
+        'persistQueueStateNow', 'isStartableQueueStatus', 'startSelectedUpload', '_jobIndexByUploadId', '_deletedJobIds', 'removeJobFromIndex', 'showCopyToast'
+      ].map(name => [name, 'writable']))
+    }
+  },
+  {
     files: ['lib/diagnostics-collectors.js', 'lib/log-mode.js', 'lib/support-bundle.js'],
     rules: {
       'security/detect-unsafe-regex': 'off'

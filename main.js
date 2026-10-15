@@ -46,6 +46,17 @@ const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
 const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion } = require('./lib/automation-control');
+const { McpService } = require('./lib/mcp-service');
+const { createMcpApp } = require('./lib/mcp-app');
+const { McpAccessError } = require('./lib/mcp-access');
+const mcpLocalHandlers = new Map();
+const mcpRawHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => {
+  mcpLocalHandlers.set(channel, handler);
+  return mcpRawHandle(channel, handler);
+};
+let mcpService = null;
+const mcpRendererRequests = new Map();
 
 const _eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
 _eventLoopDelay.enable();
@@ -1919,6 +1930,7 @@ app.whenReady().then(async () => {
   createTray();
   startupDiagnostics.write('window-load-dispatched');
   void cloudLogSync.start();
+  void startMcpService();
 
   // Minimize to tray instead of taskbar
   mainWindow.on('minimize', () => {
@@ -1984,6 +1996,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (quitTeardownStarted) return;
   quitTeardownStarted = true;
+  void mcpService?.stop();
   folderMonitorRendererReadyGeneration = null;
   if (updateCheckInterval) clearInterval(updateCheckInterval);
   updateCheckInterval = null;
@@ -3356,11 +3369,12 @@ ipcMain.handle('online-backup:delete-managed', (event, id) => (
   })
 ));
 
-ipcMain.handle('online-backup:restore', async (_event, key) => {
+ipcMain.handle('online-backup:restore', async (event, key) => {
   try {
     const normalized = String(key || '').trim();
     if (normalized.length > 128) throw new Error('Online-Sicherungsschlüssel ist ungültig');
     const payload = await downloadOnlineBackup(normalized);
+    assertMcpRequestLive(event);
     return { ok: true, ...await applyImportedSettings(payload.settings) };
   } catch (error) {
     return { ok: false, error: error.message || String(error) };
@@ -3504,14 +3518,20 @@ ipcMain.handle('app:check-updates', async (_event, options) => {
   }
 });
 
-ipcMain.handle('app:install-update', async () => {
+ipcMain.handle('app:install-update', async event => {
   if (updatePreparationPromise || preparedUpdate || updateQuitPending) {
     return { started: false, error: 'Ein Update wird bereits vorbereitet' };
   }
   updatePreparationPromise = (async () => {
-    const prepared = await prepareUpdate((progress) => {
+    const cancel = () => abortUpdate();
+    event?.mcpContext?.signal?.addEventListener('abort', cancel, { once: true });
+    let prepared;
+    try {
+    prepared = await prepareUpdate((progress) => {
       safeSend('app:update-progress', progress);
     });
+    } finally { event?.mcpContext?.signal?.removeEventListener('abort', cancel); }
+    assertMcpRequestLive(event);
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() || !closeHandshakeReady) {
       throw new Error('Die Anwendung ist noch nicht bereit, das Update sicher zu installieren');
     }
@@ -4043,6 +4063,114 @@ function _diagAgentInfo() {
     lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
   };
 }
+
+function createAppCollectors() {
+  return createCollectors({
+    loadConfig: () => configStore.load(), loadHistory: () => configStore.loadHistory(), getAllLogPaths,
+    support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
+    stats, appInfo: _diagAppInfo, systemInfo: _diagSystemInfo, agentInfo: _diagAgentInfo
+  });
+}
+
+function assertMcpRequestLive(event) {
+  if (event?.mcpContext && (event.mcpContext.signal?.aborted || Date.now() >= event.mcpContext.deadline || !mcpService?.active)) throw new McpAccessError('REQUEST_EXPIRED');
+}
+
+function mcpRendererAction(action, args, context) {
+  if (!mainWindow || mainWindow.isDestroyed() || context.signal?.aborted) return Promise.reject(new McpAccessError('RENDERER_UNAVAILABLE'));
+  const id = require('node:crypto').randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = (error, result) => {
+      clearTimeout(timer);
+      context.signal?.removeEventListener('abort', cancel);
+      mcpRendererRequests.delete(id);
+      if (error) reject(error); else resolve(result);
+    };
+    const cancel = () => { safeSend('mcp:cancel', id); finish(new McpAccessError('REQUEST_EXPIRED')); };
+    const timer = setTimeout(cancel, Math.max(1, Math.min(120000, context.deadline - Date.now())));
+    context.signal?.addEventListener('abort', cancel, { once: true });
+    mcpRendererRequests.set(id, { finish, context });
+    safeSend('mcp:action', { id, action, args, deadline: context.deadline });
+  });
+}
+
+async function startMcpService() {
+  const secretStore = require('./lib/secret-store');
+  const allowed = new Set(['get-app-info', 'automation:get-status', 'run-health-check', 'save-config', 'save-global-settings', 'save-hoster-settings',
+    'automation:pause-after-active', 'automation:resume', 'reset-session-failed-account', 'folder-monitor:stop', 'folder-monitor:start', 'folder-monitor:test-scan',
+    'folder-monitor:reconcile', 'get-history', 'prune-history', 'clear-history', 'cloud-log:status', 'cloud-log:configure', 'cloud-log:backfill',
+    'online-backup:list-managed', 'online-backup:create-managed', 'online-backup:delete-managed', 'online-backup:restore', 'app:check-updates', 'app:install-update', 'app:restart', 'app:quit']);
+  const invoke = async (channel, ...args) => {
+    if (!allowed.has(channel) || !mcpLocalHandlers.has(channel) || !mainWindow || mainWindow.isDestroyed()) throw new McpAccessError('ACTION_UNAVAILABLE');
+    return mcpLocalHandlers.get(channel)({ sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame }, ...args);
+  };
+  const invokeGuarded = async (context, channel, ...args) => {
+    if (!allowed.has(channel) || !mcpLocalHandlers.has(channel) || !mainWindow || mainWindow.isDestroyed()) throw new McpAccessError('ACTION_UNAVAILABLE');
+    const event = { sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame, mcpContext: context };
+    assertMcpRequestLive(event);
+    return mcpLocalHandlers.get(channel)(event, ...args);
+  };
+  const handlers = createMcpApp({ loadConfig: () => configStore.load(), invoke, invokeGuarded, renderer: mcpRendererAction, collectors: createAppCollectors(),
+    getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed });
+  mcpService = new McpService({ directory: app.getPath('userData'), encrypt: secretStore.encryptField, decrypt: secretStore.decryptField,
+    handlers, version: app.getVersion(), loadConfig: () => configStore.load(), dialog, getWindow: () => mainWindow,
+    onStatus: status => safeSend('mcp:status', status),
+    requiresConfirmation: name => {
+      if (!['mhu_queue_start', 'mhu_queue_retry', 'mhu_queue_resume', 'mhu_automation_start', 'mhu_automation_reconcile'].includes(name)) return false;
+      const settings = configStore.load().globalSettings;
+      return settings.deleteSourceAfterSuccessfulUpload === true || !['nothing', undefined, null].includes(settings.shutdownAfterFinish);
+    },
+    audit: event => logInfo(`mcp ${JSON.stringify({ time: new Date().toISOString(), ...event })}`)
+  });
+  await mcpService.start();
+}
+
+ipcMain.handle('mcp:status', event => isTrustedOnlineBackupIpcEvent(event) ? mcpService?.state() || { available: false, connection: 'starting' } : null);
+ipcMain.handle('mcp:check', (event, id) => {
+  const pending = mcpRendererRequests.get(id);
+  return !!(isTrustedOnlineBackupIpcEvent(event) && closeHandshakeReady && pending && !pending.context.signal?.aborted && Date.now() < pending.context.deadline && mcpService?.active);
+});
+ipcMain.on('mcp:reply', (event, payload) => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || typeof payload?.id !== 'string') return;
+  const pending = mcpRendererRequests.get(payload.id);
+  if (!pending) return;
+  pending.finish(payload.ok === true ? null : new McpAccessError('ACTION_FAILED'), payload.result);
+});
+ipcMain.handle('mcp:configure', async (event, args) => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
+  if (args?.enabled && (args.capabilities?.includes('secrets') || !mcpService.active)) {
+    const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'MCP-Zugriff / MCP access', message: 'MCP-Zugriff mit diesen Berechtigungen aktivieren? / Enable MCP with these capabilities?',
+      detail: String(args.capabilities?.join(', ') || '').slice(0, 100), buttons: ['Abbrechen / Cancel', 'Aktivieren / Enable'], defaultId: 0, cancelId: 0, noLink: true });
+    if (result.response !== 1) return mcpService.state();
+  }
+  return mcpService.configure(args);
+});
+ipcMain.handle('mcp:rotate', async event => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
+  const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('MCP-Zugang erneuern? Der bisherige Code wird ungültig.', 'Rotate MCP access? The previous code becomes invalid.'), buttons: ['Abbrechen / Cancel', 'Erneuern / Rotate'], defaultId: 0, cancelId: 0, noLink: true });
+  return result.response === 1 ? mcpService.rotate() : mcpService.state();
+});
+ipcMain.handle('mcp:copy-code', event => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService?.active) throw new Error('MCP_ACCESS_DENIED');
+  clipboard.writeText(mcpService.store.code());
+  return true;
+});
+ipcMain.handle('mcp:add-grant', async event => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
+  const chosen = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
+  return chosen.canceled ? mcpService.state() : mcpService.addGrant(chosen.filePaths[0]);
+});
+ipcMain.handle('mcp:update-grant', async (event, args) => {
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService || typeof args?.id !== 'string' || typeof args.remove !== 'boolean' || typeof args.readOnly !== 'boolean') throw new Error('MCP_ACCESS_DENIED');
+  if (!args.remove && !args.readOnly) {
+    const grant = mcpService.store.value.grants.find(item => item.id === args.id);
+    if (!grant) throw new Error('MCP_ACCESS_DENIED');
+    const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('Dateien in diesem Ordner per MCP löschen dürfen?', 'Allow MCP file deletion in this directory?'), detail: grant.path,
+      buttons: ['Abbrechen / Cancel', 'Erlauben / Allow'], defaultId: 0, cancelId: 0, noLink: true });
+    if (result.response !== 1) return mcpService.state();
+  }
+  return mcpService.updateGrant(args.id, args.remove, args.readOnly);
+});
 
 function _buildDiagnosticHandler() {
   const collectors = createCollectors({

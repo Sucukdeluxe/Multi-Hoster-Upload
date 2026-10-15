@@ -2415,6 +2415,7 @@ function restoreQueueStateFromConfig() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        mcpAdmission: job.mcpAdmission === true,
         sourceFileIdentity: job.sourceFileIdentity,
         automationMtimeMs: Number.isFinite(Number(job.automationMtimeMs)) ? Number(job.automationMtimeMs) : null,
         automationSize: Number.isFinite(Number(job.automationSize)) ? Number(job.automationSize) : null,
@@ -2447,7 +2448,7 @@ function buildPersistedQueueState() {
   const selectedFileMap = new Map(selectedFiles.map(file => [file.path, file]));
 
   for (const job of persistableJobs) {
-    if (job.file && job.automationAdmission !== true && !selectedFileMap.has(job.file)) {
+    if (job.file && job.automationAdmission !== true && job.mcpAdmission !== true && !selectedFileMap.has(job.file)) {
       selectedFileMap.set(job.file, {
         path: job.file,
         name: job.fileName,
@@ -2502,6 +2503,7 @@ function buildPersistedQueueState() {
         sourceCleanupCompletedHosters: Array.isArray(job.sourceCleanupCompletedHosters) ? [...job.sourceCleanupCompletedHosters] : [],
         sourceCleanupFingerprint: job.sourceCleanupFingerprint || null,
         automationAdmission: job.automationAdmission === true,
+        mcpAdmission: job.mcpAdmission === true,
         sourceFileIdentity: job.sourceFileIdentity,
         automationMtimeMs: Number.isFinite(Number(job.automationMtimeMs)) ? Number(job.automationMtimeMs) : null,
         automationSize: Number.isFinite(Number(job.automationSize)) ? Number(job.automationSize) : null,
@@ -2898,7 +2900,7 @@ function suppressPreviewKeysStillSelected(keys) {
 // Build preview jobs from selected files x selected hosters (before upload starts)
 function buildQueuePreview() {
   const hosters = getSelectedHosters();
-  queueJobs = queueJobs.filter(j => j.status !== 'preview' || j.automationAdmission === true);
+  queueJobs = queueJobs.filter(j => j.status !== 'preview' || j.automationAdmission === true || j.mcpAdmission === true);
 
   if (hosters.length > 0) {
     const existingKeys = new Set();
@@ -4885,8 +4887,9 @@ function _markSkippedJobs(result) {
   renderQueueTable();
 }
 
-async function startSelectedUpload(explicitJobs) {
+async function startSelectedUpload(explicitJobs, options = {}) {
   if (await isAutomationPaused()) return { ok: false, error: 'Automatik ist pausiert' };
+  if (options.guard) await options.guard();
   const scopedJobs = Array.isArray(explicitJobs) ? explicitJobs : _getVisibleSelectedQueueJobs();
   if (uploading) {
     _hydrateMissingJobSizes();
@@ -4906,6 +4909,7 @@ async function startSelectedUpload(explicitJobs) {
       renderQueueTable();
       let result = null;
       try {
+        if (options.guard) await options.guard();
         result = await submitAddJobsRequest(addRequest);
       } catch (err) {
         restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
@@ -4995,6 +4999,7 @@ async function startSelectedUpload(explicitJobs) {
       jobs: jobsToStart.map(serializeUploadJob),
       sourceCleanupGroups: cleanupPreparation.groups
   };
+    if (options.guard) await options.guard();
     const result = await window.api.startUpload(uploadPayload);
     if (result && result.error) {
       restoreSourceCleanupStates(cleanupPreparation.rollbackStates);
@@ -5705,7 +5710,7 @@ function moveSelectedJobs(direction) {
 function syncSelectedFilesFromQueue() {
   const fileMap = new Map();
   queueJobs
-    .filter((job) => job.automationAdmission !== true && !['done', 'skipped', 'aborted'].includes(job.status))
+    .filter((job) => job.automationAdmission !== true && job.mcpAdmission !== true && !['done', 'skipped', 'aborted'].includes(job.status))
     .forEach((job) => {
       if (!job.file || fileMap.has(job.file)) return;
       fileMap.set(job.file, {
@@ -6564,7 +6569,7 @@ function renderSettings() {
     { id: 'automatik', label: 'Automatik', group: 'base', icon: 'clock', description: 'Wiederholungen und Ordner', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', group: 'connections', icon: 'bell', description: 'Meldungen und Webhooks', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', group: 'management', icon: 'files', description: 'Protokolle und Supportpakete', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
-    { id: 'remote', label: 'Fernsteuerung', group: 'connections', icon: 'monitor', description: 'Server und Verbindungen', search: 'remote control fernsteuerung server input port api token verbindung connection client' },
+    { id: 'remote', label: 'Fernsteuerung', group: 'connections', icon: 'monitor', description: 'Server und Verbindungen', search: 'remote control fernsteuerung mcp server input port api token verbindung connection client' },
     { id: 'diagnose', label: 'Diagnose-Zugriff', group: 'connections', icon: 'shield', description: 'Zugriff und Freigaben', search: 'diagnose diagnostics access zugriff lesen read allowlist netzwerk network lokal local verbindung connection code support' },
     { id: 'backup', label: 'Backup & Übertragen', group: 'management', icon: 'archive', description: 'Sichern, importieren und exportieren', search: 'backup transfer sichern export import online schlüssel key einstellungen settings accounts übertragen' }
   ];
@@ -6948,6 +6953,7 @@ function renderSettings() {
 
   pages.remote.innerHTML = `
       ${pageHeader('Fernsteuerung', 'Upload-Funktionen über einen verbundenen Client steuern.')}
+      ${window.renderMcpSettings ? window.renderMcpSettings() : ''}
       <div class="settings-section-label">Server <span class="panel-status${remoteSettings.enabled ? ' active' : ''}" id="remoteStatusBadge">${remoteSettings.enabled ? 'Aktiv' : 'Inaktiv'}</span></div>
       <div class="settings-grid-mini">
         <div class="settings-row checkbox-row">
@@ -7318,6 +7324,7 @@ function renderSettings() {
 
   _renderLogPathsList(document.getElementById('logPathsList'));
   void refreshCloudLogStatus();
+  void window.bindMcpSettings?.();
   document.getElementById('cloudLogActivateBtn')?.addEventListener('click', () => configureCloudLog(true));
   document.getElementById('cloudLogDisableBtn')?.addEventListener('click', () => configureCloudLog(false));
   document.getElementById('cloudLogBackfillBtn')?.addEventListener('click', backfillCloudLog);

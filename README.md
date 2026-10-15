@@ -286,6 +286,23 @@ New successful upload entries for hosts with file logging enabled are synchroniz
 
 The panel shows the connection state, IP folder, last successful sync and pending files. Changes are queued locally, retried after connection failures and resumed after restarting the application. Disabling sync retains pending entries but stops collecting new ones. A revoked key requires verification with a valid key. Local pending data is tied to its Clouddrop account and is never sent to another account after changing keys.
 
+## MCP remote access
+
+Settings → Remote control provides an optional structured MCP connection. Assign an installation name, select local permissions and choose **Save and enable**. The application connects to its HTTPS relay using outbound long polling; it does not open an incoming desktop port. Keep the application running, including minimized, while using this connection.
+
+Copy the connection code only when configuring a trusted MCP client. It contains a credential. Each installation has separate encrypted credentials outside settings backups. **Disable and revoke** stops local execution immediately and revokes the credentials at the relay; an offline revocation remains pending until contact is restored. **Rotate access** invalidates the previous identity and creates a new code. Importing a settings backup does not import another installation's MCP identity.
+
+Permissions are configured locally, never through remote tools:
+
+- **Read and diagnostics:** application state, paginated queue/accounts/history, settings with secrets masked, and bounded application-log tails.
+- **Control app:** explicit queue, account, settings, automation, CloudDrop, backup and lifecycle operations. There is no generic script, shell or IPC execution tool.
+- **Granted directories:** list, inspect and checksum files only inside explicitly selected directories. Queue additions also require control permission. File deletion additionally requires a writable directory grant, control permission and local confirmation; it uses the operating system's trash operation.
+- **Explicitly reveal secrets:** separately enabled access to a specifically requested account's credentials. Normal diagnostics and other tool responses remain masked.
+
+Destructive operations require a native local confirmation for the exact action and arguments. Cancel is the default, approval expires within 60 seconds, and no remote tool or boolean can grant it. Starting transfers also requires confirmation when current settings enable automatic source deletion or power actions. Cancellation and expiry prevent pending actions from starting; they cannot undo an action already committed.
+
+The legacy screen/input connection remains available during migration. Screen streaming, granting new filesystem roots, changing MCP permissions and obtaining the connection code are not remote MCP operations. A compatible Streamable HTTP client must be configured separately. Local support-package export remains available without MCP.
+
 ## Development and Windows builds
 
 Install dependencies and start the Electron application:

@@ -25,6 +25,17 @@ ipcRenderer.on('folder-monitor:renderer-generation', (_event, generation) => {
 });
 
 contextBridge.exposeInMainWorld('api', {
+  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
+  mcpConfigure: args => ipcRenderer.invoke('mcp:configure', args),
+  mcpRotate: () => ipcRenderer.invoke('mcp:rotate'),
+  mcpCopyCode: () => ipcRenderer.invoke('mcp:copy-code'),
+  mcpAddGrant: () => ipcRenderer.invoke('mcp:add-grant'),
+  mcpUpdateGrant: args => ipcRenderer.invoke('mcp:update-grant', args),
+  mcpCheck: id => ipcRenderer.invoke('mcp:check', id),
+  mcpReply: reply => ipcRenderer.send('mcp:reply', reply),
+  onMcpAction: callback => ipcRenderer.on('mcp:action', (_event, value) => callback(value)),
+  onMcpCancel: callback => ipcRenderer.on('mcp:cancel', (_event, value) => callback(value)),
+  onMcpStatus: callback => ipcRenderer.on('mcp:status', (_event, value) => callback(value)),
   reportStartupPhase,
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),

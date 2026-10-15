@@ -1,0 +1,14 @@
+.mcp-controls { margin-bottom: 28px; font-size: 13px; }
+.mcp-controls p { line-height: 1.6; overflow-wrap: anywhere; }
+.mcp-controls .settings-row input { min-width: 0; flex: 1; }
+.mcp-permissions { display: flex; flex-wrap: wrap; gap: 16px 24px; border: 1px solid var(--border, #424242); border-radius: 6px; padding: 16px; margin: 16px 0; }
+.mcp-permissions label, .mcp-grant label { display: flex; align-items: center; gap: 6px; }
+.mcp-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+.mcp-actions .btn { white-space: normal; }
+.mcp-status { display: flex; flex-wrap: wrap; gap: 18px 32px; border: 1px solid var(--border, #424242); border-radius: 6px; padding: 16px; }
+.mcp-status dt { margin-bottom: 8px; }
+.mcp-status dd { margin: 0; font-weight: 600; }
+.mcp-state { padding: 5px 8px; border: 1px solid var(--border, #555); border-radius: 5px; }
+.mcp-state.connected { color: #a2edc1; background: #193829; border-color: #46735b; }
+.mcp-grant { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border, #424242); }
+.mcp-grant > span { flex: 1 1 220px; overflow-wrap: anywhere; }

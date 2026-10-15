@@ -28,3 +28,6 @@ upload-debug.log
 release-*.log
 recovery-private.pem
 recovered-online-key*.txt
+mcp-access.json
+mcp-access.json.*.tmp
+mcp-disabled.marker
