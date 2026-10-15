@@ -182,9 +182,10 @@
 
   <div id="upload-view" class="view active" role="tabpanel" aria-labelledby="upload-tab">
     <aside class="view-sidebar" aria-label="Upload-Übersicht">
+      <div class="view-navigation-card upload-navigation-card">
       <div class="view-sidebar-header">
         <span class="view-sidebar-kicker">Arbeitsbereich</span>
-        <h1 class="view-sidebar-title">Uploads</h1>
+        <h1 class="view-sidebar-title"><svg aria-hidden="true"><use href="#icon-upload"></use></svg><span>Uploads</span></h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Upload-Status">
         <span class="view-sidebar-indicator" aria-hidden="true"></span>
@@ -214,6 +215,7 @@
           <span class="view-sidebar-badge" id="uploadSidebarErrorCount">0</span>
         </button>
       </nav>
+      </div>
       <div class="upload-sidebar-lower upload-telemetry" id="uploadTelemetry" aria-label="Upload-Statistik">
         <div class="upload-overview-top">
           <h3 class="upload-overview-heading"><svg aria-hidden="true"><use href="#icon-upload"></use></svg><span>Upload-Übersicht</span></h3>
@@ -401,9 +403,10 @@
 
   <div id="accounts-view" class="view" role="tabpanel" aria-labelledby="accounts-tab">
     <aside class="view-sidebar" aria-label="Account-Übersicht">
+      <div class="view-navigation-card">
       <div class="view-sidebar-header">
         <span class="view-sidebar-kicker">Accounts verwalten</span>
-        <h1 class="view-sidebar-title">Accounts</h1>
+        <h1 class="view-sidebar-title"><svg aria-hidden="true"><use href="#icon-accounts"></use></svg><span>Accounts</span></h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Account-Status">
         <span class="view-sidebar-indicator" aria-hidden="true"></span>
@@ -428,6 +431,7 @@
           <span class="view-sidebar-badge" id="accountsSidebarErrorCount">0</span>
         </button>
       </nav>
+      </div>
       <div class="view-sidebar-section view-sidebar-hoster-section">
         <span class="view-sidebar-section-label">Hoster</span>
         <div class="view-sidebar-hosters" id="accountsSidebarHosters" data-empty-label="Noch keine Hoster"></div>
@@ -567,9 +571,10 @@
 
   <div id="history-view" class="view" role="tabpanel" aria-labelledby="history-tab">
     <aside class="view-sidebar" aria-label="Verlaufsübersicht">
+      <div class="view-navigation-card">
       <div class="view-sidebar-header">
         <span class="view-sidebar-kicker">Archiv</span>
-        <h1 class="view-sidebar-title">Verlauf</h1>
+        <h1 class="view-sidebar-title"><svg aria-hidden="true"><use href="#icon-history"></use></svg><span>Verlauf</span></h1>
       </div>
       <nav class="view-sidebar-navigation" aria-label="Verlaufsstatus">
         <span class="view-sidebar-indicator" aria-hidden="true"></span>
@@ -594,6 +599,7 @@
           <span class="view-sidebar-badge" id="historySidebarSkippedCount">0</span>
         </button>
       </nav>
+      </div>
       <div class="view-sidebar-section">
         <span class="view-sidebar-section-label">Aufbewahrung</span>
         <div class="view-sidebar-summary">
