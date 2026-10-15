@@ -280,7 +280,7 @@ You can always install manually from the [GitHub releases page](https://github.c
 
 ## Clouddrop log sync
 
-Settings → Logs & Support includes an optional Clouddrop connection for upload logs. Enter an unrestricted Clouddrop API key and select **Verify and enable**. Verification creates an empty test file in a folder named after the device's public IP address; ipify provides the public IP. The key is stored using the operating system's credential encryption.
+Settings → Logs & Support includes an optional Clouddrop connection for upload logs. Enter an unrestricted Clouddrop API key and select **Verify and enable**. Verification creates an empty test file in a folder named after the device's public IP address; ipify provides the public IP. IPv4 is preferred, with readable IPv6 as a fallback. The key is stored using the operating system's credential encryption. Multiple instances can use the same key; each writes its own files, including when instances share a public IP.
 
 New successful upload entries for hosts with file logging enabled are synchronized automatically as TXT files. The single-file, daily and per-session log modes apply. Files have unique suffixes so separate instances using the same key do not overwrite one another. Large logs are split into separate files before they reach the text API size limit. Existing local log contents are not imported automatically.
 

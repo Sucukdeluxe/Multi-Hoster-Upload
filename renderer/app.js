@@ -6409,7 +6409,7 @@ function renderCloudLogStatus(status) {
   if (!status || !document.getElementById('cloudLogPhase')) return;
   const phases = { disabled: 'Inaktiv', checking: 'Verbindung wird geprüft…', ready: 'Aktiv', syncing: 'Wird synchronisiert…', error: 'Synchronisierung fehlgeschlagen' };
   document.getElementById('cloudLogPhase').textContent = localizeUiText(phases[status.phase] || phases.disabled);
-  document.getElementById('cloudLogIp').textContent = status.ip ? status.ip.replaceAll(':', '_') : '—';
+  document.getElementById('cloudLogIp').textContent = status.ip || '—';
   document.getElementById('cloudLogLastSync').textContent = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString(getUiLocale()) : localizeUiText('Noch nicht synchronisiert');
   document.getElementById('cloudLogPending').textContent = (Number(status.pendingFiles) || 0).toLocaleString(getUiLocale());
