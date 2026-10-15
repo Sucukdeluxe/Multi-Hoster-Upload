@@ -3512,8 +3512,12 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   grid-template-columns: 314px minmax(0, 1fr);
 }
 
+#upload-view .view-sidebar-navigation {
+  margin-bottom: 14px;
+}
+
 .upload-overview-top {
-  padding: 20px;
+  padding: 14px 20px 10px;
   background: #2d384c;
 }
 
