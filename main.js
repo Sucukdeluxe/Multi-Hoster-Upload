@@ -1598,7 +1598,7 @@ async function settleWindowContentAfterShow(window) {
 
 function createWindow() {
   const startupWindow = createStartupWindow(BrowserWindow, {
-    title: 'Multi Hoster Uploader',
+    title: `Multi-Hoster-Uploader | v.${app.getVersion()}`,
     width: 1100,
     height: 750,
     minWidth: 800,

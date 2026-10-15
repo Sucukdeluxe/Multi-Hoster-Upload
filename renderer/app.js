@@ -1537,8 +1537,7 @@ async function init() {
   // Version display
   try {
     const version = await window.api.getVersion();
-    const versionLabel = document.getElementById('versionLabel');
-    if (versionLabel) versionLabel.textContent = `v${version}`;
+    setApplicationVersion(version);
   } catch {}
 
   window.api.onUploadProgress((data) => {
@@ -6187,10 +6186,15 @@ function initUploadSpeedSparkline() {
   window.addEventListener('beforeunload', () => window.clearInterval(uploadSpeedTimer), { once: true });
 }
 
-function initializeStaticHeader() {
-  const version = new URLSearchParams(window.location.search).get('version') || '';
+function setApplicationVersion(version) {
+  if (typeof version !== 'string' || version !== version.trim() || !/^\d+\.\d+\.\d+$/.test(version)) return;
   const versionLabel = document.getElementById('versionLabel');
-  if (versionLabel && /^\d+\.\d+\.\d+$/.test(version)) versionLabel.textContent = `v${version}`;
+  if (versionLabel) versionLabel.textContent = `v${version}`;
+  document.title = `Multi-Hoster-Uploader | v.${version}`;
+}
+
+function initializeStaticHeader() {
+  setApplicationVersion(new URLSearchParams(window.location.search).get('version'));
   initUploadSpeedSparkline();
   _syncHeaderUpdateState();
 }
