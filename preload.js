@@ -211,21 +211,6 @@ contextBridge.exposeInMainWorld('api', {
   onLogPathAutoUpdated: (callback) => {
     ipcRenderer.on('log-path-auto-updated', (_event, data) => callback(data));
   },
-  // Remote Control
-  remoteGetSettings: () => ipcRenderer.invoke('remote:get-settings'),
-  remoteSaveSettings: (settings) => ipcRenderer.invoke('remote:save-settings', settings),
-  remoteGenerateToken: () => ipcRenderer.invoke('remote:generate-token'),
-  remoteStatus: () => ipcRenderer.invoke('remote:status'),
-  onRemoteClientCount: (callback) => {
-    ipcRenderer.on('remote:client-count', (_event, count) => callback(count));
-  },
-
-  // Remote Diagnostics (read-only)
-  diagnosticsGetSettings: () => ipcRenderer.invoke('diagnostics:get-settings'),
-  diagnosticsSaveSettings: (settings) => ipcRenderer.invoke('diagnostics:save-settings', settings),
-  diagnosticsRegenerate: () => ipcRenderer.invoke('diagnostics:regenerate'),
-  diagnosticsStatus: () => ipcRenderer.invoke('diagnostics:status'),
-
   // File path from drag & drop (Electron 33+ compatible)
   getPathForFile: (file) => webUtils.getPathForFile(file),
   removeAllListeners: () => {
@@ -245,6 +230,5 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('drop-target:files');
     ipcRenderer.removeAllListeners('account-switched');
     ipcRenderer.removeAllListeners('session-failed-accounts-changed');
-    ipcRenderer.removeAllListeners('remote:client-count');
   }
 });

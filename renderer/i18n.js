@@ -4,6 +4,8 @@
   if (root) root.I18n = api;
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   const pairs = [
+    ['MCP-Fernzugriff', 'MCP remote access'],
+    ['App-Funktionen über einen freigegebenen MCP-Client steuern.', 'Control app functions through an authorized MCP client.'],
     ['Strukturierter Fernzugriff über HTTPS. Nur bei laufender Anwendung; keine Portfreigabe erforderlich. Berechtigungen werden ausschließlich hier vergeben.', 'Structured remote access over HTTPS. Available while the app is running; no inbound port required. Permissions can only be granted here.'],
     ['Installationsname', 'Installation name'],
     ['Lokale Berechtigungen', 'Local permissions'],

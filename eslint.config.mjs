@@ -109,7 +109,7 @@ export default [
         'getUiLocale', 'config', 'hosterSettings', 'ensureAccountStatusEntries', 'syncSelectedUploadHosters', 'renderAccounts', 'renderHosterSummary',
         'rebuildJobIndex', '_queueStatsCache', 'syncSelectedFilesFromQueue', 'renderQueueTable', 'updateUploadView', 'updateStatusBar', 'queueJobs',
         'uploading', 'selectedFiles', 'findAccountById', 'accountStatuses', 'existingImportPaths', 'createAutomationPreviewJob', 'clearDedupKeysForPaths',
-        'persistQueueStateNow', 'isStartableQueueStatus', 'startSelectedUpload', '_jobIndexByUploadId', '_deletedJobIds', 'removeJobFromIndex', 'showCopyToast'
+        'persistQueueStateNow', 'isStartableQueueStatus', 'startSelectedUpload', '_jobIndexByUploadId', '_deletedJobIds', 'removeJobFromIndex', 'showCopyToast', 'getSelectedHosters'
       ].map(name => [name, 'writable']))
     }
   },

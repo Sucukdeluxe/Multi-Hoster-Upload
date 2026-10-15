@@ -17,11 +17,6 @@ function localizeUiText(value) {
   return window.I18n.translateText(value, uiLocalizer.getLanguage());
 }
 
-function formatRemoteClientStatus(port, count) {
-  const clients = count === 1 ? '1 Client' : `${count} Clients`;
-  return localizeUiText(`Aktiv auf Port ${port} — ${clients} verbunden`);
-}
-
 function refreshLocalizedRuntimeUi() {
   renderQueueTable();
   renderAccounts();
@@ -405,16 +400,6 @@ function savePendingQueueTracked(pendingQueue) {
 function setAlwaysOnTopTracked(value) {
   const enabled = !!value;
   return runConfigWrite(() => window.api.setAlwaysOnTop(enabled));
-}
-
-function saveDiagnosticsSettingsTracked(settings) {
-  const payload = snapshotConfigWritePayload(settings);
-  return runConfigWrite(() => window.api.diagnosticsSaveSettings(payload));
-}
-
-function saveRemoteSettingsTracked(settings) {
-  const payload = snapshotConfigWritePayload(settings);
-  return runConfigWrite(() => window.api.remoteSaveSettings(payload));
 }
 
 function flushConfigWrites() {
@@ -1627,18 +1612,6 @@ async function init() {
   // Drop target window: files dropped on the small floating window
   window.api.onDropTargetFiles((paths) => {
     addPathsToQueue(paths);
-  });
-
-  // Remote client count updates (registered once, not per renderSettings call)
-  window.api.onRemoteClientCount(() => {
-    const el = document.getElementById('remoteConnectionStatus');
-    if (el && el.style.color === 'rgb(16, 185, 129)') {
-      window.api.remoteStatus().then(status => {
-        if (status.running) {
-          el.textContent = formatRemoteClientStatus(status.port, status.clientCount);
-        }
-      }).catch(() => {});
-    }
   });
 
   window.api.debugLog('init complete, all listeners registered');
@@ -6561,7 +6534,6 @@ function renderSettings() {
   const configuredAccounts = getAvailableHosters();
   const fm = globalSettings.folderMonitor || {};
   const normalizedFm = window.AutomationControl.normalizeAutomationSettings(fm);
-  const remoteSettings = globalSettings.remote || {};
 
   const pageDefinitions = [
     { id: 'allgemein', label: 'Allgemein', group: 'base', icon: 'sliders', description: 'Fenster, Sprache und Updates', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
@@ -6569,8 +6541,7 @@ function renderSettings() {
     { id: 'automatik', label: 'Automatik', group: 'base', icon: 'clock', description: 'Wiederholungen und Ordner', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', group: 'connections', icon: 'bell', description: 'Meldungen und Webhooks', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', group: 'management', icon: 'files', description: 'Protokolle und Supportpakete', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
-    { id: 'remote', label: 'Fernsteuerung', group: 'connections', icon: 'monitor', description: 'Server und Verbindungen', search: 'remote control fernsteuerung mcp server input port api token verbindung connection client' },
-    { id: 'diagnose', label: 'Diagnose-Zugriff', group: 'connections', icon: 'shield', description: 'Zugriff und Freigaben', search: 'diagnose diagnostics access zugriff lesen read allowlist netzwerk network lokal local verbindung connection code support' },
+    { id: 'remote', label: 'MCP-Fernzugriff', group: 'connections', icon: 'monitor', description: 'Zugriff und Freigaben', search: 'remote control fernsteuerung mcp diagnose diagnostics access zugriff lesen read berechtigungen permissions verbindung connection client' },
     { id: 'backup', label: 'Backup & Übertragen', group: 'management', icon: 'archive', description: 'Sichern, importieren und exportieren', search: 'backup transfer sichern export import online schlüssel key einstellungen settings accounts übertragen' }
   ];
   const navigationGroups = [{ id: 'base', label: 'Grundlagen' }, { id: 'connections', label: 'Verbindungen' }, { id: 'management', label: 'Verwaltung' }];
@@ -6952,82 +6923,8 @@ function renderSettings() {
   `;
 
   pages.remote.innerHTML = `
-      ${pageHeader('Fernsteuerung', 'Upload-Funktionen über einen verbundenen Client steuern.')}
+      ${pageHeader('MCP-Fernzugriff', 'App-Funktionen über einen freigegebenen MCP-Client steuern.')}
       ${window.renderMcpSettings ? window.renderMcpSettings() : ''}
-      <div class="settings-section-label">Server <span class="panel-status${remoteSettings.enabled ? ' active' : ''}" id="remoteStatusBadge">${remoteSettings.enabled ? 'Aktiv' : 'Inaktiv'}</span></div>
-      <div class="settings-grid-mini">
-        <div class="settings-row checkbox-row">
-          <label>Aktiviert</label>
-          <input type="checkbox" class="settings-autosave" id="remoteEnabledInput" ${remoteSettings.enabled ? 'checked' : ''}>
-        </div>
-        <div class="settings-row checkbox-row">
-          <label>Input erlauben</label>
-          <input type="checkbox" class="settings-autosave" id="remoteAllowInputInput" ${remoteSettings.allowInput !== false ? 'checked' : ''}>
-        </div>
-      </div>
-      <div class="settings-row">
-        <label>Port</label>
-        <input type="number" class="hs-input settings-autosave" id="remotePortInput" value="${remoteSettings.port || 9100}" min="1024" max="65535" style="width:100px">
-      </div>
-      <div class="settings-row">
-        <label>API-Token</label>
-        <input type="text" class="key-input" id="remoteTokenInput" value="${escapeAttr(remoteSettings.token || '')}" readonly style="flex:1">
-        <button class="btn btn-xs btn-secondary" id="remoteCopyTokenBtn" title="Kopieren">Kopieren</button>
-        <button class="btn btn-xs btn-secondary" id="remoteRegenerateTokenBtn" title="Neu generieren">Neu</button>
-      </div>
-      <div class="settings-section-label">Status</div>
-      <div class="settings-row">
-        <span id="remoteConnectionStatus" style="color:#94a3b8">Prüfe...</span>
-      </div>
-  `;
-
-  pages.diagnose.innerHTML = `
-      ${pageHeader('Diagnose-Zugriff', 'Zeitlich kontrollierter Lesezugriff für Fehleranalyse und Support.')}
-      <div class="settings-section-label">Diagnose-Zugriff (nur lesen) <span class="panel-status" id="diagStatusBadge">…</span></div>
-      <p class="hint" style="margin:0 0 12px;padding:9px 11px;border:1px solid rgba(245,158,11,0.35);border-radius:6px;background:rgba(245,158,11,0.08)">
-        Erlaubt <strong>nur lesenden</strong> Zugriff auf Logs, Queue-Status und bereinigte Einstellungen. Passwörter, API-Keys und Tokens werden maskiert. <strong>Bildschirm und Eingabesteuerung bleiben gesperrt.</strong> Der Verbindungs-Code ist ein Zugangsschlüssel — nur mit vertrauenswürdigen Stellen teilen; bei Verdacht „Neu" klicken. Standard-Bindung ist <code>127.0.0.1</code> und damit nur über einen SSH- oder VPN-Tunnel erreichbar.
-      </p>
-      <div class="settings-row diag-enabled-row">
-        <label for="diagEnabledInput">Aktiviert</label>
-        <input type="checkbox" class="settings-autosave" id="diagEnabledInput">
-      </div>
-      <div class="settings-row">
-        <label>Port</label>
-        <input type="number" class="hs-input settings-autosave" id="diagPortInput" min="1024" max="65535" value="9110" style="width:100px">
-      </div>
-      <div class="settings-row">
-        <label>Sichtbarkeit</label>
-        <span class="settings-select-control diag-bind-select">
-        <select class="hs-input settings-autosave" id="diagBindModeInput">
-          <option value="local">Nur lokal (127.0.0.1) — Tunnel/VPN</option>
-          <option value="network">Im Netzwerk (0.0.0.0) — Allowlist nötig</option>
-        </select>
-        </span>
-        <span class="hint" id="diagBindHint"></span>
-      </div>
-      <div class="settings-row">
-        <label for="diagPublicHostInput">Adresse für den Code</label>
-        <input type="text" class="hs-input settings-autosave" id="diagPublicHostInput" placeholder="127.0.0.1 oder Tunnel-/Tailscale-Adresse" style="flex:1 1 320px;min-width:0;max-width:560px">
-        <div class="hint diag-suggestions" id="diagSuggestRow" style="display:none">
-          <span>Vorschläge:</span>
-          <div id="diagSuggestChips" class="diag-suggestion-chips"></div>
-        </div>
-      </div>
-      <div class="settings-row" id="diagAllowlistRow" style="display:none;align-items:flex-start">
-        <label>Allowlist (IP/CIDR, eine pro Zeile)</label>
-        <textarea class="hs-input settings-autosave" id="diagAllowlistInput" rows="3" style="flex:1;font-family:monospace" placeholder="100.64.0.0/10&#10;203.0.113.5"></textarea>
-      </div>
-      <div class="settings-row">
-        <label>Verbindungs-Code</label>
-        <input type="text" class="key-input" id="diagCodeInput" value="" readonly style="flex:1" placeholder="(aktivieren zum Erzeugen)">
-        <button class="btn btn-xs btn-secondary" id="diagCopyCodeBtn" title="Kopieren">Kopieren</button>
-        <button class="btn btn-xs btn-secondary" id="diagRegenerateBtn" title="Neu generieren (macht alte Codes ungültig)">Neu</button>
-        <span class="hint" id="diagCodeIssued"></span>
-      </div>
-      <div class="settings-section-label">Status</div>
-      <div class="settings-row">
-        <span id="diagConnectionStatus" style="color:#94a3b8">Prüfe…</span>
-      </div>
   `;
 
   pages.backup.innerHTML = `
@@ -7394,146 +7291,6 @@ function renderSettings() {
   ensureAutomationTestOverlay();
   refreshAutomationControlCenter();
 
-  document.getElementById('remoteCopyTokenBtn').addEventListener('click', async () => {
-    const token = document.getElementById('remoteTokenInput').value;
-    if (token) {
-      await window.api.copyToClipboard(token);
-      document.getElementById('remoteCopyTokenBtn').textContent = 'Kopiert!';
-      setTimeout(() => { document.getElementById('remoteCopyTokenBtn').textContent = 'Kopieren'; }, 1500);
-    }
-  });
-
-  document.getElementById('remoteRegenerateTokenBtn').addEventListener('click', async () => {
-    const confirmed = await showAppConfirm({ title: 'API-Token neu erzeugen?', message: 'Der bisherige Token wird sofort ungültig. Verbundene Clients müssen den neuen Token verwenden.', confirmText: 'Neu erzeugen', danger: true });
-    if (!confirmed) return;
-    const newToken = await window.api.remoteGenerateToken();
-    document.getElementById('remoteTokenInput').value = newToken;
-    scheduleSettingsSave();
-  });
-
-  window.api.remoteStatus().then(status => {
-    const el = document.getElementById('remoteConnectionStatus');
-    if (!el) return;
-    if (status.running) {
-      el.textContent = `Aktiv auf Port ${status.port} — ${status.clientCount} ${status.clientCount === 1 ? 'Client' : 'Clients'} verbunden`;
-      el.style.color = '#10b981';
-    } else {
-      el.textContent = 'Nicht aktiv';
-      el.style.color = '#94a3b8';
-    }
-  }).catch(() => {});
-
-  (function wireDiagnostics() {
-    const enabledEl = document.getElementById('diagEnabledInput');
-    const portEl = document.getElementById('diagPortInput');
-    const modeEl = document.getElementById('diagBindModeInput');
-    const publicHostEl = document.getElementById('diagPublicHostInput');
-    const allowlistEl = document.getElementById('diagAllowlistInput');
-    const allowlistRow = document.getElementById('diagAllowlistRow');
-    const suggestRow = document.getElementById('diagSuggestRow');
-    const suggestChips = document.getElementById('diagSuggestChips');
-    const bindHintEl = document.getElementById('diagBindHint');
-    const codeEl = document.getElementById('diagCodeInput');
-    const issuedEl = document.getElementById('diagCodeIssued');
-    const badgeEl = document.getElementById('diagStatusBadge');
-    if (!enabledEl) return;
-    const diagnosticsEditedFields = new Set();
-
-    const fmtIssued = (ts) => {
-      if (!ts) return '';
-      try { return 'Code erstellt: ' + new Date(ts).toLocaleString(getUiLocale()); } catch { return ''; }
-    };
-    const parseAllowlist = () => allowlistEl.value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const renderModeUi = (suggestedHosts) => {
-      const network = modeEl.value === 'network';
-      allowlistRow.style.display = network ? '' : 'none';
-      bindHintEl.innerHTML = network
-        ? 'Bindet an <code>0.0.0.0</code>. Nur IPs/CIDRs aus der Allowlist dürfen verbinden (Loopback immer) — zusätzlich zum Token. Über Tailscale: trage deinen Tailnet-Bereich ein (z.B. <code>100.64.0.0/10</code>) und die Tailscale-IP/MagicDNS oben als Code-Adresse. Transport ist plaintext über den Tunnel — Tailscale/WireGuard verschlüsselt.'
-        : 'Bindet nur an <code>127.0.0.1</code>. Fernzugriff nur über einen Tunnel (z.B. Tailscale/SSH) — die sicherste Variante.';
-      const hosts = Array.isArray(suggestedHosts) ? suggestedHosts : [];
-      if (hosts.length) {
-        suggestRow.style.display = '';
-        suggestChips.innerHTML = '';
-        for (const h of hosts) {
-          const b = document.createElement('button');
-          b.className = 'btn btn-xs btn-secondary';
-          b.textContent = h;
-          b.addEventListener('click', () => { diagnosticsEditedFields.add(publicHostEl.id); publicHostEl.value = h; markSettingsDirty(); });
-          suggestChips.appendChild(b);
-        }
-      } else {
-        suggestRow.style.display = 'none';
-      }
-    };
-    let lastSuggested = [];
-    const applySettings = (s) => {
-      if (!s) return;
-      if (!diagnosticsEditedFields.has(enabledEl.id)) enabledEl.checked = !!s.enabled;
-      if (!diagnosticsEditedFields.has(portEl.id)) portEl.value = s.port || 9110;
-      if (!diagnosticsEditedFields.has(modeEl.id)) modeEl.value = s.bindMode === 'network' ? 'network' : 'local';
-      if (!diagnosticsEditedFields.has(publicHostEl.id)) publicHostEl.value = s.publicHost || '';
-      if (!diagnosticsEditedFields.has(allowlistEl.id)) allowlistEl.value = Array.isArray(s.allowlist) ? s.allowlist.join('\n') : '';
-      lastSuggested = Array.isArray(s.suggestedHosts) ? s.suggestedHosts : [];
-      codeEl.value = s.code || '';
-      issuedEl.textContent = fmtIssued(s.codeIssuedAt);
-      renderModeUi(lastSuggested);
-      if (badgeEl) {
-        badgeEl.textContent = enabledEl.checked ? 'Aktiv' : 'Inaktiv';
-        badgeEl.className = 'panel-status' + (enabledEl.checked ? ' active' : '');
-      }
-    };
-    const refreshStatus = () => {
-      window.api.diagnosticsStatus().then((st) => {
-        const el = document.getElementById('diagConnectionStatus');
-        if (!el || !st) return;
-        if (st.running) {
-          const last = st.lastAccess ? new Date(st.lastAccess).toLocaleString(getUiLocale()) : '—';
-          const scope = st.bindMode === 'network' ? `Netzwerk (Allowlist: ${st.allowlistCount})` : 'nur lokal';
-          el.textContent = `Aktiv auf ${st.bindAddress}:${st.port} (${scope}) — ${st.clientCount} ${st.clientCount === 1 ? 'Client' : 'Clients'} — Letzter Zugriff: ${last}`;
-          el.style.color = '#10b981';
-        } else {
-          el.textContent = 'Nicht aktiv';
-          el.style.color = '#94a3b8';
-        }
-      }).catch(() => {});
-    };
-    const validate = () => {
-      const allowlist = parseAllowlist();
-      if (enabledEl.checked && modeEl.value === 'network' && allowlist.length === 0) {
-        if (bindHintEl) { bindHintEl.innerHTML = '<span style="color:#f59e0b">Netzwerkmodus braucht mindestens eine IP/CIDR in der Allowlist — sonst bleibt es fail-closed auf Loopback.</span>'; }
-        return false;
-      }
-      return true;
-    };
-
-    [enabledEl, portEl, modeEl, publicHostEl, allowlistEl].forEach(element => {
-      const markEdited = () => diagnosticsEditedFields.add(element.id);
-      element.addEventListener('input', markEdited);
-      element.addEventListener('change', markEdited);
-    });
-    window.api.diagnosticsGetSettings().then(applySettings).catch(() => {});
-    refreshStatus();
-
-    enabledEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
-    portEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
-    modeEl.addEventListener('change', () => { renderModeUi(lastSuggested); if (validate()) markSettingsDirty(); });
-    publicHostEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
-    allowlistEl.addEventListener('change', () => { if (validate()) markSettingsDirty(); });
-    document.getElementById('diagCopyCodeBtn').addEventListener('click', async () => {
-      if (!codeEl.value) return;
-      await window.api.copyToClipboard(codeEl.value);
-      const b = document.getElementById('diagCopyCodeBtn');
-      b.textContent = 'Kopiert!';
-      setTimeout(() => { b.textContent = 'Kopieren'; }, 1500);
-    });
-    document.getElementById('diagRegenerateBtn').addEventListener('click', async () => {
-      const confirmed = await showAppConfirm({ title: 'Verbindungs-Code neu erzeugen?', message: 'Der bisherige Diagnose-Code wird sofort ungültig.', confirmText: 'Neu erzeugen', danger: true });
-      if (!confirmed) return;
-      const r = await runConfigWrite(() => window.api.diagnosticsRegenerate());
-      if (r && r.code) { codeEl.value = r.code; issuedEl.textContent = fmtIssued(r.codeIssuedAt); }
-      refreshStatus();
-    });
-  })();
 
   document.getElementById('exportBackupBtn').addEventListener('click', () => doBackupExport());
   document.getElementById('importBackupBtn').addEventListener('click', () => doBackupImport());
@@ -7677,7 +7434,6 @@ async function performSaveSettings(options = {}) {
   const newHosterSettings = { ...(config.hosterSettings || {}) };
   const cur = config.globalSettings || {};
   const curFm = cur.folderMonitor || {};
-  const curRemote = cur.remote || {};
   const elTxt = (id, fb) => { const el = document.getElementById(id); return el ? el.value : fb; };
   const elChk = (id, fb) => { const el = document.getElementById(id); return el ? !!el.checked : fb; };
   const elInt = (id, curVal, dflt, lo, hi) => {
@@ -7738,13 +7494,6 @@ async function performSaveSettings(options = {}) {
       hosters: document.querySelector('.fm-hoster-checkbox')
         ? Array.from(document.querySelectorAll('.fm-hoster-checkbox:checked')).map(el => el.dataset.fmHoster)
         : (curFm.hosters || [])
-    },
-    remote: {
-      ...curRemote,
-      enabled: elChk('remoteEnabledInput', !!curRemote.enabled),
-      port: elInt('remotePortInput', curRemote.port || 9100, 9100, 1024, 65535),
-      token: elTxt('remoteTokenInput', curRemote.token || '').trim(),
-      allowInput: elChk('remoteAllowInputInput', curRemote.allowInput !== false)
     }
   };
 
@@ -7781,16 +7530,7 @@ async function performSaveSettings(options = {}) {
     saveHosterSettingsTracked(newHosterSettings),
     saveGlobalSettingsTracked(globalSettings)
   ];
-  const diagnosticsEnabled = document.getElementById('diagEnabledInput');
-  if (diagnosticsEnabled) {
-    saves.push(saveDiagnosticsSettingsTracked({
-      enabled: diagnosticsEnabled.checked,
-      port: Math.min(65535, Math.max(1024, parseInt(document.getElementById('diagPortInput')?.value, 10) || 9110)),
-      bindMode: document.getElementById('diagBindModeInput')?.value === 'network' ? 'network' : 'local',
-      publicHost: document.getElementById('diagPublicHostInput')?.value.trim() || '',
-      allowlist: (document.getElementById('diagAllowlistInput')?.value || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean)
-    }));
-  }
+
   await Promise.all(saves);
   config.hosterSettings = newHosterSettings;
   config.globalSettings = globalSettings;
@@ -7824,42 +7564,6 @@ async function performSaveSettings(options = {}) {
   try { await refreshAutomationRuntimeStatus(); } catch {}
   refreshAutomationControlCenter();
 
-  // Start/stop remote server based on settings
-  const remoteSettings = globalSettings.remote;
-  const remoteBadge = document.getElementById('remoteStatusBadge');
-  if (remoteSettings) {
-    try {
-      const remoteSaveResult = await saveRemoteSettingsTracked(remoteSettings);
-      if (remoteSaveResult && remoteSaveResult.settings) {
-        globalSettings.remote = { ...remoteSaveResult.settings };
-        config.globalSettings = { ...(config.globalSettings || {}), remote: { ...remoteSaveResult.settings } };
-        const tokenInput = document.getElementById('remoteTokenInput');
-        if (tokenInput) tokenInput.value = remoteSaveResult.settings.token || '';
-      }
-      if (remoteSaveResult && remoteSaveResult.runtimeError) throw new Error(remoteSaveResult.runtimeError);
-      if (remoteBadge) {
-        remoteBadge.textContent = remoteSettings.enabled ? 'Aktiv' : 'Inaktiv';
-        remoteBadge.className = `panel-status${remoteSettings.enabled ? ' active' : ''}`;
-      }
-      // Update status display
-      const status = await window.api.remoteStatus();
-      const statusEl = document.getElementById('remoteConnectionStatus');
-      if (statusEl) {
-        if (status.running) {
-          statusEl.textContent = formatRemoteClientStatus(status.port, status.clientCount);
-          statusEl.style.color = '#10b981';
-        } else {
-          statusEl.textContent = 'Nicht aktiv';
-          statusEl.style.color = '#94a3b8';
-        }
-      }
-    } catch {
-      if (remoteBadge) {
-        remoteBadge.textContent = 'Fehler';
-        remoteBadge.className = 'panel-status';
-      }
-    }
-  }
 
   const feedback = document.getElementById('saveFeedback');
   if (feedback) feedback.textContent = feedbackText;

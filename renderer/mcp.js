@@ -19,10 +19,10 @@
     return jobs;
   };
   const handlers = {
-    state: async () => ({ uploading, queueCount: queueJobs.length, selectedFileCount: selectedFiles.length, counts: queueJobs.reduce((out, job) => { out[job.status] = (out[job.status] || 0) + 1; return out; }, {}) }),
+    state: async () => ({ source: 'live', stale: false, uploading, queueCount: queueJobs.length, selectedFileCount: selectedFiles.length, selectedHosters: getSelectedHosters(), counts: queueJobs.reduce((out, job) => { out[job.status] = (out[job.status] || 0) + 1; return out; }, {}) }),
     refresh,
     'account-results': async args => { for (const row of args.results) { if (findAccountById(row.accountId)) accountStatuses[row.accountId] = { status: row.status, message: row.message, storage: row.storage, checkedAt: row.checkedAt || new Date().toISOString() }; } renderAccounts(); return { updated: args.results.length }; },
-    'queue-list': async args => page(queueJobs.filter(job => !args.status || job.status === args.status).map(job => ({ id: job.id, fileName: job.fileName, hoster: job.hoster, status: job.status, bytesUploaded: job.bytesUploaded, bytesTotal: job.bytesTotal, speedKbs: job.speedKbs, error: job.error, result: job.result, attempt: job.attempt })), args),
+    'queue-list': async args => page(queueJobs.filter(job => !args.status || job.status === args.status).map(job => ({ id: job.id, file: job.file, fileName: job.fileName, hoster: job.hoster, status: job.status, bytesUploaded: job.bytesUploaded, bytesTotal: job.bytesTotal, speedKbs: job.speedKbs, error: job.error, result: job.result, attempt: job.attempt })), args),
     'queue-add': async (args, guard) => {
       const inspection = await window.api.inspectImportFiles(args.paths, existingImportPaths());
       await guard();

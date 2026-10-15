@@ -32,7 +32,6 @@ const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./l
 const { createSettingsImportGate } = require('./lib/settings-import-gate');
 const FolderMonitor = require('./lib/folder-monitor');
 const { walkFolderAsync } = require('./lib/file-discovery');
-const RemoteServer = require('./lib/remote-server');
 const { maybeRotateLogFile } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
 const { formatUploadLogLine, iterateUploadLogEntries, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
@@ -42,7 +41,6 @@ const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogTe
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
 const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
-const { createAgent } = require('./lib/diagnostics-agent');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
 const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion } = require('./lib/automation-control');
@@ -202,8 +200,6 @@ function requestUploadFinalization(summary, preserveQueue = false) {
 }
 const activeUploadProducerTrackers = new Set();
 const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
-let diagnosticAgent = null;
-let _diagHandler = null;
 
 function assertConfigWriteAllowed() {
   if (!settingsImportGate.canStartUpload()) throw new Error('Einstellungen werden gerade importiert');
@@ -472,10 +468,6 @@ function _appendJobLog(jobId, entry) {
   arr.push(entry);
 }
 const folderMonitor = new FolderMonitor();
-let remoteServer = null;
-let captureWindow = null;
-let captureWindowReady = false;
-let signalingQueue = [];
 const HEALTH_CHECK_TIMEOUT = 25000;
 const doodstreamHealthCoordinator = createDoodstreamOtpCoordinator({
   createUploader: () => new DoodstreamUploader()
@@ -1947,24 +1939,6 @@ app.whenReady().then(async () => {
     debugLog(`folder-monitor auto-start failed: ${err.message}`);
   }
 
-  // Auto-start remote server if enabled
-  try {
-    const _remCfg = configStore.load();
-    const remoteConfig = _remCfg.globalSettings && _remCfg.globalSettings.remote;
-    if (remoteConfig && remoteConfig.enabled) {
-      startRemoteServer().catch(err => {
-        debugLog(`remote-server auto-start failed: ${err.message}`);
-      });
-    }
-    const diagConfig = _remCfg.globalSettings && _remCfg.globalSettings.diagnostics;
-    if (diagConfig && diagConfig.enabled) {
-      startDiagnosticAgent().catch(err => {
-        debugLog(`diagnostics-agent auto-start failed: ${err.message}`);
-      });
-    }
-  } catch (err) {
-    debugLog(`remote-server auto-start failed: ${err.message}`);
-  }
 
   // Auto-show drop target if enabled
   try {
@@ -2013,11 +1987,6 @@ app.on('will-quit', () => {
   if (restartAfterClosePreparation) app.relaunch();
   if (uploadManager) try { uploadManager.cancel(); } catch {}
   try { stopFolderMonitor(); } catch {}
-  try {
-    if (remoteServer) { remoteServer.stop(); remoteServer = null; }
-    destroyCaptureWindow();
-  } catch {}
-  try { stopDiagnosticAgent(); } catch {}
   try { destroyDropTargetWindow(); } catch {}
   try { if (tray && !tray.isDestroyed()) { tray.destroy(); tray = null; } } catch {}
   // Flush pending log buffers synchronously so no lines are lost.
@@ -3199,26 +3168,7 @@ async function syncImportedRuntime(config) {
     debugLog(`backup folder monitor sync failed: ${error.message}`);
     warnings.push('Ordnerüberwachung');
   }
-  try {
-    const remoteSettings = config.globalSettings.remote;
-    if (remoteSettings && remoteSettings.enabled) await startRemoteServer();
-    else if (remoteServer) {
-      remoteServer.stop();
-      remoteServer = null;
-      destroyCaptureWindow();
-    }
-  } catch (error) {
-    debugLog(`backup remote sync failed: ${error.message}`);
-    warnings.push('Remote-Steuerung');
-  }
-  try {
-    const diagnostics = config.globalSettings.diagnostics;
-    if (diagnostics && diagnostics.enabled) await startDiagnosticAgent();
-    else stopDiagnosticAgent();
-  } catch (error) {
-    debugLog(`backup diagnostics sync failed: ${error.message}`);
-    warnings.push('Diagnose');
-  }
+
   try {
     if (config.globalSettings.showDropTarget) createDropTargetWindow();
     else destroyDropTargetWindow();
@@ -4011,12 +3961,6 @@ ipcMain.handle('folder-monitor:select-folder', async () => {
   return result.filePaths[0];
 });
 
-// --- Remote Control ---
-function generateToken() {
-  const crypto = require('crypto');
-  return crypto.randomBytes(32).toString('hex');
-}
-
 // --- Remote Diagnostics (read-only) ---
 function _diagAppInfo() {
   return {
@@ -4053,15 +3997,8 @@ function _diagSystemInfo() {
 }
 
 function _diagAgentInfo() {
-  const cfg = configStore.load();
-  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
-  return {
-    version: app.getVersion(),
-    port: diag.port || 9110,
-    bindAddress: _diagBindHost(diag),
-    clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
-    lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
-  };
+  const state = mcpService?.state();
+  return { version: app.getVersion(), transport: 'mcp-relay', enabled: state?.enabled === true, connection: state?.connection || 'disabled', activeRequests: state?.activeRequests || 0, lastContact: state?.lastContact || null };
 }
 
 function createAppCollectors() {
@@ -4172,416 +4109,12 @@ ipcMain.handle('mcp:update-grant', async (event, args) => {
   return mcpService.updateGrant(args.id, args.remove, args.readOnly);
 });
 
-function _buildDiagnosticHandler() {
-  const collectors = createCollectors({
-    loadConfig: () => configStore.load(),
-    loadHistory: () => configStore.loadHistory(),
-    getAllLogPaths,
-    support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
-    stats,
-    appInfo: _diagAppInfo,
-    systemInfo: _diagSystemInfo,
-    agentInfo: _diagAgentInfo
-  });
-  const agent = createAgent(collectors);
-  return (msg, _client, reply) => {
-    let result;
-    try { result = agent.handle(msg.op, msg.args); }
-    catch (e) { result = { ok: false, error: String((e && e.message) || e) }; }
-    reply(result);
-  };
+const retiredRemoteState = Object.freeze({ retired: true, enabled: false, running: false, token: '', code: '', port: null, clientCount: 0 });
+for (const channel of ['remote:get-settings', 'remote:save-settings', 'remote:status', 'diagnostics:get-settings', 'diagnostics:save-settings', 'diagnostics:regenerate', 'diagnostics:status']) {
+  ipcMain.handle(channel, () => ({ ...retiredRemoteState }));
 }
-
-function _getSuggestedRemoteHosts() {
-  const os = require('os');
-  const hosts = [];
-  try {
-    for (const entry of Object.values(os.networkInterfaces())) {
-      for (const net of (entry || [])) {
-        if (net && net.family === 'IPv4' && !net.internal && net.address) hosts.push(net.address);
-      }
-    }
-  } catch {}
-  return [...new Set(hosts)];
-}
-
-function _diagAllowlist(diag) {
-  return Array.isArray(diag && diag.allowlist) ? diag.allowlist.map((x) => String(x).trim()).filter(Boolean) : [];
-}
-
-function _diagBindHost(diag) {
-  const mode = (diag && diag.bindMode) || 'local';
-  if (mode === 'network' && _diagAllowlist(diag).length > 0) return '0.0.0.0';
-  return '127.0.0.1';
-}
-
-function _diagPublicHost(diag) {
-  const explicit = String((diag && diag.publicHost) || '').trim();
-  if (explicit) return explicit;
-  if (_diagBindHost(diag) === '127.0.0.1') return '127.0.0.1';
-  return _getSuggestedRemoteHosts()[0] || '127.0.0.1';
-}
-
-function buildDiagnosticCode(diag, fp) {
-  const payload = { v: 1, h: _diagPublicHost(diag), p: diag.port || 9110, t: diag.token, n: diag.label || require('os').hostname() };
-  if (fp) { payload.fp = fp; payload.s = 'wss'; }
-  return 'mhu1_' + Buffer.from(JSON.stringify(payload)).toString('base64url');
-}
-
-async function startDiagnosticAgent() {
-  if (diagnosticAgent) { try { diagnosticAgent.stop(); } catch {} diagnosticAgent = null; }
-  const config = configStore.load();
-  const diag = config.globalSettings && config.globalSettings.diagnostics;
-  if (!diag || !diag.enabled) return;
-
-  let token = diag.token;
-  if (!token) {
-    token = generateToken();
-    const gs = { ...config.globalSettings, diagnostics: { ...diag, token, codeIssuedAt: Date.now() } };
-    await configStore.save({ globalSettings: gs });
-  }
-
-  if (!_diagHandler) _diagHandler = _buildDiagnosticHandler();
-  const host = _diagBindHost(diag);
-  const allowlist = _diagAllowlist(diag);
-  diagnosticAgent = new RemoteServer();
-  try {
-    await diagnosticAgent.start({
-      port: diag.port || 9110,
-      host,
-      token,
-      diagnosticMode: true,
-      allowlist,
-      onDiagnosticRequest: _diagHandler
-    });
-    debugLog(`diagnostics-agent started on ${host}:${diagnosticAgent.getPort()} (allowlist ${allowlist.length})`);
-  } catch (e) {
-    debugLog(`diagnostics-agent start failed: ${e.message}`);
-    diagnosticAgent = null;
-  }
-}
-
-function stopDiagnosticAgent() {
-  if (diagnosticAgent) { try { diagnosticAgent.stop(); } catch {} diagnosticAgent = null; }
-}
-
-ipcMain.handle('diagnostics:get-settings', () => {
-  const cfg = configStore.load();
-  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
-  return {
-    enabled: !!diag.enabled,
-    port: diag.port || 9110,
-    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
-    bindAddress: _diagBindHost(diag),
-    publicHost: diag.publicHost || '',
-    allowlist: _diagAllowlist(diag),
-    suggestedHosts: _getSuggestedRemoteHosts(),
-    label: diag.label || require('os').hostname(),
-    codeIssuedAt: diag.codeIssuedAt || 0,
-    code: diag.token ? buildDiagnosticCode(diag) : ''
-  };
-});
-
-ipcMain.handle('diagnostics:save-settings', async (_e, incoming) => {
-  assertConfigWriteAllowed();
-  const cfg = configStore.load();
-  const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
-  const next = {
-    ...cur,
-    enabled: !!(incoming && incoming.enabled),
-    port: (incoming && Number(incoming.port)) || cur.port || 9110,
-    bindMode: (incoming && incoming.bindMode === 'network') ? 'network' : 'local',
-    publicHost: (incoming && incoming.publicHost !== null && incoming.publicHost !== undefined) ? String(incoming.publicHost).trim() : (cur.publicHost || ''),
-    allowlist: (incoming && Array.isArray(incoming.allowlist))
-      ? incoming.allowlist.map((x) => String(x).trim()).filter(Boolean)
-      : _diagAllowlist(cur),
-    label: (incoming && incoming.label !== null && incoming.label !== undefined) ? String(incoming.label) : cur.label
-  };
-  next.bindAddress = _diagBindHost(next);
-  const gs = { ...cfg.globalSettings, diagnostics: next };
-  await configStore.save({ globalSettings: gs });
-  await startDiagnosticAgent();
-  return { ok: true, bindAddress: next.bindAddress, allowlistCount: next.allowlist.length };
-});
-
-ipcMain.handle('diagnostics:regenerate', async () => {
-  assertConfigWriteAllowed();
-  const cfg = configStore.load();
-  const cur = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
-  const next = { ...cur, token: generateToken(), codeIssuedAt: Date.now() };
-  const gs = { ...cfg.globalSettings, diagnostics: next };
-  await configStore.save({ globalSettings: gs });
-  if (next.enabled) await startDiagnosticAgent();
-  return { ok: true, code: buildDiagnosticCode(next), codeIssuedAt: next.codeIssuedAt };
-});
-
-ipcMain.handle('diagnostics:status', () => {
-  const cfg = configStore.load();
-  const diag = (cfg.globalSettings && cfg.globalSettings.diagnostics) || {};
-  return {
-    running: !!diagnosticAgent,
-    port: diagnosticAgent ? diagnosticAgent.getPort() : (diag.port || 9110),
-    bindMode: diag.bindMode === 'network' ? 'network' : 'local',
-    bindAddress: _diagBindHost(diag),
-    publicHost: _diagPublicHost(diag),
-    allowlistCount: _diagAllowlist(diag).length,
-    clientCount: diagnosticAgent ? diagnosticAgent.getClientCount() : 0,
-    lastAccess: diagnosticAgent ? diagnosticAgent.getLastAccess() : null
-  };
-});
-
-function createCaptureWindow() {
-  if (captureWindow && !captureWindow.isDestroyed()) return;
-  captureWindowReady = false;
-  captureWindow = new BrowserWindow({
-    show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: path.join(__dirname, 'lib', 'remote-capture-preload.js')
-    }
-  });
-  captureWindow.loadFile(path.join(__dirname, 'lib', 'remote-capture.html'));
-
-  // Wait for window to be fully loaded before sending signaling messages
-  captureWindow.webContents.on('dom-ready', () => {
-    debugLog('remote: capture window ready, draining', signalingQueue.length, 'queued messages');
-    captureWindowReady = true;
-    for (const msg of signalingQueue) {
-      captureWindow.webContents.send('remote:signaling-to-capture', msg);
-    }
-    signalingQueue = [];
-  });
-
-  // Crash recovery: if hidden window closes unexpectedly while clients connected, recreate it
-  captureWindow.on('closed', () => {
-    captureWindow = null;
-    captureWindowReady = false;
-    signalingQueue = [];
-    if (remoteServer && remoteServer.getClientCount() > 0) {
-      debugLog('remote: capture window crashed, recreating...');
-      createCaptureWindow();
-    }
-  });
-}
-
-function destroyCaptureWindow() {
-  if (captureWindow && !captureWindow.isDestroyed()) {
-    captureWindow.close();
-    captureWindow = null;
-  }
-}
-
-async function startRemoteServer() {
-  if (remoteServer) {
-    remoteServer.stop();
-    remoteServer = null;
-  }
-
-  const config = configStore.load();
-  const remote = config.globalSettings && config.globalSettings.remote;
-  if (!remote || !remote.enabled) return;
-
-  let token = remote.token;
-  if (!token) {
-    const canonical = await configStore.saveRemoteSettings(remote, generateToken);
-    token = canonical.token;
-  }
-
-  remoteServer = new RemoteServer();
-  try {
-    await remoteServer.start({
-      port: remote.port || 9100,
-      token,
-      allowInput: remote.allowInput !== false,
-      mainWindow,
-      onSignalingToCapture: (data) => {
-        if (!captureWindow || captureWindow.isDestroyed()) {
-          debugLog('remote: signaling dropped, no capture window');
-          return;
-        }
-        if (captureWindowReady) {
-          captureWindow.webContents.send('remote:signaling-to-capture', data);
-        } else {
-          debugLog('remote: capture window not ready, queuing', data.type, 'message');
-          signalingQueue.push(data);
-        }
-      },
-      onCreateCaptureWindow: () => createCaptureWindow(),
-      onDestroyCaptureWindow: () => destroyCaptureWindow()
-    });
-  } catch (error) {
-    try { remoteServer.stop(); } catch {}
-    remoteServer = null;
-    destroyCaptureWindow();
-    throw error;
-  }
-
-  debugLog(`remote-server started on port ${remoteServer.getPort()}`);
-}
-
-// IPC: Signaling from capture window back to dashboard client
-ipcMain.on('remote:signaling-from-capture', (_event, data) => {
-  if (remoteServer && data.clientId) {
-    remoteServer.sendToClient(data.clientId, data);
-  }
-});
-
-// IPC: Debug logging from capture window
-ipcMain.on('remote:capture-log', (_event, msg) => {
-  debugLog('remote-capture:', msg);
-});
-
-// IPC: Input events from capture window
-ipcMain.on('remote:input-event', (_event, data) => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-
-  const config = configStore.load();
-  const remote = config.globalSettings && config.globalSettings.remote;
-  if (!remote || !remote.allowInput) return;
-  if (data.role !== 'admin') return;
-
-  // Capture includes window frame (title bar) but NOT invisible DWM borders
-  // sendInputEvent coordinates are relative to web content area
-  const winBounds = mainWindow.getBounds();
-  const contentBounds = mainWindow.getContentBounds();
-  // Windows 10/11: getBounds() includes ~7px invisible resize borders not in capture
-  const dwm = process.platform === 'win32' ? 7 : 0;
-  const capturedW = winBounds.width - 2 * dwm;
-  const capturedH = winBounds.height - dwm; // only bottom has invisible border
-  const contentOffsetX = contentBounds.x - (winBounds.x + dwm);
-  const contentOffsetY = contentBounds.y - winBounds.y;
-  const rawX = typeof data.x === 'number' && isFinite(data.x) ? data.x : 0;
-  const rawY = typeof data.y === 'number' && isFinite(data.y) ? data.y : 0;
-  const x = Math.round(rawX * capturedW - contentOffsetX);
-  const y = Math.round(rawY * capturedH - contentOffsetY);
-
-  switch (data.type) {
-    case 'mousemove':
-      mainWindow.webContents.sendInputEvent({ type: 'mouseMove', x, y });
-      break;
-    case 'mousedown':
-      mainWindow.webContents.sendInputEvent({
-        type: 'mouseDown', x, y,
-        button: data.button === 'right' ? 'right' : 'left',
-        clickCount: 1
-      });
-      break;
-    case 'mouseup':
-      mainWindow.webContents.sendInputEvent({
-        type: 'mouseUp', x, y,
-        button: data.button === 'right' ? 'right' : 'left',
-        clickCount: 1
-      });
-      break;
-    case 'scroll':
-      mainWindow.webContents.sendInputEvent({
-        type: 'mouseWheel', x, y,
-        deltaX: data.deltaX || 0,
-        deltaY: data.deltaY || 0
-      });
-      break;
-    case 'keydown':
-      mainWindow.webContents.sendInputEvent({
-        type: 'keyDown',
-        keyCode: data.key,
-        modifiers: buildModifiers(data)
-      });
-      if (data.key.length === 1) {
-        mainWindow.webContents.sendInputEvent({
-          type: 'char',
-          keyCode: data.key,
-          modifiers: buildModifiers(data)
-        });
-      }
-      break;
-    case 'keyup':
-      mainWindow.webContents.sendInputEvent({
-        type: 'keyUp',
-        keyCode: data.key,
-        modifiers: buildModifiers(data)
-      });
-      break;
-  }
-});
-
-function buildModifiers(data) {
-  const mods = [];
-  if (data.shift) mods.push('shift');
-  if (data.ctrl) mods.push('control');
-  if (data.alt) mods.push('alt');
-  return mods;
-}
-
-// IPC: Get capture source ID (desktopCapturer must run in main process in Electron 33+)
-ipcMain.handle('remote:get-capture-source-id', async () => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    debugLog('remote: capture source - mainWindow not available');
-    return null;
-  }
-  // Use getMediaSourceId() for exact window capture without enumeration
-  const sourceId = mainWindow.getMediaSourceId();
-  debugLog('remote: capture source - getMediaSourceId:', sourceId);
-  if (sourceId) return sourceId;
-
-  // Fallback: enumerate sources
-  const { desktopCapturer } = require('electron');
-  const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });
-  const title = mainWindow.getTitle();
-  debugLog('remote: capture source - fallback, looking for title:', title);
-  let source = sources.find(s => s.name === title);
-  if (!source) source = sources.find(s => s.name.includes('Multi-Hoster'));
-  if (!source) source = sources.find(s => s.id.startsWith('screen:'));
-  debugLog('remote: capture source -', source ? `found: ${source.name} (${source.id})` : 'NONE FOUND');
-  return source ? source.id : null;
-});
-
-// IPC: Client count updates from capture window
-ipcMain.on('remote:client-count', (_event, count) => {
-  safeSend('remote:client-count', count);
-});
-
-// IPC: Remote settings
-ipcMain.handle('remote:get-settings', () => {
-  const config = configStore.load();
-  return config.globalSettings && config.globalSettings.remote || {};
-});
-
-ipcMain.handle('remote:save-settings', async (_event, remoteSettings) => {
-  assertConfigWriteAllowed();
-  const canonicalSettings = await configStore.saveRemoteSettings(remoteSettings, generateToken);
-
-  let runtimeError = '';
-  try {
-    if (canonicalSettings.enabled) {
-      await startRemoteServer();
-    } else if (remoteServer) {
-      remoteServer.stop();
-      remoteServer = null;
-      destroyCaptureWindow();
-      debugLog('remote-server stopped');
-    }
-  } catch (error) {
-    runtimeError = error && error.message ? error.message : String(error);
-  }
-  return {
-    saved: true,
-    runtimeError,
-    settings: canonicalSettings
-  };
-});
-
-ipcMain.handle('remote:generate-token', () => {
-  return generateToken();
-});
-
-ipcMain.handle('remote:status', () => {
-  return {
-    running: !!remoteServer,
-    port: remoteServer ? remoteServer.getPort() : null,
-    clientCount: remoteServer ? remoteServer.getClientCount() : 0
-  };
-});
+ipcMain.handle('remote:generate-token', () => '');
+ipcMain.handle('remote:get-capture-source-id', () => null);
 
 // --- Always on top ---
 ipcMain.handle('set-always-on-top', async (_event, value) => {

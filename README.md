@@ -301,7 +301,22 @@ Permissions are configured locally, never through remote tools:
 
 Destructive operations require a native local confirmation for the exact action and arguments. Cancel is the default, approval expires within 60 seconds, and no remote tool or boolean can grant it. Starting transfers also requires confirmation when current settings enable automatic source deletion or power actions. Cancellation and expiry prevent pending actions from starting; they cannot undo an action already committed.
 
-The legacy screen/input connection remains available during migration. Screen streaming, granting new filesystem roots, changing MCP permissions and obtaining the connection code are not remote MCP operations. A compatible Streamable HTTP client must be configured separately. Local support-package export remains available without MCP.
+MCP replaces both legacy remote listeners. The old screen/input and diagnostic servers no longer start, their activation controls are removed, and settings imports cannot reactivate them. A compatible Streamable HTTP client must be configured separately. Local support-package export remains available without MCP.
+
+The previous diagnostic operations map to these MCP tools:
+
+| Previous operation | MCP replacement |
+| --- | --- |
+| System information and server health | `mhu_diagnostics_summary` |
+| Redacted configuration | `mhu_settings_get`, `mhu_accounts_list` |
+| Log list, read and tail | `mhu_logs_list`, `mhu_logs_read` |
+| Application events | `mhu_app_events` |
+| Classified errors | `mhu_errors` |
+| Queue snapshot | `mhu_app_state`, `mhu_queue_list` with current renderer state |
+| History and hoster statistics | `mhu_history_list`, `mhu_history_summary` |
+| Rotation state and configured hosters | `mhu_diagnostics_summary`; `mhu_accounts_check` for explicit live checks |
+
+Screen streaming and arbitrary mouse/keyboard control are intentionally not MCP operations. CAPTCHA and interactive authentication challenges remain local; supported one-time account codes can be submitted with `mhu_accounts_otp`. Granting new directories, changing MCP permissions and obtaining the connection code are local security decisions. These boundaries do not disable ordinary upload, queue, account, automation, history or backup operations exposed through the structured tool catalog.
 
 ## Development and Windows builds
 
