@@ -1,5 +1,12 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+const reportStartupPhase = phase => ipcRenderer.send('app:startup-phase', phase);
+reportStartupPhase('preload-started');
+window.addEventListener('DOMContentLoaded', () => reportStartupPhase('dom-ready'), { once: true });
+window.addEventListener('load', () => reportStartupPhase('page-loaded'), { once: true });
+window.addEventListener('error', event => reportStartupPhase(event.target === window ? 'renderer-error' : 'resource-error'), true);
+window.addEventListener('unhandledrejection', () => reportStartupPhase('renderer-rejection'));
+
 let folderMonitorCandidateListenerReady = false;
 let folderMonitorRendererGeneration = null;
 let folderMonitorReadySentGeneration = null;
@@ -18,6 +25,7 @@ ipcRenderer.on('folder-monitor:renderer-generation', (_event, generation) => {
 });
 
 contextBridge.exposeInMainWorld('api', {
+  reportStartupPhase,
   // Config
   getConfig: () => ipcRenderer.invoke('get-config'),
   saveConfig: (config) => ipcRenderer.invoke('save-config', config),

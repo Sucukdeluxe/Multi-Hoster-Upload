@@ -1,11 +1,16 @@
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
-const { createStartupWindow, createStartupQuery } = require('./lib/startup-renderer');
+const { createStartupWindow, createStartupQuery, createStartupDiagnostics, summarizeStartupPixels } = require('./lib/startup-renderer');
 nativeTheme.themeSource = 'dark';
 const path = require('path');
 const { pathToFileURL } = require('node:url');
 const fs = require('fs');
+const startupDiagnostics = createStartupDiagnostics({
+  fs, path, directory: app.getPath('userData'),
+  metadata: { version: app.getVersion(), electron: process.versions.electron, platform: process.platform, osRelease: require('os').release(), remoteSession: /^RDP-/i.test(process.env.SESSIONNAME || ''), packaged: app.isPackaged }
+});
+process.once('exit', code => startupDiagnostics.write('process-exit', { code }));
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
@@ -1597,6 +1602,7 @@ async function settleWindowContentAfterShow(window) {
 }
 
 function createWindow() {
+  startupDiagnostics.write('window-create');
   const startupWindow = createStartupWindow(BrowserWindow, {
     title: `Multi-Hoster-Uploader | v.${app.getVersion()}${app.isPackaged ? '' : ' | Entwicklerversion'}`,
     width: 1100,
@@ -1613,6 +1619,52 @@ function createWindow() {
     }
   });
   mainWindow = startupWindow.window;
+  const diagnosticWindow = mainWindow;
+  const diagnosticTimers = [];
+  let diagnosticProbeRunning = false;
+  const probeStartup = async (checkpoint) => {
+    if (diagnosticProbeRunning || diagnosticWindow.isDestroyed() || diagnosticWindow.webContents.isDestroyed()) return;
+    diagnosticProbeRunning = true;
+    const generation = folderMonitorRendererGeneration;
+    const bounded = async (promise) => {
+      let timer;
+      try {
+        return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('STARTUP_PROBE_TIMEOUT')), 2500); })]);
+      } finally { clearTimeout(timer); }
+    };
+    try {
+      const dom = await bounded(diagnosticWindow.webContents.executeJavaScript(`(() => {
+        const body = document.body;
+        const header = document.querySelector('.app-header');
+        const bounds = header?.getBoundingClientRect();
+        return { readyState: document.readyState, apiAvailable: typeof window.api === 'object', bodyBackground: body ? getComputedStyle(body).backgroundColor : null, styleSheetCount: document.styleSheets.length, headerVisible: !!bounds && bounds.width > 0 && bounds.height > 0, viewportWidth: innerWidth, viewportHeight: innerHeight };
+      })()`));
+      startupDiagnostics.write('dom-probe', { checkpoint, generation, initialized: closeHandshakeReady, ...dom });
+    } catch {
+      startupDiagnostics.write('dom-probe-unavailable', { checkpoint, generation, initialized: closeHandshakeReady });
+    }
+    try {
+      if (diagnosticWindow.isVisible() && !diagnosticWindow.isMinimized()) {
+        const image = await bounded(diagnosticWindow.webContents.capturePage());
+        startupDiagnostics.write('paint-probe', { checkpoint, generation, ...summarizeStartupPixels(image) });
+      }
+    } catch {
+      startupDiagnostics.write('paint-probe-unavailable', { checkpoint, generation });
+    } finally { diagnosticProbeRunning = false; }
+  };
+  for (const checkpoint of [3000, 10000, 30000]) {
+    const timer = setTimeout(() => { void probeStartup(checkpoint); }, checkpoint);
+    timer.unref?.();
+    diagnosticTimers.push(timer);
+  }
+  diagnosticWindow.on('closed', () => {
+    diagnosticTimers.forEach(clearTimeout);
+    startupDiagnostics.write('window-closed', { initialized: closeHandshakeReady });
+  });
+  diagnosticWindow.on('show', () => startupDiagnostics.write('window-shown', { initialized: closeHandshakeReady }));
+  diagnosticWindow.once('ready-to-show', () => startupDiagnostics.write('first-render-ready'));
+  diagnosticWindow.webContents.on('dom-ready', () => startupDiagnostics.write('document-ready'));
+  diagnosticWindow.webContents.on('preload-error', () => startupDiagnostics.write('preload-failed'));
   closePreparationAttempt++;
   closeFlushApproved = false;
   closeFlushRequested = false;
@@ -1647,16 +1699,19 @@ function createWindow() {
     if (isInPlace || !isMainFrame) return;
     closeHandshakeReady = false;
     folderMonitorRendererGeneration++;
+    startupDiagnostics.write('navigation-start', { generation: folderMonitorRendererGeneration });
     folderMonitorRendererReadyGeneration = null;
     updateAnnouncementState.reset();
     restoreClosePreparation(closePreparationAttempt);
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
+    startupDiagnostics.write('navigation-finished', { generation: folderMonitorRendererGeneration });
     safeSend('folder-monitor:renderer-generation', folderMonitorRendererGeneration);
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    startupDiagnostics.write('renderer-gone', { reason: details.reason, exitCode: details.exitCode, initialized: closeHandshakeReady });
     folderMonitorRendererReadyGeneration = null;
     _writeCrashLog('RENDER PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`RENDER PROCESS GONE: reason=${details.reason} exitCode=${details.exitCode}`);
@@ -1683,20 +1738,24 @@ function createWindow() {
   });
 
   mainWindow.webContents.on('unresponsive', () => {
+    startupDiagnostics.write('renderer-unresponsive', { initialized: closeHandshakeReady });
     _writeCrashLog('RENDERER UNRESPONSIVE', new Error('webContents unresponsive'));
     debugLog('RENDERER UNRESPONSIVE');
   });
 
   mainWindow.webContents.on('responsive', () => {
+    startupDiagnostics.write('renderer-responsive', { initialized: closeHandshakeReady });
     debugLog('RENDERER RESPONSIVE AGAIN');
   });
 
-  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    startupDiagnostics.write('navigation-failed', { errorCode, isMainFrame });
     _writeCrashLog('DID-FAIL-LOAD', new Error(errorDescription), { errorCode, validatedURL });
     debugLog(`DID-FAIL-LOAD: ${errorCode} ${errorDescription} url=${validatedURL}`);
   });
 
   app.on('child-process-gone', (_event, details) => {
+    startupDiagnostics.write('child-process-gone', { type: details.type, reason: details.reason, exitCode: details.exitCode });
     _writeCrashLog('CHILD PROCESS GONE', new Error(details.reason || 'unknown'), details);
     debugLog(`CHILD PROCESS GONE: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
   });
@@ -1760,6 +1819,15 @@ async function runAutomaticUpdateCheck(forceRefresh) {
 
 app.whenReady().then(async () => {
   if (!_hasSingleInstanceLock) return;
+  startupDiagnostics.write('application-ready', { hardwareAcceleration: app.isHardwareAccelerationEnabled(), gpuFeatures: app.getGPUFeatureStatus() });
+  void app.getGPUInfo('basic').then(info => {
+    const devices = Array.isArray(info.gpuDevice) ? info.gpuDevice.map(device => ({
+      active: device.active === true,
+      vendorId: device.vendorId,
+      deviceId: device.deviceId
+    })) : [];
+    startupDiagnostics.write('graphics-devices', { devices });
+  }).catch(() => startupDiagnostics.write('graphics-devices-unavailable'));
   try {
     const _bootCfg = configStore.load();
     _setLogSettingsSnapshot(_bootCfg.globalSettings);
@@ -1795,6 +1863,7 @@ app.whenReady().then(async () => {
   }
   createWindow();
   createTray();
+  startupDiagnostics.write('window-load-dispatched');
   void cloudLogSync.start();
 
   // Minimize to tray instead of taskbar
@@ -2970,6 +3039,8 @@ ipcMain.handle('create-support-bundle', async () => {
         { label: 'account-rotation.log (last 2 MB)', path: paths.accountRotation, maxBytes: 2 * 1024 * 1024 },
         { label: 'doodstream-debug.log (last 2 MB)', path: paths.doodstreamDebug, maxBytes: 2 * 1024 * 1024 },
         { label: 'crash.log', path: path.join(paths.logDir || path.dirname(paths.debug), 'crash.log'), maxBytes: 1 * 1024 * 1024 },
+        { label: 'startup-diagnostics.jsonl (previous sessions)', path: startupDiagnostics.filePath + '.1', maxBytes: 1024 * 1024 },
+        { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, maxBytes: 1024 * 1024 },
         { label: 'upload-audit.log (last 2 MB)', path: paths.uploadAudit, maxBytes: 2 * 1024 * 1024 },
         { label: 'fileuploader.log (last 1 MB)', path: paths.fileuploader, maxBytes: 1 * 1024 * 1024 }
       ]
@@ -3404,9 +3475,15 @@ ipcMain.handle('app:quit', () => {
   app.quit();
 });
 
+ipcMain.on('app:startup-phase', (event, phase) => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return;
+  startupDiagnostics.recordPhase(phase, folderMonitorRendererGeneration);
+});
+
 ipcMain.on('app:close-handshake-ready', (event) => {
   if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
     closeHandshakeReady = true;
+    startupDiagnostics.write('application-initialized', { generation: folderMonitorRendererGeneration });
     void checkForUpdate().then(announceAvailableUpdate).catch((error) => {
       logError('update-check failed', error);
     });

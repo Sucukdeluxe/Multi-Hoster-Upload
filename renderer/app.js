@@ -1,4 +1,5 @@
 const HOSTERS = ['doodstream.com', 'voe.sx', 'vidmoly.me', 'byse.sx', 'clouddrop.cc'];
+window.api?.reportStartupPhase?.('script-started');
 const uiLocalizer = window.I18n.createDomLocalizer(document);
 uiLocalizer.start(new URLSearchParams(window.location.search).get('language'));
 
@@ -1497,15 +1498,18 @@ function handleFolderMonitorFiles(files) {
 
 // --- Init ---
 async function init() {
+  window.api.reportStartupPhase?.('config-requested');
   try {
     config = await window.api.getConfig();
   } catch (error) {
     await showAppAlert(error.message || String(error), 'Zugangsdaten gesperrt');
     throw error;
   }
+  window.api.reportStartupPhase?.('config-loaded');
   try {
     await refreshAutomationRuntimeStatus();
   } catch {}
+  window.api.reportStartupPhase?.('automation-status-loaded');
   setUiLanguage(config.globalSettings?.language);
   hosterSettings = config.hosterSettings || {};
   autoHealthCheckEnabled = loadAutoCheckPreference();
@@ -1516,14 +1520,18 @@ async function init() {
   ensureAccountStatusEntries();
   syncSelectedUploadHosters();
   restoreQueueStateFromConfig();
+  window.api.reportStartupPhase?.('evidence-requested');
   await _autoDeduplicateFromLog();
+  window.api.reportStartupPhase?.('evidence-loaded');
   _hydrateMissingJobSizes();
   renderHosterSummary();
   renderHosterModal();
   renderSettings();
   if (!_startupQueueEvidenceAvailable) showCopyToast('Automatische Wiederaufnahme wurde wegen nicht verfügbarer Abschlussnachweise blockiert.', 9000, 'warning');
   renderAccounts();
+  window.api.reportStartupPhase?.('layout-created');
   setupListeners();
+  window.api.reportStartupPhase?.('listeners-ready');
   importEntryCoordinator.ready();
   restoreQueueColumnWidths();
   loadHistory();
@@ -10781,8 +10789,10 @@ window.api.onPrepareClose(prepareForWindowClose);
 initializeStaticHeader();
 setupDragDrop();
 init().then(() => {
+  window.api.reportStartupPhase?.('initialized');
   window.api.signalCloseHandshakeReady();
 }).catch((err) => {
+  window.api.reportStartupPhase?.('initialization-failed');
   try {
     if (window.api && window.api.debugLog) window.api.debugLog(`init failed: ${err && err.stack ? err.stack : err}`);
     const root = document.getElementById('app') || document.body;
