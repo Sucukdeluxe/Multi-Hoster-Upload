@@ -1890,24 +1890,25 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .history-container { padding: 16px; overflow: auto; flex: 1; background: linear-gradient(180deg, rgba(255,255,255,0.015), transparent 24%); }
 .history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
 .history-header h2 { font-size: 18px; }
-.history-retention-label { font-size: 13px; line-height: 16px; color: var(--text-dim); margin-right: 2px; transform: translateY(-1px); }
+.history-retention-label { font-size: 14px; line-height: 20px; color: var(--text-muted); margin-right: 2px; }
 .history-retention-picker {
   position: relative;
-  min-width: 150px;
+  min-width: 184px;
 }
 .btn.history-retention-trigger {
   width: 100%;
-  min-width: 150px;
+  min-width: 184px;
   min-height: 34px;
   height: 34px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding-inline: 11px;
+  padding-inline: 14px;
   color: var(--text);
-  font-size: 13px;
-  line-height: 16px;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 20px;
   text-align: left;
 }
 .history-retention-trigger[aria-expanded="true"] {
@@ -1927,13 +1928,14 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
   transform: translateY(2px) rotate(225deg);
 }
 .history-retention-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
+  position: fixed;
   z-index: 1200;
   width: max-content;
-  min-width: 100%;
-  padding: 5px;
+  min-width: 210px;
+  max-width: calc(100vw - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
   border: 1px solid var(--border-hover);
   border-radius: 7px;
   background: var(--bg-raised);
@@ -1942,18 +1944,21 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 .history-retention-option {
   width: 100%;
-  min-height: 31px;
+  min-height: 40px;
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 9px 12px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 .history-retention-option:hover,
@@ -2184,14 +2189,6 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 
   .progress-bar-fill {
     transition-duration: 360ms !important;
-  }
-
-  .menu-opening {
-    animation-duration: 180ms !important;
-  }
-
-  .menu-closing {
-    animation-duration: 160ms !important;
   }
 
   .account-collapse {
@@ -2986,13 +2983,13 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 }
 
 @keyframes menu-unfold {
-  from { opacity: .35; clip-path: inset(0 0 100% 0); transform: scaleY(.96); }
-  to { opacity: 1; clip-path: inset(0); transform: scaleY(1); }
+  from { opacity: 0; transform: translateY(var(--menu-entry-offset, -6px)); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes menu-fold {
-  from { opacity: 1; clip-path: inset(0); transform: scaleY(1); }
-  to { opacity: .2; clip-path: inset(0 0 100% 0); transform: scaleY(.96); }
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(var(--menu-entry-offset, -6px)); }
 }
 
 .header-utilities .menu-dropdown {
@@ -4771,6 +4768,9 @@ input[type="checkbox"] {
   min-width: 0;
 }
 
+.history-header { flex-wrap: wrap; gap: 10px 16px; }
+.history-header > h2 { flex: 0 0 auto; white-space: nowrap; }
+
 .history-retention-select {
   min-width: 150px;
 }
@@ -5757,3 +5757,8 @@ input[type="checkbox"] {
   color: #b9c2d0;
   font-size: 12px;
 }
+
+#history-view .view-sidebar-section-label { font-size: 12px; }
+#history-view .view-sidebar-summary { font-size: 13px; }
+#history-view .view-sidebar-summary strong { font-size: 14px; }
+#history-view .view-sidebar-footnote { font-size: 12px; }

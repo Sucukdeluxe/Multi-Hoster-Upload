@@ -1680,6 +1680,7 @@ function _isHistoryTabActive() {
     const nextView = viewsById[`${tab.dataset.view}-view`];
     if (nextView) nextView.classList.add('active');
     if (tab.dataset.view === 'upload') requestAnimationFrame(clampRecentPanelHeight);
+    if (tab.dataset.view !== 'history') closeHistoryRetentionMenu();
     activeTab = tab;
     syncTabIndicator(tab);
     const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation .settings-nav-button.active');
@@ -8833,20 +8834,52 @@ function syncHistoryRetentionPicker() {
     option.setAttribute('aria-selected', String(selected));
     option.tabIndex = selected ? 0 : -1;
   });
+  if (window.getComputedStyle(menu).display !== 'none') positionHistoryRetentionMenu();
+}
+
+function positionHistoryRetentionMenu() {
+  const trigger = document.getElementById('historyRetentionTrigger');
+  const menu = document.getElementById('historyRetentionMenu');
+  if (!trigger || !menu || window.getComputedStyle(menu).display === 'none') return;
+  const anchor = trigger.getBoundingClientRect();
+  if (anchor.width === 0 || anchor.height === 0) {
+    closeHistoryRetentionMenu();
+    return;
+  }
+  const padding = 12;
+  const gap = 6;
+  menu.style.minWidth = `${Math.min(window.innerWidth - padding * 2, Math.max(210, anchor.width))}px`;
+  menu.style.maxHeight = `${window.innerHeight - padding * 2}px`;
+  const naturalHeight = menu.scrollHeight + 2;
+  const below = Math.max(0, window.innerHeight - padding - anchor.bottom - gap);
+  const above = Math.max(0, anchor.top - padding - gap);
+  const opensUp = below < naturalHeight && above > below;
+  menu.style.maxHeight = `${Math.max(0, opensUp ? above : below)}px`;
+  const left = Math.max(padding, Math.min(anchor.left, window.innerWidth - padding - menu.offsetWidth));
+  const top = opensUp ? anchor.top - gap - menu.offsetHeight : anchor.bottom + gap;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(Math.max(padding, Math.min(top, window.innerHeight - padding - menu.offsetHeight)))}px`;
+  menu.style.setProperty('--menu-entry-offset', opensUp ? '6px' : '-6px');
 }
 
 function openHistoryRetentionMenu(focusOption = false) {
   const trigger = document.getElementById('historyRetentionTrigger');
   const menu = document.getElementById('historyRetentionMenu');
   if (!trigger || !menu) return;
-  historyRetentionMenuToken++;
+  const token = ++historyRetentionMenuToken;
   menu.classList.remove('menu-closing', 'menu-opening');
   menu.style.display = 'block';
+  positionHistoryRetentionMenu();
   void menu.offsetHeight;
   menu.classList.add('menu-opening');
   trigger.setAttribute('aria-expanded', 'true');
   if (focusOption) {
-    window.requestAnimationFrame(() => menu.querySelector('[aria-selected="true"]')?.focus());
+    window.requestAnimationFrame(() => {
+      if (historyRetentionMenuToken !== token || trigger.getAttribute('aria-expanded') !== 'true') return;
+      const option = menu.querySelector('[aria-selected="true"]');
+      option?.focus({ preventScroll: true });
+      if (option) menu.scrollTop = Math.max(0, option.offsetTop - (menu.clientHeight - option.offsetHeight) / 2);
+    });
   }
 }
 
@@ -8859,8 +8892,11 @@ function closeHistoryRetentionMenu(returnFocus = false) {
   void menu.offsetHeight;
   menu.classList.add('menu-closing');
   trigger.setAttribute('aria-expanded', 'false');
-  const finish = () => {
-    if (!Object.is(historyRetentionMenuToken, token)) return;
+  let finished = false;
+  const finish = (event) => {
+    if (event && event.target !== menu) return;
+    if (finished || !Object.is(historyRetentionMenuToken, token)) return;
+    finished = true;
     menu.style.display = 'none';
     menu.classList.remove('menu-closing');
     if (returnFocus) trigger.focus();
@@ -9689,6 +9725,10 @@ function setupListeners() {
   document.addEventListener('mousedown', event => {
     if (!historyRetentionPicker.contains(event.target)) closeHistoryRetentionMenu();
   });
+  window.addEventListener('resize', positionHistoryRetentionMenu);
+  document.addEventListener('scroll', event => {
+    if (!historyRetentionMenu.contains(event.target)) positionHistoryRetentionMenu();
+  }, true);
 
   const historyRetentionSelect = document.getElementById('historyRetentionSelect');
   if (historyRetentionSelect) {
