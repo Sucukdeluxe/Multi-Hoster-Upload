@@ -10466,7 +10466,7 @@ function getDateTimeFormatters(locale) {
   if (!formatters) {
     formatters = {
       date: new Intl.DateTimeFormat(locale, { day: '2-digit', month: '2-digit', year: 'numeric' }),
-      time: new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      time: new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', second: '2-digit', ...(locale.startsWith('de') ? { hourCycle: 'h23' } : {}) })
     };
     _dateTimeFormatters.set(locale, formatters);
   }

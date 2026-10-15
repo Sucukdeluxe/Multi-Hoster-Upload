@@ -2000,11 +2000,12 @@ select.hs-input { max-width: none; width: auto; min-width: 140px; }
 .results-table th.active, .history-table th.active { color: var(--text); }
 .sort-indicator { margin-left: 4px; font-size: 10px; }
 
-.history-table { table-layout: fixed; }
-.history-table .col-date { width: 16%; }
+.history-table { table-layout: fixed; font-family: Arial, sans-serif; font-size: 13px; }
+.history-table .col-date { width: 180px; }
 .history-table .col-filename { width: 34%; }
 .history-table .col-host { width: 12%; }
-.history-table .col-link { width: 38%; }
+.history-table .col-link { width: auto; }
+.history-table th { font-family: Arial, sans-serif; font-size: 12px; }
 .history-row {
   cursor: pointer;
   transition: background 0.15s;
