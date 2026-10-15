@@ -1598,7 +1598,7 @@ async function settleWindowContentAfterShow(window) {
 
 function createWindow() {
   const startupWindow = createStartupWindow(BrowserWindow, {
-    title: `Multi-Hoster-Uploader | v.${app.getVersion()}`,
+    title: `Multi-Hoster-Uploader | v.${app.getVersion()}${app.isPackaged ? '' : ' | Entwicklerversion'}`,
     width: 1100,
     height: 750,
     minWidth: 800,
@@ -1701,8 +1701,8 @@ function createWindow() {
     debugLog(`CHILD PROCESS GONE: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
   });
 
-  let startupQuery = createStartupQuery(null, app.getVersion());
-  try { startupQuery = createStartupQuery(configStore.load(), app.getVersion()); } catch {}
+  let startupQuery = createStartupQuery(null, app.getVersion(), !app.isPackaged);
+  try { startupQuery = createStartupQuery(configStore.load(), app.getVersion(), !app.isPackaged); } catch {}
   startupWindow.load(path.join(__dirname, 'renderer', 'index.html'), (err) => {
     _writeCrashLog('LOAD FILE FAILED', err);
     debugLog(`LOAD FILE FAILED: ${err && err.stack ? err.stack : err}`);

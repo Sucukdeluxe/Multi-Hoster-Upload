@@ -2162,10 +2162,12 @@ function renderHosterSummary() {
   const hosters = getSelectedHosters();
   if (hosters.length === 0) {
     summary.textContent = 'Keine Upload-Ziele ausgewählt';
-  } else if (hosters.length === 1) {
-    summary.textContent = `Aktives Ziel: ${getHosterLabel(hosters[0])}`;
   } else {
-    summary.textContent = `${hosters.length} Ziele aktiv: ${hosters.map((name) => getHosterLabel(name)).join(', ')}`;
+    const count = document.createElement('span');
+    count.textContent = hosters.length === 1 ? '1 aktiver Hoster' : `${hosters.length.toLocaleString(getUiLocale())} aktive Hoster`;
+    const names = document.createElement('span');
+    names.textContent = hosters.map((name) => getHosterLabel(name)).join(' · ');
+    summary.replaceChildren(count, names);
   }
 }
 
@@ -6065,6 +6067,8 @@ function _setRollingUploadMetric(id, value) {
   if (!element) return;
   const numericValue = Number(value) || 0;
   const nextText = numericValue.toLocaleString(getUiLocale());
+  element.dataset.compactValue = String(nextText.length > 6);
+  element.dataset.wideValue = String(nextText.length > 9);
   const previousValue = Number(element.dataset.numericValue) || 0;
   if (previousValue === numericValue) {
     const previousText = element.getAttribute('aria-label');
@@ -6190,7 +6194,8 @@ function setApplicationVersion(version) {
   if (typeof version !== 'string' || version !== version.trim() || !/^\d+\.\d+\.\d+$/.test(version)) return;
   const versionLabel = document.getElementById('versionLabel');
   if (versionLabel) versionLabel.textContent = `v${version}`;
-  document.title = `Multi-Hoster-Uploader | v.${version}`;
+  const development = new URLSearchParams(window.location.search).get('development') === '1';
+  document.title = `Multi-Hoster-Uploader | v.${version}${development ? ' | Entwicklerversion' : ''}`;
 }
 
 function initializeStaticHeader() {

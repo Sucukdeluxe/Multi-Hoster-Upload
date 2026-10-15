@@ -214,25 +214,31 @@
           <span class="view-sidebar-badge" id="uploadSidebarErrorCount">0</span>
         </button>
       </nav>
-      <div class="upload-sidebar-lower">
-        <div class="view-sidebar-section upload-availability" id="uploadAvailability">
-          <span class="view-sidebar-section-label">Verfügbarkeit</span>
-          <div class="view-sidebar-summary">
-            <span>Bereite Accounts</span>
-            <strong id="uploadSidebarAccountsCount">0</strong>
-          </div>
-          <div class="view-sidebar-summary view-sidebar-summary-block hoster-summary" id="hosterSummary">Keine Upload-Ziele ausgewählt</div>
-        </div>
-        <div class="upload-telemetry" id="uploadTelemetry" aria-label="Upload-Statistik">
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Gesamt</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryTotal" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbindungen</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryConnections" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibend</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRemaining" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibende Größe</span><strong class="upload-telemetry-value" id="uploadTelemetryRemainingSize" aria-label="0 B">0 B</strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Läuft</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRunning" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fertig</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryCompleted" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
-          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fehler</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryFailed" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+      <div class="upload-sidebar-lower upload-telemetry" id="uploadTelemetry" aria-label="Upload-Statistik">
+        <div class="upload-overview-top">
+          <h3 class="upload-overview-heading"><svg aria-hidden="true"><use href="#icon-upload"></use></svg><span>Upload-Übersicht</span></h3>
+          <div class="upload-size-hero"><span class="upload-telemetry-label">Verbleibende Größe</span><strong class="upload-telemetry-value" id="uploadTelemetryRemainingSize" aria-label="0 B">0 B</strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">Geschwindigkeit</span><strong class="upload-telemetry-value" id="uploadTelemetrySpeed" aria-label="0 B/s">0 B/s</strong></div>
           <div class="upload-telemetry-row"><span class="upload-telemetry-label">ETA</span><strong class="upload-telemetry-value" id="uploadTelemetryEta" aria-label="--:--">--:--</strong></div>
+        </div>
+        <div class="upload-overview-bottom">
+          <div class="upload-overview-tiles">
+            <div class="upload-telemetry-row"><span class="upload-telemetry-label">Läuft</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRunning" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+            <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbleibend</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryRemaining" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          </div>
+          <div class="upload-overview-divider"></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Gesamt</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryTotal" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fertig</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryCompleted" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Fehler</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryFailed" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-telemetry-row"><span class="upload-telemetry-label">Verbindungen</span><strong class="upload-telemetry-value upload-rolling-value" id="uploadTelemetryConnections" data-numeric-value="0" aria-label="0"><span>0</span></strong></div>
+          <div class="upload-overview-divider"></div>
+          <div class="upload-availability" id="uploadAvailability" aria-label="Verfügbarkeit">
+            <div class="view-sidebar-summary upload-ready-accounts">
+              <span><span class="upload-ready-dot" aria-hidden="true"></span>Bereite Accounts</span>
+              <strong id="uploadSidebarAccountsCount">0</strong>
+            </div>
+            <div class="view-sidebar-summary view-sidebar-summary-block hoster-summary" id="hosterSummary">Keine Upload-Ziele ausgewählt</div>
+          </div>
         </div>
       </div>
     </aside>
