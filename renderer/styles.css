@@ -5693,3 +5693,67 @@ input[type="checkbox"] {
 @media (max-width: 999px) {
   .settings-layout.settings-layout-grouped { grid-template-columns: 276px minmax(0, 1fr); }
 }
+
+#accounts-view .account-hosts-panel {
+  flex: 0 0 auto;
+  gap: 10px;
+  border-top-color: transparent;
+}
+
+.account-hosts-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  padding: 15px 16px;
+  border-radius: 8px;
+  background: #2d384c;
+  color: #f1f4f9;
+  font: 500 17px/1.35 'Segoe UI', Arial, sans-serif;
+}
+
+.account-hosts-heading svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: #b9c2d0;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#accountsSidebarHosters { gap: 8px; }
+
+#accountsSidebarHosters .view-sidebar-hoster {
+  min-height: 50px;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 9px 14px;
+  border: 1px solid #42464f;
+  border-radius: 7px;
+  background: #25272b;
+  color: #f1f4f9;
+  font: 400 14px/1.5 'Segoe UI', Arial, sans-serif;
+}
+
+#accountsSidebarHosters .view-sidebar-copy {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#accountsSidebarHosters .view-sidebar-badge {
+  min-width: 26px;
+  height: 26px;
+  font-size: 14px;
+  font-weight: 500;
+  background: #b9cdf7;
+  color: #14213a;
+}
+
+#accounts-view > .view-sidebar > .view-sidebar-footnote {
+  flex: 0 0 auto;
+  color: #b9c2d0;
+  font-size: 12px;
+}
