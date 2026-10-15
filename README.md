@@ -318,6 +318,25 @@ The previous diagnostic operations map to these MCP tools:
 
 Screen streaming and arbitrary mouse/keyboard control are intentionally not MCP operations. CAPTCHA and interactive authentication challenges remain local; supported one-time account codes can be submitted with `mhu_accounts_otp`. Granting new directories, changing MCP permissions and obtaining the connection code are local security decisions. These boundaries do not disable ordinary upload, queue, account, automation, history or backup operations exposed through the structured tool catalog.
 
+### Diagnostic artifacts and file transfer
+
+`mhu_diagnostics_files` lists the application's startup journals, native Chromium logs and automatically saved startup failure reports. `mhu_diagnostics_read` reads one listed artifact with bounded pagination. Credentials are filtered from the complete text before pages are returned; offsets refer to characters in the filtered text. Files larger than 8 MiB are rejected by this reader. The existing bounded log-tail tools remain available for larger application logs. Job-specific logs, account cooldowns and manual-action states are exposed through `mhu_queue_job_log` and `mhu_accounts_runtime`; the diagnostic summary also includes current upload-manager and renderer status.
+
+Full file transfer needs both read and directory permissions, plus an additional local **Transfer file contents** approval for the selected directory. Existing grants do not acquire this approval automatically. Transferring a file does not require deletion permission and never changes the source. Application credential storage and hard-linked files cannot be exported through this channel. A granted user file may itself contain private information; approve only directories whose contents may be transferred.
+
+Use `mhu_files_transfer_open` to prepare a specific file inside an approved directory, then `mhu_files_transfer_get` until the state is `ready`. The result includes its size, SHA-256 and a token-free `media-mcp-file:v1:` reference. That reference identifies the transfer but grants no access by itself: the receiver also needs the installation's separate connection code. `mhu_files_transfer_read` supplies checked chunks to the receiver; do not paste binary chunks into a chat. `mhu_files_transfer_list` and `mhu_files_transfer_close` inspect or close the current client's handles. Transfers are limited to four at once, 32 GiB per file, one-MiB chunks, a one-hour absolute lifetime and ten minutes without activity. Removing the grant, changing local permissions or disabling access invalidates open transfers.
+
+On the receiving computer, install the development dependencies and keep the connection code in a private local file outside Git. The receiver uses only the fixed HTTPS relay, refuses redirects and does not send files to arbitrary URLs:
+
+```powershell
+node scripts/pull-mcp-file.mjs <private-code-file> <rootId> <relativePath> <destination>
+node scripts/pull-mcp-file.mjs <private-code-file> --transfer <file-reference> <destination>
+```
+
+The receiver writes an exclusive `.mcp-part` file and a resumable checkpoint without credentials. It verifies each block, rechecks the complete file from disk, and checks size and SHA-256 before publishing the destination without overwriting an existing file. Add `--resume` to continue an interrupted transfer; the saved prefix and source identity are checked again. An expired transfer can be reopened when the original directory and relative path are supplied. Incomplete files stay available for recovery after a failure. Neither the original file nor an existing destination is deleted.
+
+After a hard process termination, a `.mcp-lock` file may remain. Remove only that exact lock after confirming that no receiver is still running for the destination, then retry with `--resume`. Preserve the partial file and checkpoint. The receiver does not automatically remove an unknown or potentially active lock.
+
 ## Development and Windows builds
 
 Install dependencies and start the Electron application:

@@ -12,6 +12,8 @@
     ['Lesen und Diagnose', 'Read and diagnostics'],
     ['App steuern', 'Control app'],
     ['Freigegebene Ordner', 'Granted directories'],
+    ['Dateiinhalte übertragen', 'Transfer file contents'],
+    ['Dateiinhalte werden nur nach zusätzlicher Freigabe pro Ordner übertragen. Bestehende Ordnerfreigaben erlauben dies nicht automatisch.', 'File contents are transferred only after additional permission for each directory. Existing directory grants do not allow this automatically.'],
     ['Zugangsdaten explizit auslesen', 'Explicitly reveal secrets'],
     ['Speichern und aktivieren', 'Save and enable'],
     ['Deaktivieren und widerrufen', 'Disable and revoke'],

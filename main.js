@@ -4036,7 +4036,8 @@ async function startMcpService() {
   const allowed = new Set(['get-app-info', 'automation:get-status', 'run-health-check', 'save-config', 'save-global-settings', 'save-hoster-settings',
     'automation:pause-after-active', 'automation:resume', 'reset-session-failed-account', 'folder-monitor:stop', 'folder-monitor:start', 'folder-monitor:test-scan',
     'folder-monitor:reconcile', 'get-history', 'prune-history', 'clear-history', 'cloud-log:status', 'cloud-log:configure', 'cloud-log:backfill',
-    'online-backup:list-managed', 'online-backup:create-managed', 'online-backup:delete-managed', 'online-backup:restore', 'app:check-updates', 'app:install-update', 'app:restart', 'app:quit']);
+    'online-backup:list-managed', 'online-backup:create-managed', 'online-backup:delete-managed', 'online-backup:restore', 'app:check-updates', 'app:install-update', 'app:restart', 'app:quit',
+    'get-job-log', 'get-session-failed-account-states']);
   const invoke = async (channel, ...args) => {
     if (!allowed.has(channel) || !mcpLocalHandlers.has(channel) || !mainWindow || mainWindow.isDestroyed()) throw new McpAccessError('ACTION_UNAVAILABLE');
     return mcpLocalHandlers.get(channel)({ sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame }, ...args);
@@ -4048,7 +4049,20 @@ async function startMcpService() {
     return mcpLocalHandlers.get(channel)(event, ...args);
   };
   const handlers = createMcpApp({ loadConfig: () => configStore.load(), invoke, invokeGuarded, renderer: mcpRendererAction, collectors: createAppCollectors(),
-    getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed });
+    getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
+    getCapabilities: () => mcpService?.capabilities() || [],
+    getProtectedPaths: () => [app.getPath('userData'), configStore.filePath, configStore.historyPath, configStore.automationCompletionPath],
+    getInstallationId: () => mcpService?.store.value.identity?.installationId,
+    getRuntimeDiagnostics: () => ({
+      uploads: uploadManager ? { ...uploadManager.getDiagnostics(), running: uploadManager.running, stoppingAfterActive: uploadManager.isStoppingAfterActive(), admissionPending: uploadManager.queueAdmissionPending } : null,
+      renderer: { available: !!mainWindow && !mainWindow.isDestroyed(), initialized: closeHandshakeReady, generation: folderMonitorRendererGeneration },
+      memory: process.memoryUsage()
+    }),
+    getDiagnosticSources: () => [
+      { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, directory: path.dirname(startupDiagnostics.filePath) },
+      { label: 'startup-diagnostics.jsonl.1', path: startupDiagnostics.filePath + '.1', directory: path.dirname(startupDiagnostics.filePath) },
+      ...(nativeStartupLog ? [...nativeStartupLog.files(), ...nativeStartupLog.reports()].map(file => ({ ...file, directory: nativeStartupLog.logDirectory })) : [])
+    ] });
   mcpService = new McpService({ directory: app.getPath('userData'), encrypt: secretStore.encryptField, decrypt: secretStore.decryptField,
     handlers, version: app.getVersion(), loadConfig: () => configStore.load(), dialog, getWindow: () => mainWindow,
     onStatus: status => safeSend('mcp:status', status),
@@ -4098,15 +4112,22 @@ ipcMain.handle('mcp:add-grant', async event => {
   return chosen.canceled ? mcpService.state() : mcpService.addGrant(chosen.filePaths[0]);
 });
 ipcMain.handle('mcp:update-grant', async (event, args) => {
-  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService || typeof args?.id !== 'string' || typeof args.remove !== 'boolean' || typeof args.readOnly !== 'boolean') throw new Error('MCP_ACCESS_DENIED');
-  if (!args.remove && !args.readOnly) {
-    const grant = mcpService.store.value.grants.find(item => item.id === args.id);
-    if (!grant) throw new Error('MCP_ACCESS_DENIED');
+  if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService || typeof args?.id !== 'string' || typeof args.remove !== 'boolean' || typeof args.readOnly !== 'boolean'
+    || (args.allowTransfer !== undefined && typeof args.allowTransfer !== 'boolean')) throw new Error('MCP_ACCESS_DENIED');
+  const grant = mcpService.store.value.grants.find(item => item.id === args.id);
+  if (!grant) throw new Error('MCP_ACCESS_DENIED');
+  if (!args.remove && !args.readOnly && grant.readOnly !== false) {
     const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('Dateien in diesem Ordner per MCP löschen dürfen?', 'Allow MCP file deletion in this directory?'), detail: grant.path,
       buttons: ['Abbrechen / Cancel', 'Erlauben / Allow'], defaultId: 0, cancelId: 0, noLink: true });
     if (result.response !== 1) return mcpService.state();
   }
-  return mcpService.updateGrant(args.id, args.remove, args.readOnly);
+  if (!args.remove && args.allowTransfer === true && grant.allowTransfer !== true) {
+    const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('Dateiinhalte aus diesem Ordner per MCP übertragen dürfen?', 'Allow MCP to transfer file contents from this directory?'),
+      detail: grant.path + '\n\n' + shellText('Freigegebene Dateien können vertrauliche Inhalte enthalten. Die Originale bleiben unverändert.', 'Granted files may contain confidential content. Originals remain unchanged.'),
+      buttons: ['Abbrechen / Cancel', 'Erlauben / Allow'], defaultId: 0, cancelId: 0, noLink: true });
+    if (result.response !== 1) return mcpService.state();
+  }
+  return mcpService.updateGrant(args.id, args.remove, args.readOnly, args.allowTransfer);
 });
 
 const retiredRemoteState = Object.freeze({ retired: true, enabled: false, running: false, token: '', code: '', port: null, clientCount: 0 });

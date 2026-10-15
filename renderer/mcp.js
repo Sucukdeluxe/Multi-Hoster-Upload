@@ -96,10 +96,13 @@
       const name = document.createElement('span'); name.textContent = grant.path;
       const label = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !grant.readOnly;
       label.append(checkbox, text(' Schreibzugriff', ' Write access'));
-      checkbox.onchange = () => act(() => window.api.mcpUpdateGrant({ id: grant.id, remove: false, readOnly: !checkbox.checked }));
+      checkbox.onchange = () => act(() => window.api.mcpUpdateGrant({ id: grant.id, remove: false, readOnly: !checkbox.checked, allowTransfer: grant.allowTransfer === true }));
+      const transferLabel = document.createElement('label'); const transfer = document.createElement('input'); transfer.type = 'checkbox'; transfer.checked = grant.allowTransfer === true;
+      transferLabel.append(transfer, text(' Dateiinhalte übertragen', ' Transfer file contents'));
+      transfer.onchange = () => act(() => window.api.mcpUpdateGrant({ id: grant.id, remove: false, readOnly: grant.readOnly, allowTransfer: transfer.checked }));
       const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-sm btn-secondary'; remove.textContent = text('Entfernen', 'Remove');
       remove.onclick = () => act(() => window.api.mcpUpdateGrant({ id: grant.id, remove: true, readOnly: true }));
-      row.append(name, label, remove); return row;
+      row.append(name, label, transferLabel, remove); return row;
     }));
   };
   const act = async action => {
@@ -114,7 +117,8 @@
     <div class="mcp-actions"><button class="btn btn-sm btn-primary" data-mcp-action="enable">${text('Speichern und aktivieren','Save and enable')}</button><button class="btn btn-sm btn-secondary" data-mcp-action="disable">${text('Deaktivieren und widerrufen','Disable and revoke')}</button><button class="btn btn-sm btn-secondary" data-mcp-action="copy">${text('Verbindungscode kopieren','Copy connection code')}</button><button class="btn btn-sm btn-secondary" data-mcp-action="rotate">${text('Zugang erneuern','Rotate access')}</button></div>
     <dl class="mcp-status"><div><dt>Status</dt><dd data-mcp-status>—</dd></div><div><dt>${text('Letzter Kontakt','Last contact')}</dt><dd data-mcp-contact>—</dd></div><div><dt>${text('Ausstehende Widerrufe','Pending revocations')}</dt><dd data-mcp-pending>0</dd></div></dl>
     <p>${text('Der Verbindungscode ist ein Zugangsschlüssel. Er wird weder im Backup gespeichert noch auf andere Installationen übertragen. Löschungen und andere gefährliche Aktionen verlangen eine lokale Bestätigung.', 'The connection code is a credential. It is not stored in backups or transferred to other installations. Deletions and other dangerous actions require local confirmation.')}</p>
-    <div class="mcp-actions"><button class="btn btn-sm btn-secondary" data-mcp-action="grant">${text('Ordner freigeben','Grant directory')}</button></div><div data-mcp-grants></div>
+    <div class="mcp-actions"><button class="btn btn-sm btn-secondary" data-mcp-action="grant">${text('Ordner freigeben','Grant directory')}</button></div>
+    <p>${text('Dateiinhalte werden nur nach zusätzlicher Freigabe pro Ordner übertragen. Bestehende Ordnerfreigaben erlauben dies nicht automatisch.', 'File contents are transferred only after additional permission for each directory. Existing directory grants do not allow this automatically.')}</p><div data-mcp-grants></div>
   </section>`;
   window.bindMcpSettings = async () => {
     const area = document.getElementById('mcpControls'); if (!area) return;
