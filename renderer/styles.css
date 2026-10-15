@@ -5532,16 +5532,36 @@ input[type="checkbox"] {
   margin-bottom: 16px;
 }
 .cloud-log-settings > .hint { margin: 0 0 12px; line-height: 1.5; }
-.cloud-log-key-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
-.cloud-log-key-row label { flex: 0 0 160px; font-size: 12px; }
-.cloud-log-key-row input { flex: 1 1 220px; min-width: 150px; }
-.cloud-log-status { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 0; }
+.cloud-log-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.cloud-log-heading > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
+.cloud-log-heading-label { font-size: 13px; color: var(--text-muted); }
+.cloud-log-phase { display: inline-flex; align-items: center; gap: 9px; min-height: 38px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-input); font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }
+.cloud-log-phase::before { content: ''; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: currentColor; }
+.cloud-log-phase[data-phase="ready"] { color: #a6e8c2; background: #23382e; border-color: #3e6650; }
+.cloud-log-phase[data-phase="syncing"], .cloud-log-phase[data-phase="checking"] { color: #c6d8ff; background: #29354a; border-color: #51668a; }
+.cloud-log-phase[data-phase="error"] { color: #ffb1b1; background: #432b2b; border-color: #754747; }
+.cloud-log-key-state { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; line-height: 1.4; }
+.cloud-log-key-state[data-saved="true"] { color: #a6e8c2; }
+.cloud-log-key-state[data-saved="true"]::before { content: '✓'; font-weight: 700; }
+.cloud-log-key-state[data-saved="false"] { color: var(--text-muted); }
+.cloud-log-key-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 10px; align-items: center; margin-bottom: 12px; }
+.cloud-log-key-row label { font-size: 13px; }
+.cloud-log-key-row input { width: 100%; min-width: 0; }
+.cloud-log-key-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 10px; }
+.cloud-log-status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 20px; margin: 18px 0 0; }
 .cloud-log-status > div { min-width: 0; }
 .cloud-log-status dt { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
-.cloud-log-status dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.cloud-log-status dd { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.cloud-log-backfill { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.cloud-log-backfill > div { flex: 1 1 260px; min-width: 0; }
+.cloud-log-backfill strong { font-size: 14px; }
+.cloud-log-backfill .hint { margin: 6px 0 0; font-size: 12px; line-height: 1.6; }
+.cloud-log-backfill > button { max-width: 100%; white-space: normal; min-height: 38px; }
+.cloud-log-backfill > p { flex: 0 0 100%; }
 .cloud-log-settings #cloudLogError:not([hidden]) { margin: 12px 0 0; padding: 10px; border: 1px solid var(--border); border-radius: 5px; }
 @media (max-width: 900px) {
-  .cloud-log-key-row label { flex-basis: 100%; }
+  .cloud-log-key-row { grid-template-columns: minmax(0, 1fr); }
+  .cloud-log-key-actions { grid-column: 1; }
   .cloud-log-status { grid-template-columns: minmax(0, 1fr); }
 }
 

@@ -2060,6 +2060,19 @@ ipcMain.handle('cloud-log:configure', async (event, payload = {}) => {
   }
 });
 
+ipcMain.handle('cloud-log:backfill', async event => {
+  if (!isTrustedOnlineBackupIpcEvent(event)) return { ok: false, errorCode: 'ACCESS_DENIED' };
+  assertConfigWriteAllowed();
+  try {
+    await Promise.all([...cloudLogWrites]);
+    const result = await cloudLogSync.backfill(_cachedUploadLogTarget?.path || getLogFilePath());
+    return { ok: true, result, status: cloudLogSync.status() };
+  } catch (error) {
+    const allowed = ['CONNECTION_REQUIRED', 'LOG_NOT_FOUND', 'LOG_READ_FAILED', 'LOG_TOO_LARGE', 'LOCAL_WRITE_FAILED', 'BACKFILL_CANCELED'];
+    return { ok: false, errorCode: allowed.includes(error?.code) ? error.code : 'LOG_READ_FAILED', status: cloudLogSync.status() };
+  }
+});
+
 ipcMain.handle('save-config', async (_event, config) => {
   assertConfigWriteAllowed();
   if (config?.globalSettings) config.globalSettings.cloudLogSync = configStore.load().globalSettings.cloudLogSync;

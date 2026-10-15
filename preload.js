@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('api', {
   importUploadLog: () => ipcRenderer.invoke('import-upload-log'),
   getCloudLogStatus: () => ipcRenderer.invoke('cloud-log:status'),
   configureCloudLog: (settings) => ipcRenderer.invoke('cloud-log:configure', settings),
+  backfillCloudLog: () => ipcRenderer.invoke('cloud-log:backfill'),
   onCloudLogStatus: callback => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('cloud-log:status', listener);

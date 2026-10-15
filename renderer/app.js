@@ -6404,6 +6404,7 @@ async function runHealthCheck(mode = 'manual', requestedHosters = null) {
 
 // --- Settings ---
 let cloudLogBusy = false;
+let cloudLogBackfillBusy = false;
 let cloudLogLastStatus = null;
 const cloudLogErrors = {
   KEY_STORAGE_UNAVAILABLE: 'Der API-Key konnte nicht im sicheren Zugangsdaten-Speicher gesichert werden.',
@@ -6422,7 +6423,12 @@ const cloudLogErrors = {
   INVALID_RESPONSE: 'Clouddrop hat eine unerwartete Antwort geliefert.',
   VERIFICATION_FAILED: 'Die Testdatei konnte nicht verifiziert werden.',
   RESPONSE_TOO_LARGE: 'Die Clouddrop-Antwort überschreitet die zulässige Größe.',
-  LINE_TOO_LARGE: 'Ein Log-Eintrag überschreitet die zulässige Größe.'
+  LINE_TOO_LARGE: 'Ein Log-Eintrag überschreitet die zulässige Größe.',
+  CONNECTION_REQUIRED: 'Bitte die CloudDrop-Verbindung zuerst prüfen und aktivieren.',
+  LOG_NOT_FOUND: 'Die aktuelle lokale Upload-Log-Datei wurde noch nicht angelegt.',
+  LOG_READ_FAILED: 'Die aktuelle lokale Upload-Log-Datei konnte nicht vollständig gelesen werden. Bereits übernommene Einträge bleiben gespeichert.',
+  LOG_TOO_LARGE: 'Die Upload-Log-Datei überschreitet das sichere Leselimit.',
+  BACKFILL_CANCELED: 'Die Nachsynchronisierung wurde beendet. Bereits übernommene Einträge bleiben gespeichert.'
 };
 
 function renderCloudLogStatus(status) {
@@ -6430,14 +6436,34 @@ function renderCloudLogStatus(status) {
   if (!status || !document.getElementById('cloudLogPhase')) return;
   const phases = { disabled: 'Inaktiv', checking: 'Verbindung wird geprüft…', ready: 'Aktiv', syncing: 'Wird synchronisiert…', error: 'Synchronisierung fehlgeschlagen' };
   document.getElementById('cloudLogPhase').textContent = localizeUiText(phases[status.phase] || phases.disabled);
+  document.getElementById('cloudLogPhase').dataset.phase = status.phase || 'disabled';
+  const keyState = document.getElementById('cloudLogKeyState');
+  if (keyState) {
+    keyState.textContent = localizeUiText(status.hasApiKey ? 'API-Key gespeichert' : 'Kein API-Key gespeichert');
+    keyState.dataset.saved = String(Boolean(status.hasApiKey));
+  }
   document.getElementById('cloudLogIp').textContent = status.ip || '—';
   document.getElementById('cloudLogLastSync').textContent = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString(getUiLocale()) : localizeUiText('Noch nicht synchronisiert');
   document.getElementById('cloudLogPending').textContent = (Number(status.pendingFiles) || 0).toLocaleString(getUiLocale());
   const key = document.getElementById('cloudLogKeyInput');
   key.placeholder = localizeUiText(status.hasApiKey ? 'Gespeicherten API-Key verwenden' : 'API-Key eingeben');
-  document.getElementById('cloudLogActivateBtn').disabled = cloudLogBusy;
-  document.getElementById('cloudLogDisableBtn').disabled = cloudLogBusy || !status.enabled;
+  const busy = cloudLogBusy || cloudLogBackfillBusy || status.backfillRunning;
+  document.getElementById('cloudLogActivateBtn').disabled = busy;
+  document.getElementById('cloudLogDisableBtn').disabled = busy || !status.enabled;
+  const backfillButton = document.getElementById('cloudLogBackfillBtn');
+  if (backfillButton) {
+    backfillButton.disabled = busy || !status.enabled || !['ready', 'syncing'].includes(status.phase);
+    backfillButton.textContent = localizeUiText(status.backfillRunning || cloudLogBackfillBusy ? 'Vorhandenes Log wird eingelesen…' : 'Vorhandenes Log nachsynchronisieren');
+  }
+  const backfillResult = document.getElementById('cloudLogBackfillResult');
+  if (backfillResult) {
+    backfillResult.hidden = !status.backfillResult;
+    backfillResult.textContent = status.backfillResult
+      ? localizeUiText('Neu übernommen') + ': ' + Number(status.backfillResult.added || 0).toLocaleString(getUiLocale())
+        + ' · ' + localizeUiText('Bereits vorhanden') + ': ' + Number(status.backfillResult.skipped || 0).toLocaleString(getUiLocale())
+      : '';
+  }
   const error = document.getElementById('cloudLogError');
   error.hidden = !status.errorCode;
   error.textContent = status.errorCode ? localizeUiText(cloudLogErrors[status.errorCode] || cloudLogErrors.CONNECTION_FAILED) : '';
@@ -6448,7 +6474,7 @@ async function refreshCloudLogStatus() {
 }
 
 async function configureCloudLog(enabled) {
-  if (cloudLogBusy) return;
+  if (cloudLogBusy || cloudLogBackfillBusy || cloudLogLastStatus?.backfillRunning) return;
   cloudLogBusy = true;
   const key = document.getElementById('cloudLogKeyInput');
   document.getElementById('cloudLogActivateBtn').disabled = true;
@@ -6465,6 +6491,28 @@ async function configureCloudLog(enabled) {
     showCopyToast(cloudLogErrors.CONNECTION_FAILED, 6500, 'error');
   } finally {
     cloudLogBusy = false;
+    await refreshCloudLogStatus();
+  }
+}
+
+async function backfillCloudLog() {
+  if (cloudLogBusy || cloudLogBackfillBusy || cloudLogLastStatus?.backfillRunning) return;
+  cloudLogBackfillBusy = true;
+  renderCloudLogStatus(cloudLogLastStatus);
+  try {
+    const response = await window.api.backfillCloudLog();
+    if (response?.status) renderCloudLogStatus(response.status);
+    if (response?.ok) {
+      showCopyToast(response.result?.added > 0
+        ? 'Vorhandene Log-Einträge wurden zur Synchronisierung übernommen.'
+        : 'Keine fehlenden Log-Einträge gefunden.');
+    } else {
+      showCopyToast(cloudLogErrors[response?.errorCode] || cloudLogErrors.LOG_READ_FAILED, 6500, 'error');
+    }
+  } catch {
+    showCopyToast(cloudLogErrors.LOG_READ_FAILED, 6500, 'error');
+  } finally {
+    cloudLogBackfillBusy = false;
     await refreshCloudLogStatus();
   }
 }
@@ -6851,20 +6899,30 @@ function renderSettings() {
       </div>
       <div class="settings-section-label">Clouddrop-Log-Synchronisierung</div>
       <div class="cloud-log-settings">
+        <div class="cloud-log-heading" aria-live="polite">
+          <div><span class="cloud-log-heading-label">Status</span><strong class="cloud-log-phase" id="cloudLogPhase" data-phase="disabled">Inaktiv</strong></div>
+          <span class="cloud-log-key-state" id="cloudLogKeyState" data-saved="false">Kein API-Key gespeichert</span>
+        </div>
         <p class="hint">Erfolgreiche Uploads automatisch als TXT in einem Clouddrop-Ordner mit der öffentlichen IP-Adresse dieses Geräts speichern. Die Übertragung beginnt mit der Aktivierung und folgt dem gewählten Log-Datei-Modus.</p>
         <div class="cloud-log-key-row">
           <label for="cloudLogKeyInput">Clouddrop-API-Key</label>
           <input type="password" class="key-input" id="cloudLogKeyInput" autocomplete="off" spellcheck="false" placeholder="API-Key eingeben">
+          <div class="cloud-log-key-actions">
           <button class="btn btn-secondary" type="button" id="cloudLogActivateBtn">Prüfen und aktivieren</button>
           <button class="btn btn-secondary" type="button" id="cloudLogDisableBtn">Deaktivieren</button>
+          </div>
         </div>
         <p class="hint">API-Key ohne Zielordner-Bindung verwenden. Bei der Prüfung wird eine leere Testdatei im IP-Ordner erstellt. Die öffentliche IP wird über ipify ermittelt.</p>
         <dl class="cloud-log-status" aria-live="polite">
-          <div><dt>Status</dt><dd id="cloudLogPhase">Inaktiv</dd></div>
           <div><dt>IP-Ordner</dt><dd id="cloudLogIp">—</dd></div>
           <div><dt>Zuletzt synchronisiert</dt><dd id="cloudLogLastSync">—</dd></div>
-          <div><dt>Ausstehende Dateien</dt><dd id="cloudLogPending">0</dd></div>
+          <div><dt>Ausstehende Log-Dateien</dt><dd id="cloudLogPending">0</dd></div>
         </dl>
+        <div class="cloud-log-backfill">
+          <div><strong>Vorhandene Upload-Logs</strong><p class="hint">Überträgt fehlende Einträge aus der aktuellen lokalen Log-Datei. Bereits übernommene Einträge werden übersprungen; laufende Uploads bleiben aktiv.</p></div>
+          <button class="btn btn-secondary" type="button" id="cloudLogBackfillBtn" disabled>Vorhandenes Log nachsynchronisieren</button>
+          <p class="hint" id="cloudLogBackfillResult" role="status" hidden></p>
+        </div>
         <p class="hint" id="cloudLogError" role="status" hidden></p>
       </div>
       <div class="settings-option verbose-logging-option">
@@ -7262,6 +7320,7 @@ function renderSettings() {
   void refreshCloudLogStatus();
   document.getElementById('cloudLogActivateBtn')?.addEventListener('click', () => configureCloudLog(true));
   document.getElementById('cloudLogDisableBtn')?.addEventListener('click', () => configureCloudLog(false));
+  document.getElementById('cloudLogBackfillBtn')?.addEventListener('click', backfillCloudLog);
   const testWebhookBtn = document.getElementById('testWebhookBtn');
   if (testWebhookBtn) {
     testWebhookBtn.addEventListener('click', async () => {
