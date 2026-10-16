@@ -23,7 +23,7 @@ const { createDoodstreamOtpCoordinator, selectUploadAuth } = require('./lib/acco
 const { createAccountCooldownController, createAccountPicker, selectFallbackAccount } = require('./lib/account-rotation');
 const ClouddropUploader = require('./lib/clouddrop-upload');
 const { CloudLogSync } = require('./lib/cloud-log-sync');
-const { checkForUpdate, prepareUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
+const { checkForUpdate, prepareUpdate, verifyPreparedUpdate, launchVerifiedUpdate, launchPreparedUpdate, abortUpdate, createUpdateAnnouncementState } = require('./lib/updater');
 const backupCrypto = require('./lib/backup-crypto');
 const { downloadOnlineBackup, downloadRecoveryPublicKey, normalizeOnlineBackupRetention } = require('./lib/online-backup');
 const { createOnlineBackupKeyring } = require('./lib/online-backup-keyring');
@@ -47,6 +47,8 @@ const { normalizeAutomationSettings, automationCompletionKey, createAutomationCo
 const { McpService } = require('./lib/mcp-service');
 const { createMcpApp } = require('./lib/mcp-app');
 const { McpAccessError } = require('./lib/mcp-access');
+const { runtimePerformance } = require('./lib/performance-monitor');
+const { McpUpdate } = require('./lib/mcp-update');
 const mcpLocalHandlers = new Map();
 const mcpRawHandle = ipcMain.handle.bind(ipcMain);
 ipcMain.handle = (channel, handler) => {
@@ -98,12 +100,15 @@ if (_perfOn) {
     try { p = fn.call(this, evt, ...args); }
     catch (e) { _ipcLog(`ipc ${channel} sync-throw wall=${(performance.now() - t0).toFixed(0)}ms`); throw e; }
     const sync = performance.now() - t0;
+    runtimePerformance.record(`ipc-sync.${channel.replace(/[^a-z0-9_.:-]/gi, '').toLowerCase()}`, sync);
     if (p && typeof p.then === 'function') {
       return Promise.resolve(p).finally(() => {
         const total = performance.now() - t0;
+        runtimePerformance.record(`ipc.${channel.replace(/[^a-z0-9_.:-]/gi, '').toLowerCase()}`, total);
         if (total >= IPC_SLOW_MS) _ipcLog(`ipc ${channel} wall=${total.toFixed(0)}ms sync=${sync.toFixed(0)}ms`);
       });
     }
+    runtimePerformance.record(`ipc.${channel.replace(/[^a-z0-9_.:-]/gi, '').toLowerCase()}`, sync);
     if (sync >= IPC_SLOW_MS) _ipcLog(`ipc ${channel} wall=${sync.toFixed(0)}ms sync`);
     return p;
   });
@@ -135,6 +140,8 @@ let preparedUpdate = null;
 let updatePreparationPromise = null;
 let updateQuitPending = false;
 let preparedUpdateLaunchStarted = false;
+let mcpUpdateHandoff = null;
+let mcpUpdateResuming = false;
 let updateCheckInterval = null;
 const updateAnnouncementState = createUpdateAnnouncementState();
 let _lastImportPath = null;
@@ -142,6 +149,54 @@ let dropTargetWindow = null;
 let tray = null;
 let _cachedLogSettings = null;
 const configStore = new ConfigStore(app);
+const mcpUpdate = new McpUpdate({
+  directory: app.getPath('userData'), version: () => app.getVersion(),
+  canUpdate: () => mcpService?.capabilities().includes('updates') === true,
+  supported: async () => app.isPackaged && process.platform === 'win32' && !process.env.PORTABLE_EXECUTABLE_FILE
+    && await fs.promises.stat(path.join(path.dirname(process.execPath), 'Uninstall Multi-Hoster-Upload.exe')).then(stat => stat.isFile(), () => false),
+  check: () => checkForUpdate({ forceRefresh: true }),
+  prepare: (checkResult, progress) => prepareUpdate(progress, { checkResult }),
+  verify: verifyPreparedUpdate,
+  park: async () => {
+    const snapshot = await internalUpdateRenderer('update-park');
+    const resume = { ...snapshot, monitorRunning: folderMonitor.running };
+    return resume;
+  },
+  drain: async guard => {
+    uploadManager?.finishAfterActive();
+    await stopFolderMonitor();
+    const deadline = Date.now() + 2 * 60 * 60 * 1000;
+    for (;;) {
+      if (!uploadManager && !activeUploadProducerTrackers.size) break;
+      guard();
+      if (Date.now() > deadline) throw new McpAccessError('UPDATE_DRAIN_TIMEOUT');
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await waitForConfigStoreWrites();
+  },
+  handoff: async prepared => {
+    if (!closeHandshakeReady || updatePreparationPromise || preparedUpdate) throw new McpAccessError('UPDATE_BUSY');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { rejectPendingUpdate(new Error('Update close timeout')); }, 15000);
+      mcpUpdateHandoff = { resolve: () => { clearTimeout(timer); resolve(); }, reject: error => { clearTimeout(timer); reject(error); } };
+      preparedUpdate = prepared;
+      updateQuitPending = true;
+      if (!requestClosePreparation()) rejectPendingUpdate(new Error('Update close unavailable'));
+    });
+  },
+  restore: async snapshot => {
+    mcpUpdateResuming = true;
+    try {
+      if (snapshot?.wasUploading && !configStore.load().globalSettings?.folderMonitor?.paused) await internalUpdateRenderer('update-resume', snapshot);
+      const settings = configStore.load().globalSettings?.folderMonitor;
+      if (snapshot?.monitorRunning && settings?.enabled && !settings.paused) await startFolderMonitor(settings);
+    } finally { mcpUpdateResuming = false; }
+  }
+});
+
+function internalUpdateRenderer(action, args = {}) {
+  return mcpRendererAction(action, args, { signal: new AbortController().signal, deadline: Date.now() + 120000, internalUpdate: true });
+}
 const cloudLogWrites = new Set();
 let cloudLogSettingsCache = null;
 const cloudLogSync = new CloudLogSync({
@@ -202,6 +257,7 @@ const activeUploadProducerTrackers = new Set();
 const settingsImportGate = createSettingsImportGate(() => !!(uploadManager && uploadManager.running));
 
 function assertConfigWriteAllowed() {
+  if (mcpUpdate.blocksTransfers() && !mcpUpdateResuming) throw new Error('MCP-Update wird vorbereitet');
   if (!settingsImportGate.canStartUpload()) throw new Error('Einstellungen werden gerade importiert');
 }
 
@@ -314,6 +370,7 @@ function rejectPendingUpdate(error) {
   preparedUpdate = null;
   updateQuitPending = false;
   preparedUpdateLaunchStarted = false;
+  if (mcpUpdateHandoff) { const pending = mcpUpdateHandoff; mcpUpdateHandoff = null; pending.reject(error); }
   safeSend('app:update-progress', {
     stage: 'error',
     error: error && error.message ? error.message : String(error || 'Einstellungen konnten vor dem Update nicht gespeichert werden')
@@ -1757,6 +1814,7 @@ function createWindow() {
   });
 
   mainWindow.webContents.on('render-process-gone', async (_event, details) => {
+    runtimePerformance.event('renderer-crashed', { reason: String(details.reason || '').slice(0, 40) });
     startupDiagnostics.write('renderer-gone', { reason: details.reason, exitCode: details.exitCode, initialized: closeHandshakeReady });
     recordStartupIncident('renderer-crashed');
     folderMonitorRendererReadyGeneration = null;
@@ -1794,6 +1852,7 @@ function createWindow() {
   });
 
   mainWindow.webContents.on('unresponsive', () => {
+    runtimePerformance.event('renderer-unresponsive');
     startupDiagnostics.write('renderer-unresponsive', { initialized: closeHandshakeReady });
     _writeCrashLog('RENDERER UNRESPONSIVE', new Error('webContents unresponsive'));
     debugLog('RENDERER UNRESPONSIVE');
@@ -1875,6 +1934,7 @@ async function runAutomaticUpdateCheck(forceRefresh) {
 }
 
 app.whenReady().then(async () => {
+  await mcpUpdate.load().catch(() => logError('MCP update state unavailable'));
   if (!_hasSingleInstanceLock) return;
   startupDiagnostics.write('application-ready', { hardwareAcceleration: app.isHardwareAccelerationEnabled(), gpuFeatures: app.getGPUFeatureStatus() });
   void app.getGPUInfo('basic').then(info => {
@@ -1920,6 +1980,8 @@ app.whenReady().then(async () => {
   }
   createWindow();
   createTray();
+  runtimePerformance.start({ version: app.getVersion(), getTransfers: () => uploadManager?.getDiagnostics() || null,
+    pingRenderer: id => closeHandshakeReady && safeSend('performance:ping', id) });
   startupDiagnostics.write('window-load-dispatched');
   void cloudLogSync.start();
   void startMcpService();
@@ -1932,7 +1994,7 @@ app.whenReady().then(async () => {
   try {
     const launchConfig = configStore.load();
     const fm = launchConfig.globalSettings && launchConfig.globalSettings.folderMonitor;
-    if (fm && fm.enabled && fm.folderPath) {
+    if (fm && fm.enabled && fm.folderPath && !mcpUpdate.blocksTransfers()) {
       await startFolderMonitor(fm, { deferStartupReconcile: true });
     }
   } catch (err) {
@@ -2019,7 +2081,7 @@ ipcMain.handle('debug-log', (_event, msg) => {
 });
 
 ipcMain.handle('get-config', () => {
-  return configStore.load();
+  return { ...configStore.load(), mcpUpdatePending: mcpUpdate.blocksTransfers() };
 });
 
 ipcMain.handle('cloud-log:status', event => {
@@ -2392,6 +2454,7 @@ async function rejectPreparedUploadStart(manager, producerTracker, error, clearR
 }
 
 function preparedUploadStartGate(manager) {
+  if (mcpUpdate.blocksTransfers() && !mcpUpdateResuming) return 'MCP-Update wird vorbereitet';
   if (uploadManager !== manager) return 'Upload-Start wurde verworfen';
   if (closeFlushRequested) return 'Die Anwendung wird gerade beendet';
   if (configStore.load().globalSettings?.folderMonitor?.paused === true) return 'Automatik ist pausiert';
@@ -2468,6 +2531,7 @@ function startPreparedUploadBatch({ manager, tasks, producerTracker, recovery, i
 }
 
 ipcMain.handle('start-upload', async (_event, payload) => {
+  if (mcpUpdate.blocksTransfers() && !mcpUpdateResuming) return { error: 'MCP-Update wird vorbereitet' };
   if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
     return { error: 'Automatik ist pausiert' };
   }
@@ -2879,6 +2943,7 @@ ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
 });
 
 ipcMain.handle('add-jobs-to-batch', async (_event, payload) => {
+  if (mcpUpdate.blocksTransfers() && !mcpUpdateResuming) return { error: 'MCP-Update wird vorbereitet' };
   if (configStore.load().globalSettings?.folderMonitor?.paused === true) {
     return { error: 'Automatik ist pausiert' };
   }
@@ -3469,6 +3534,7 @@ ipcMain.handle('app:check-updates', async (_event, options) => {
 });
 
 ipcMain.handle('app:install-update', async event => {
+  if (mcpUpdate.blocksTransfers()) return { started: false, error: 'MCP-Update wird vorbereitet' };
   if (updatePreparationPromise || preparedUpdate || updateQuitPending) {
     return { started: false, error: 'Ein Update wird bereits vorbereitet' };
   }
@@ -3528,9 +3594,14 @@ ipcMain.on('app:startup-phase', (event, phase) => {
   if (phase === 'initialization-failed') recordStartupIncident('initialization-failed');
 });
 
+ipcMain.on('performance:pong', (event, id) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && Number.isSafeInteger(id)) runtimePerformance.rendererReply(id);
+});
+
 ipcMain.on('app:close-handshake-ready', (event) => {
   if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents) {
     closeHandshakeReady = true;
+    void mcpUpdate.recover({ rendererReady: true, connected: mcpService?.connection === 'online' });
     startupDiagnostics.write('application-initialized', { generation: folderMonitorRendererGeneration });
     void checkForUpdate().then(announceAvailableUpdate).catch((error) => {
       logError('update-check failed', error);
@@ -3574,6 +3645,13 @@ ipcMain.handle('app:finish-close', async (event, payload = true) => {
       await waitForCloseOperation(configStore.savePendingQueue(payload.pendingQueue, { allowDuringQuiesce: true }), 1000);
     }
     if (!isClosePreparationActive(attempt)) return false;
+    if (mcpUpdateHandoff) {
+      await mcpUpdate.markLaunching();
+      await launchVerifiedUpdate(preparedUpdate, path.dirname(process.execPath));
+      preparedUpdateLaunchStarted = true;
+      mcpUpdateHandoff.resolve();
+      mcpUpdateHandoff = null;
+    }
     closeFlushApproved = true;
     approved = true;
     setImmediate(() => {
@@ -3581,6 +3659,7 @@ ipcMain.handle('app:finish-close', async (event, payload = true) => {
     });
     return true;
   } catch {
+    if (mcpUpdateHandoff) await mcpUpdate.launchFailed().catch(() => {});
     restoreClosePreparation(attempt);
     return false;
   } finally {
@@ -4049,6 +4128,8 @@ async function startMcpService() {
     return mcpLocalHandlers.get(channel)(event, ...args);
   };
   const handlers = createMcpApp({ loadConfig: () => configStore.load(), invoke, invokeGuarded, renderer: mcpRendererAction, collectors: createAppCollectors(),
+    updates: mcpUpdate,
+    getPerformance: () => runtimePerformance.snapshot(),
     getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
     getCapabilities: () => mcpService?.capabilities() || [],
     getProtectedPaths: () => [app.getPath('userData'), configStore.filePath, configStore.historyPath, configStore.automationCompletionPath],
@@ -4065,7 +4146,10 @@ async function startMcpService() {
     ] });
   mcpService = new McpService({ directory: app.getPath('userData'), encrypt: secretStore.encryptField, decrypt: secretStore.decryptField,
     handlers, version: app.getVersion(), loadConfig: () => configStore.load(), dialog, getWindow: () => mainWindow,
-    onStatus: status => safeSend('mcp:status', status),
+    onStatus: status => {
+      safeSend('mcp:status', status);
+      void mcpUpdate.recover({ rendererReady: closeHandshakeReady, connected: status.connection === 'online' });
+    },
     requiresConfirmation: name => {
       if (!['mhu_queue_start', 'mhu_queue_retry', 'mhu_queue_resume', 'mhu_automation_start', 'mhu_automation_reconcile'].includes(name)) return false;
       const settings = configStore.load().globalSettings;
@@ -4079,7 +4163,7 @@ async function startMcpService() {
 ipcMain.handle('mcp:status', event => isTrustedOnlineBackupIpcEvent(event) ? mcpService?.state() || { available: false, connection: 'starting' } : null);
 ipcMain.handle('mcp:check', (event, id) => {
   const pending = mcpRendererRequests.get(id);
-  return !!(isTrustedOnlineBackupIpcEvent(event) && closeHandshakeReady && pending && !pending.context.signal?.aborted && Date.now() < pending.context.deadline && mcpService?.active);
+  return !!(isTrustedOnlineBackupIpcEvent(event) && closeHandshakeReady && pending && !pending.context.signal?.aborted && Date.now() < pending.context.deadline && (pending.context.internalUpdate === true || mcpService?.active));
 });
 ipcMain.on('mcp:reply', (event, payload) => {
   if (!isTrustedOnlineBackupIpcEvent(event) || typeof payload?.id !== 'string') return;
@@ -4089,7 +4173,7 @@ ipcMain.on('mcp:reply', (event, payload) => {
 });
 ipcMain.handle('mcp:configure', async (event, args) => {
   if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
-  if (args?.enabled && (args.capabilities?.includes('secrets') || !mcpService.active)) {
+  if (args?.enabled && (args.capabilities?.includes('secrets') || (args.capabilities?.includes('updates') && !mcpService.capabilities().includes('updates')) || !mcpService.active)) {
     const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'MCP-Zugriff / MCP access', message: 'MCP-Zugriff mit diesen Berechtigungen aktivieren? / Enable MCP with these capabilities?',
       detail: String(args.capabilities?.join(', ') || '').slice(0, 100), buttons: ['Abbrechen / Cancel', 'Aktivieren / Enable'], defaultId: 0, cancelId: 0, noLink: true });
     if (result.response !== 1) return mcpService.state();
@@ -4238,6 +4322,7 @@ ipcMain.handle('cancel-shutdown', () => {
 });
 
 function handleShutdownAfterFinish() {
+  if (mcpUpdate.blocksTransfers()) return;
   if (shutdownMode === 'nothing') return;
 
   const { exec } = require('child_process');

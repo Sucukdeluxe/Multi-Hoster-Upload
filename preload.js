@@ -1,4 +1,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+ipcRenderer.on('performance:ping', (_event, id) => {
+  if (Number.isSafeInteger(id)) ipcRenderer.send('performance:pong', id);
+});
 
 const reportStartupPhase = phase => ipcRenderer.send('app:startup-phase', phase);
 reportStartupPhase('preload-started');

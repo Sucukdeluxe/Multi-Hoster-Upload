@@ -21,6 +21,25 @@
   const handlers = {
     state: async () => ({ source: 'live', stale: false, uploading, queueCount: queueJobs.length, selectedFileCount: selectedFiles.length, selectedHosters: getSelectedHosters(), counts: queueJobs.reduce((out, job) => { out[job.status] = (out[job.status] || 0) + 1; return out; }, {}) }),
     refresh,
+    'update-park': async () => {
+      cancelStartupQueueAutoStart();
+      _cancelAutoRetry(true);
+      const jobIds = queueJobs.filter(job => !['done', 'error', 'skipped', 'aborted'].includes(job.status)).map(job => job.id);
+      if (jobIds.length > 50000) throw new Error('UPDATE_QUEUE_TOO_LARGE');
+      await persistQueueStateNow();
+      return { wasUploading: uploading, jobIds };
+    },
+    'update-resume': async (args, guard) => {
+      await guard();
+      const ids = new Set(args.jobIds || []);
+      const jobs = queueJobs.filter(job => ids.has(job.id) && !['done', 'error', 'skipped'].includes(job.status));
+      for (const job of jobs) if (job.status === 'aborted') Object.assign(job, { status: 'preview', error: null });
+      redraw();
+      if (!jobs.length) return { started: false, reason: 'NO_ELIGIBLE_JOBS' };
+      const result = await startSelectedUpload(jobs, { guard });
+      if (result?.ok !== true) throw new Error('UPDATE_RESUME_FAILED');
+      return { resumed: true };
+    },
     'account-results': async args => { for (const row of args.results) { if (findAccountById(row.accountId)) accountStatuses[row.accountId] = { status: row.status, message: row.message, storage: row.storage, checkedAt: row.checkedAt || new Date().toISOString() }; } renderAccounts(); return { updated: args.results.length }; },
     'queue-list': async args => page(queueJobs.filter(job => !args.status || job.status === args.status).map(job => ({ id: job.id, file: job.file, fileName: job.fileName, hoster: job.hoster, status: job.status, bytesUploaded: job.bytesUploaded, bytesTotal: job.bytesTotal, speedKbs: job.speedKbs, error: job.error, result: job.result, attempt: job.attempt })), args),
     'queue-add': async (args, guard) => {
@@ -105,9 +124,12 @@
       row.append(name, label, transferLabel, remove); return row;
     }));
   };
+  const syncPermissions = state => {
+    for (const input of document.querySelectorAll('#mcpControls .mcp-permissions input, #mcpControls [data-mcp-updates]')) input.checked = state?.capabilities?.includes(input.value) === true;
+  };
   const act = async action => {
-    try { const state = await action(); if (state && typeof state === 'object') renderStatus(state); }
-    catch { showCopyToast(text('MCP-Aktion fehlgeschlagen. Verbindung und lokale Berechtigungen prüfen.', 'MCP action failed. Check connection and local permissions.'), 6000, 'error'); if (current) renderStatus(current); }
+    try { const state = await action(); if (state && typeof state === 'object') { renderStatus(state); syncPermissions(state); } }
+    catch { showCopyToast(text('MCP-Aktion fehlgeschlagen. Verbindung und lokale Berechtigungen prüfen.', 'MCP action failed. Check connection and local permissions.'), 6000, 'error'); if (current) { renderStatus(current); syncPermissions(current); } }
   };
   window.renderMcpSettings = () => `<section id="mcpControls" class="mcp-controls">
     <div class="settings-section-label">MCP</div>
@@ -119,6 +141,8 @@
     <p>${text('Der Verbindungscode ist ein Zugangsschlüssel. Er wird weder im Backup gespeichert noch auf andere Installationen übertragen. Löschungen und andere gefährliche Aktionen verlangen eine lokale Bestätigung.', 'The connection code is a credential. It is not stored in backups or transferred to other installations. Deletions and other dangerous actions require local confirmation.')}</p>
     <div class="mcp-actions"><button class="btn btn-sm btn-secondary" data-mcp-action="grant">${text('Ordner freigeben','Grant directory')}</button></div>
     <p>${text('Dateiinhalte werden nur nach zusätzlicher Freigabe pro Ordner übertragen. Bestehende Ordnerfreigaben erlauben dies nicht automatisch.', 'File contents are transferred only after additional permission for each directory. Existing directory grants do not allow this automatically.')}</p><div data-mcp-grants></div>
+    <label class="mcp-update-permission"><input type="checkbox" value="updates" data-mcp-updates> ${text('Offizielle App-Updates ohne erneute Bestätigung erlauben', 'Allow official app updates without another confirmation')}</label>
+    <p>${text('Standardmäßig aus. Gilt nur für geprüfte Installer einer exakt angeforderten Version. Laufende Uploads werden abgeschlossen und die Warteschlange nach dem Neustart wieder aufgenommen. Portable-Versionen werden nicht unterstützt.', 'Disabled by default. Limited to verified installers of the exact requested version. Running uploads finish and the queue resumes after restart. Portable versions are not supported.')}</p>
   </section>`;
   window.bindMcpSettings = async () => {
     const area = document.getElementById('mcpControls'); if (!area) return;
@@ -126,7 +150,8 @@
     renderStatus(state);
     area.querySelector('#mcpName').value = state.name || 'Multi-Hoster-Uploader';
     for (const input of area.querySelectorAll('.mcp-permissions input')) input.checked = state.capabilities?.includes(input.value) === true;
-    const configuration = enabled => ({ enabled, name: area.querySelector('#mcpName').value.trim(), capabilities: [...area.querySelectorAll('.mcp-permissions input:checked')].map(input => input.value) });
+    area.querySelector('[data-mcp-updates]').checked = state.capabilities?.includes('updates') === true;
+    const configuration = enabled => ({ enabled, name: area.querySelector('#mcpName').value.trim(), capabilities: [...area.querySelectorAll('.mcp-permissions input:checked, [data-mcp-updates]:checked')].map(input => input.value) });
     area.querySelector('[data-mcp-action="enable"]').onclick = () => act(() => window.api.mcpConfigure(configuration(true)));
     area.querySelector('[data-mcp-action="disable"]').onclick = () => act(() => window.api.mcpConfigure(configuration(false)));
     area.querySelector('[data-mcp-action="rotate"]').onclick = () => act(() => window.api.mcpRotate());

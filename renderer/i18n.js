@@ -5,6 +5,12 @@
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   const pairs = [
     ['MCP-Fernzugriff', 'MCP remote access'],
+    ['Offizielle App-Updates ohne erneute Bestätigung erlauben', 'Allow official app updates without another confirmation'],
+    ['Standardmäßig aus. Gilt nur für geprüfte Installer einer exakt angeforderten Version. Laufende Uploads werden abgeschlossen und die Warteschlange nach dem Neustart wieder aufgenommen. Portable-Versionen werden nicht unterstützt.', 'Disabled by default. Limited to verified installers of the exact requested version. Running uploads finish and the queue resumes after restart. Portable versions are not supported.'],
+    ['MCP-Update wird vorbereitet', 'MCP update is being prepared'],
+    ['Update-Prüfsumme fehlt', 'Update checksum is missing'],
+    ['Update-Datei wurde verändert', 'Update file has changed'],
+    ['Update-Datei wurde ausgetauscht', 'Update file was replaced'],
     ['App-Funktionen über einen freigegebenen MCP-Client steuern.', 'Control app functions through an authorized MCP client.'],
     ['Strukturierter Fernzugriff über HTTPS. Nur bei laufender Anwendung; keine Portfreigabe erforderlich. Berechtigungen werden ausschließlich hier vergeben.', 'Structured remote access over HTTPS. Available while the app is running; no inbound port required. Permissions can only be granted here.'],
     ['Installationsname', 'Installation name'],

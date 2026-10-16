@@ -12,3 +12,5 @@
 .mcp-state.connected { color: #a2edc1; background: #193829; border-color: #46735b; }
 .mcp-grant { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border, #424242); }
 .mcp-grant > span { flex: 1 1 220px; overflow-wrap: anywhere; }
+.mcp-update-permission { display: flex; align-items: flex-start; gap: 8px; margin-top: 20px; font-size: 13px; line-height: 1.6; }
+.mcp-update-permission input { flex: 0 0 auto; margin-top: 4px; }

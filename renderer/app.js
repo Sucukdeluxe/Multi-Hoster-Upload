@@ -2327,7 +2327,7 @@ function normalizeRestoredJobStatus(status) {
 }
 
 function restoreQueueStateFromConfig() {
-  if (config?.globalSettings?.resumeQueueOnLaunch === false) return;
+  if (config?.globalSettings?.resumeQueueOnLaunch === false && !config?.mcpUpdatePending) return;
   const pending = config?.globalSettings?.pendingQueue;
   if (!pending || typeof pending !== 'object') return;
 
@@ -2941,6 +2941,7 @@ async function startRestoredQueueAfterChecks(jobIds) {
 }
 
 function scheduleRestoredQueueAutoStart() {
+  if (config?.mcpUpdatePending) return;
   if (!_startupQueueEvidenceAvailable || config?.globalSettings?.autoStartRestoredQueue !== true || !window.AutoResume) return;
   const jobs = window.AutoResume.getAutoResumeJobs(queueJobs);
   if (!jobs.length) return;
