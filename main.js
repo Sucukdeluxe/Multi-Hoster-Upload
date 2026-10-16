@@ -2928,17 +2928,19 @@ function logMemorySnapshot(label) {
   } catch {}
 }
 
-ipcMain.handle('cancel-upload', () => {
+ipcMain.handle('cancel-upload', async () => {
   if (uploadManager) {
     uploadManager.cancel();
   }
+  await mcpUpdate.excludeResumeJobs(null);
   return true;
 });
 
-ipcMain.handle('cancel-selected-jobs', (_event, jobIds) => {
+ipcMain.handle('cancel-selected-jobs', async (_event, jobIds) => {
   if (uploadManager) {
     uploadManager.cancelJobs(Array.isArray(jobIds) ? jobIds : []);
   }
+  await mcpUpdate.excludeResumeJobs(Array.isArray(jobIds) ? jobIds.filter(id => typeof id === 'string') : []);
   return true;
 });
 
