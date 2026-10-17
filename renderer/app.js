@@ -7387,7 +7387,13 @@ function syncSettingsSaveState(message) {
     button.classList.toggle('btn-success', settingsDirty && !settingsSaving);
     button.classList.toggle('btn-secondary', !settingsDirty || settingsSaving);
   }
-  if (feedback && message) feedback.textContent = message;
+  if (feedback) {
+    if (message) feedback.dataset.settingsMessage = message;
+    const mcp = window.getMcpSettingsSaveState?.();
+    feedback.textContent = mcp?.saving ? 'MCP-Einstellungen werden gespeichert…'
+      : mcp?.dirty ? 'MCP-Änderungen noch nicht gespeichert'
+        : feedback.dataset.settingsMessage || 'Keine ungespeicherten Änderungen';
+  }
 }
 
 function establishSettingsBaseline(message = 'Keine ungespeicherten Änderungen') {
