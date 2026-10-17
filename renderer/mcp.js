@@ -117,6 +117,7 @@
     const area = document.getElementById('mcpControls');
     return { dirty: !!area && hasChanges(area, current), saving };
   };
+  window.saveMcpSettings = () => document.querySelector('#mcpControls [data-mcp-action="enable"]')?.onclick?.();
   const refreshControls = () => {
     const area = document.getElementById('mcpControls');
     if (!area) return;

@@ -7018,6 +7018,7 @@ function renderSettings() {
     if (focus) activeButton.focus();
     content.scrollTop = 0;
     if (target === 'backup') loadManagedOnlineBackups();
+    syncSettingsSaveState();
   };
 
   const normalizeSettingsSearchText = (value) => String(value || '')
@@ -7382,10 +7383,13 @@ function captureSettingsState() {
 function syncSettingsSaveState(message) {
   const button = document.getElementById('saveSettingsBtn');
   const feedback = document.getElementById('saveFeedback');
+  const mcpButton = document.querySelector('.settings-subpage.active #mcpControls [data-mcp-action="enable"]');
   if (button) {
-    button.disabled = settingsSaving || !settingsDirty;
-    button.classList.toggle('btn-success', settingsDirty && !settingsSaving);
-    button.classList.toggle('btn-secondary', !settingsDirty || settingsSaving);
+    button.disabled = mcpButton ? mcpButton.disabled : settingsSaving || !settingsDirty;
+    button.textContent = mcpButton ? mcpButton.textContent : 'Speichern';
+    button.classList.toggle('btn-primary', !!mcpButton && !mcpButton.disabled);
+    button.classList.toggle('btn-success', !mcpButton && settingsDirty && !settingsSaving);
+    button.classList.toggle('btn-secondary', button.disabled);
   }
   if (feedback) {
     if (message) feedback.dataset.settingsMessage = message;
@@ -9393,7 +9397,10 @@ function setupListeners() {
     });
     renderImportPlanSummary();
   });
-  document.getElementById('saveSettingsBtn').addEventListener('click', saveSettings);
+  document.getElementById('saveSettingsBtn').addEventListener('click', () => {
+    if (document.querySelector('.settings-subpage.active #mcpControls')) return window.saveMcpSettings?.();
+    return saveSettings();
+  });
   document.getElementById('appAlertConfirmBtn').addEventListener('click', () => closeAppAlert(true));
   document.getElementById('appAlertAlternateBtn').addEventListener('click', () => closeAppAlert('alternate'));
   document.getElementById('appAlertCancelBtn').addEventListener('click', () => closeAppAlert(false));
