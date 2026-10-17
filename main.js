@@ -32,7 +32,7 @@ const { createPortableSettingsSnapshot, prepareImportedSettings } = require('./l
 const { createSettingsImportGate } = require('./lib/settings-import-gate');
 const FolderMonitor = require('./lib/folder-monitor');
 const { walkFolderAsync } = require('./lib/file-discovery');
-const { maybeRotateLogFile } = require('./lib/log-rotation');
+const { maybeRotateLogFile, maybeRotateLogFileAsync } = require('./lib/log-rotation');
 const { hosterLogToFileEnabled } = require('./lib/log-policy');
 const { formatUploadLogLine, iterateUploadLogEntries, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
 const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, createBufferedInternalLogFlusher, getLogOpenDirectory } = require('./lib/upload-audit');
@@ -48,6 +48,7 @@ const { McpService } = require('./lib/mcp-service');
 const { createMcpApp } = require('./lib/mcp-app');
 const { McpAccessError } = require('./lib/mcp-access');
 const { runtimePerformance } = require('./lib/performance-monitor');
+runtimePerformance.observeSyncFileOperations(fs);
 const { McpUpdate } = require('./lib/mcp-update');
 const mcpLocalHandlers = new Map();
 const mcpRawHandle = ipcMain.handle.bind(ipcMain);
@@ -431,7 +432,7 @@ const nativeStartupLog = _hasSingleInstanceLock ? createNativeStartupLog({ fs, p
 const startupIncidentKeys = new Set();
 if (nativeStartupLog) {
   startupDiagnostics.write('native-logging', { enabled: nativeStartupLog.enabled });
-  const nativeLogMaintenance = setInterval(() => nativeStartupLog.maintain(), 30000);
+  const nativeLogMaintenance = setInterval(() => { void runtimePerformance.measure('log.native.maintain', () => nativeStartupLog.maintainAsync()); }, 30000);
   nativeLogMaintenance.unref();
   process.once('exit', () => nativeStartupLog.maintain());
 }
@@ -545,6 +546,7 @@ function getDebugLogPath() {
 const _debugLogBuffer = [];
 let _debugLogFlushTimer = null;
 let _debugLogWriting = false;
+let _debugLogWrite = Promise.resolve();
 
 // 25 MB cap for upload-debug.log + 10 MB for account-rotation.log. Each
 // keeps 2 numbered backups, so the on-disk worst case is bounded:
@@ -564,25 +566,32 @@ const _rotLogWriter = createInternalLogWriter({
   fileName: 'account-rotation.log',
   resolveInternalLogPath: _resolveInternalLogPath,
   rotateLogFile: maybeRotateLogFile,
+  rotateLogFileAsync: maybeRotateLogFileAsync,
   maxBytes: ROT_LOG_MAX_BYTES,
   maxBackups: INTERNAL_LOG_MAX_BACKUPS,
   reportError: (label, error) => debugLog(`${label} append failed: ${error.message}`)
 });
 
 function _flushDebugLog() {
-  if (_debugLogWriting || _debugLogBuffer.length === 0) return;
-  const chunk = _debugLogBuffer.join('');
-  _debugLogBuffer.length = 0;
+  if (_debugLogWriting || _debugLogBuffer.length === 0) return _debugLogWrite;
+  const chunk = _debugLogBuffer.splice(0).join('');
   _debugLogWriting = true;
-  const target = getDebugLogPath();
-  // Pass a noop logger here — debugLog() is THIS file's writer, recursing
-  // into it would deadlock the buffer/timer state.
-  maybeRotateLogFile(target, DEBUG_LOG_MAX_BYTES, INTERNAL_LOG_MAX_BACKUPS, () => {});
-  fs.appendFile(target, chunk, 'utf-8', () => {
-    _debugLogWriting = false;
-    // If more lines arrived during the write, flush them next tick.
-    if (_debugLogBuffer.length) setImmediate(_flushDebugLog);
+  _debugLogWrite = runtimePerformance.measure('log.debug.write', async () => {
+    try {
+      const target = getDebugLogPath();
+      await maybeRotateLogFileAsync(target, DEBUG_LOG_MAX_BYTES, INTERNAL_LOG_MAX_BACKUPS);
+      await fs.promises.appendFile(target, chunk, 'utf-8');
+    } catch {
+      _debugLogBuffer.unshift(chunk);
+      if (!_debugLogFlushTimer) {
+        _debugLogFlushTimer = setTimeout(() => { _debugLogFlushTimer = null; _flushDebugLog(); }, 1000);
+      }
+    } finally {
+      _debugLogWriting = false;
+    }
+    if (_debugLogBuffer.length && !_debugLogFlushTimer) setImmediate(_flushDebugLog);
   });
+  return _debugLogWrite;
 }
 
 function debugLog(msg) {
@@ -977,6 +986,7 @@ let _uploadLogFallbackWarned = false;
 const _uploadLogBuffer = [];
 let _uploadLogFlushTimer = null;
 let _uploadLogWriting = false;
+let _uploadLogWrite = Promise.resolve();
 
 // Cache the resolved upload-log target across flushes — mkdirSync + path
 // assembly on every 500ms flush during uploads is wasted work once we've
@@ -1044,53 +1054,65 @@ const _uploadAuditWriter = createUploadAuditWriter({
   path,
   resolveInternalLogPath: _resolveInternalLogPath,
   rotateLogFile: maybeRotateLogFile,
+  rotateLogFileAsync: maybeRotateLogFileAsync,
   reportError: (label, error) => debugLog(`${label} audit append failed: ${error.message}`)
 });
 
+async function _resolveUploadLogTargetAsync(excludedPath) {
+  const primary = getLogFilePath();
+  if (_cachedUploadLogKey === primary && _cachedUploadLogTarget && _cachedUploadLogTarget.path !== excludedPath) return _cachedUploadLogTarget;
+  const candidates = [{ path: primary, isFallback: false }];
+  for (const name of ['desktop', 'userData']) {
+    try { candidates.push({ path: buildFallbackLogName(app.getPath(name)), isFallback: true }); } catch {}
+  }
+  for (const target of candidates) {
+    if (target.path === excludedPath) continue;
+    try {
+      await fs.promises.mkdir(path.dirname(target.path), { recursive: true });
+      _cachedUploadLogTarget = target;
+      _cachedUploadLogKey = primary;
+      return target;
+    } catch (error) { debugLog('uploadLog directory unavailable: ' + error.message); }
+  }
+  return null;
+}
+
 function _flushUploadLog() {
-  if (_uploadLogWriting || _uploadLogBuffer.length === 0) return;
-  const target = _resolveUploadLogTarget();
-  if (!target) { _uploadLogBuffer.length = 0; return; }
-  // Guard against the file's parent directory having been deleted/moved
-  // since the cache was filled. mkdirSync(recursive:true) is a no-op when
-  // the dir already exists; recreates it otherwise. Without this, every
-  // subsequent flush silently fails with ENOENT and entries are lost.
-  try { fs.mkdirSync(path.dirname(target.path), { recursive: true }); } catch {}
-  // Cheap size check + rotation right before the append, so we never grow
-  // a single log file beyond the cap regardless of session length.
-  maybeRotateLogFile(target.path, UPLOAD_LOG_MAX_BYTES, UPLOAD_LOG_MAX_BACKUPS, debugLog);
-  const chunk = _uploadLogBuffer.join('');
-  _uploadLogBuffer.length = 0;
+  if (_uploadLogWriting || _uploadLogBuffer.length === 0) return _uploadLogWrite;
+  const chunk = _uploadLogBuffer.splice(0).join('');
   _uploadLogWriting = true;
-  fs.appendFile(target.path, chunk, 'utf-8', (err) => {
-    _uploadLogWriting = false;
-    if (err) {
-      debugLog(`uploadLog append failed: ${err.message}`);
-      // Recovery: drop the cached target so the next flush re-resolves
-      // (could be ENOENT after dir delete, ENOSPC, EBUSY etc.) and
-      // restore the chunk so we don't lose entries on the retry.
-      _invalidateUploadLogTargetCache();
-      _uploadLogBuffer.unshift(chunk);
-      // Retry on the next event-loop tick rather than tight-looping.
-      if (!_uploadLogFlushTimer) {
-        _uploadLogFlushTimer = setTimeout(() => {
-          _uploadLogFlushTimer = null;
-          _flushUploadLog();
-        }, 1000);
-      }
-    } else {
+  _uploadLogWrite = runtimePerformance.measure('log.upload.write', async () => {
+    try {
+      const target = await _resolveUploadLogTargetAsync();
+      if (!target) throw new Error('Upload log directory unavailable');
+      await fs.promises.mkdir(path.dirname(target.path), { recursive: true });
+      await maybeRotateLogFileAsync(target.path, UPLOAD_LOG_MAX_BYTES, UPLOAD_LOG_MAX_BACKUPS, debugLog);
+      await fs.promises.appendFile(target.path, chunk, 'utf-8');
       _invalidateUploadLogEvidenceCache();
       if (target.isFallback && !_uploadLogFallbackWarned) {
         _uploadLogFallbackWarned = true;
-        // Auto-persist the working fallback into the user's config so the
-        // next session writes here directly (no more fallback ladder) and
-        // the Settings input reflects reality.
-        _persistFallbackLogPath(target.path);
+        void _persistFallbackLogPath(target.path);
         safeSend('upload-log-fallback', { fallbackPath: target.path });
       }
+    } catch (error) {
+      debugLog('uploadLog append failed: ' + error.message);
+      _invalidateUploadLogTargetCache();
+      _uploadLogBuffer.unshift(chunk);
+      if (!_uploadLogFlushTimer) {
+        _uploadLogFlushTimer = setTimeout(() => { _uploadLogFlushTimer = null; _flushUploadLog(); }, 1000);
+      }
+    } finally {
+      _uploadLogWriting = false;
     }
     if (_uploadLogBuffer.length && !_uploadLogFlushTimer) setImmediate(_flushUploadLog);
   });
+  return _uploadLogWrite;
+}
+
+async function drainRuntimeLogs() {
+  await Promise.all([_flushDebugLog(), _flushUploadLog(), _rotLogWriter.drain(), _uploadAuditWriter.drain()]);
+  await _rotLogFlusher.flush('rot-log');
+  await Promise.all([_flushDebugLog(), _flushUploadLog()]);
 }
 
 async function _persistFallbackLogPath(workingPath) {
@@ -3642,6 +3664,7 @@ ipcMain.handle('app:finish-close', async (event, payload = true) => {
   try {
     if (!acquireCloseQuiesce(attempt)) return false;
     await waitForCloseOperation(waitForConfigStoreWrites(), 1000);
+    await waitForCloseOperation(drainRuntimeLogs(), 5000);
     if (!isClosePreparationActive(attempt)) return false;
     if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'pendingQueue')) {
       await waitForCloseOperation(configStore.savePendingQueue(payload.pendingQueue, { allowDuringQuiesce: true }), 1000);
