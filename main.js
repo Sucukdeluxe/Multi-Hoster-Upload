@@ -2208,13 +2208,13 @@ ipcMain.handle('save-text-file', async (_event, defaultName, content, filters) =
     filters: safeFilters
   });
   if (canceled || !filePath) return { ok: false, canceled: true };
-  fs.writeFileSync(filePath, String(content === null || content === undefined ? '' : content), 'utf-8');
+  await fs.promises.writeFile(filePath, String(content === null || content === undefined ? '' : content), 'utf-8');
   return { ok: true, path: filePath };
 });
 
 ipcMain.handle('export-history', async (_event, format) => {
   const normalizedFormat = String(format || 'csv').toLowerCase() === 'json' ? 'json' : 'csv';
-  const history = configStore.loadHistory();
+  const history = await configStore.loadHistory();
   const rows = flattenHistoryForExport(history);
   const datePrefix = new Date().toISOString().slice(0, 10);
 
@@ -2235,9 +2235,9 @@ ipcMain.handle('export-history', async (_event, format) => {
       totalRows: rows.length,
       history
     };
-    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+    await fs.promises.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
   } else {
-    fs.writeFileSync(filePath, buildHistoryCsv(rows), 'utf-8');
+    await fs.promises.writeFile(filePath, buildHistoryCsv(rows), 'utf-8');
   }
 
   return {
