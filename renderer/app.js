@@ -307,6 +307,11 @@ function isConfigWriteImportGateError(error) {
   return String(error && error.message ? error.message : error).includes('Einstellungen werden gerade importiert');
 }
 
+function isRejectedConfigWrite(error) {
+  return isConfigWriteImportGateError(error)
+    || String(error && error.message ? error.message : error).includes('MCP-Update wird vorbereitet');
+}
+
 function retainFailedConfigWrite(operation, epoch, preserveAcrossImport) {
   if (!failedConfigWriteOperations.some(entry => entry.operation === operation)) {
     failedConfigWriteOperations.push({ operation, epoch, preserveAcrossImport });
@@ -358,7 +363,7 @@ function runConfigWrite(operation, options = {}) {
     try {
       return await operation();
     } catch (error) {
-      if (!isConfigWriteImportGateError(error)) retainFailedConfigWrite(operation, epoch, preserveAcrossImport);
+      if (!isRejectedConfigWrite(error)) retainFailedConfigWrite(operation, epoch, preserveAcrossImport);
       throw error;
     }
   }).promise;
