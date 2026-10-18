@@ -37,7 +37,7 @@ const { hosterLogToFileEnabled } = require('./lib/log-policy');
 const { formatUploadLogLine, iterateUploadLogEntries, summarizeBatchPlan, formatUploadPlanLogLine } = require('./lib/upload-log');
 const { createInternalLogPathResolver, createInternalLogWriter, createUploadAuditWriter, createBufferedInternalLogFlusher, getLogOpenDirectory } = require('./lib/upload-audit');
 const { selectOrphanTmps } = require('./lib/orphan-tmp');
-const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED } = require('./lib/support-bundle');
+const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, collectFileSnapshot, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
 const stats = require('./lib/stats');
 const { createCollectors } = require('./lib/diagnostics-collectors');
@@ -448,14 +448,14 @@ if (!_hasSingleInstanceLock) {
   });
 }
 
-function recordStartupIncident(reason) {
+async function recordStartupIncident(reason) {
   const key = `${mainWindow?.id || 0}:${folderMonitorRendererGeneration}:${reason}`;
   if (!nativeStartupLog || startupIncidentKeys.has(key)) return;
   startupIncidentKeys.add(key);
   try {
     let secrets = [];
     try { secrets = collectSecretValues(configStore.load()); } catch {}
-    const text = buildSupportBundleText({
+    const text = await buildSupportBundleText({
       header: { Version: app.getVersion(), Electron: process.versions.electron, CreatedAt: new Date().toISOString(), Reason: reason, OS: require('os').release() },
       sanitizedConfig: { included: false },
       secrets,
@@ -466,7 +466,7 @@ function recordStartupIncident(reason) {
         { label: 'native Chromium errors', path: nativeStartupLog.nativePath, maxBytes: 1024 * 1024 }
       ]
     });
-    const saved = nativeStartupLog.saveReport(text);
+    const saved = await nativeStartupLog.saveReportAsync(text);
     startupDiagnostics.write(saved ? 'startup-report-saved' : 'startup-report-unavailable', { reason });
   } catch {
     startupDiagnostics.write('startup-report-unavailable', { reason });
@@ -716,14 +716,14 @@ function _flushRotLog() {
 
 function getAllLogPaths() {
   const configuredUpload = getLogFilePath();
-  const uploadTarget = _resolveUploadLogTarget();
-  const upload = uploadTarget ? uploadTarget.path : configuredUpload;
+  const upload = _cachedUploadLogKey === configuredUpload && _cachedUploadLogTarget ? _cachedUploadLogTarget.path : configuredUpload;
   const debugPath = getDebugLogPath();
-  const rot = getRotLogPath();
+  const internalDirectory = path.join(app.getPath('userData'), 'logs');
+  const rot = _rotLogWriter.getActivePath() || path.join(internalDirectory, 'account-rotation.log');
   const dir = path.dirname(debugPath);
   return {
     fileuploader: upload,
-    uploadAudit: _uploadAuditWriter.getPath(),
+    uploadAudit: _uploadAuditWriter.getActivePath() || path.join(internalDirectory, 'upload-audit.log'),
     debug: debugPath,
     accountRotation: rot,
     doodstreamDebug: path.join(dir, 'doodstream-debug.log'),
@@ -3142,9 +3142,7 @@ ipcMain.handle('set-log-verbose', (_event, enabled) => {
 async function createSupportBundle() {
   const { dialog } = require('electron');
   try {
-    if (_debugLogBuffer.length) {
-      try { fs.appendFileSync(getDebugLogPath(), _debugLogBuffer.join(''), 'utf-8'); _debugLogBuffer.length = 0; } catch {}
-    }
+    await _flushDebugLog();
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const defaultName = `multi-hoster-support-${stamp}.txt`;
     const desktop = (() => { try { return app.getPath('desktop'); } catch { return app.getPath('userData'); } })();
@@ -3158,7 +3156,9 @@ async function createSupportBundle() {
     try { cfg = configStore.load(); } catch { cfg = null; }
     let paths = null;
     try { if (cfg) paths = getAllLogPaths(); } catch {}
-    const text = buildSupportBundleText({
+    const nativeReports = nativeStartupLog ? await nativeStartupLog.reportsAsync() : [];
+    const nativeFiles = nativeStartupLog ? await nativeStartupLog.filesAsync() : [];
+    const text = await buildSupportBundleText({
       header: {
         App: app.getName(),
         Version: app.getVersion(),
@@ -3177,8 +3177,8 @@ async function createSupportBundle() {
       sanitizedConfig: sanitizeConfig(cfg),
       secrets: collectSecretValues(cfg),
       files: [
-        ...(nativeStartupLog ? nativeStartupLog.reports().slice(0, 3).map(file => ({ ...file, maxBytes: 5 * 1024 * 1024 })) : []),
-        ...(nativeStartupLog ? nativeStartupLog.files().slice(0, 4).map(file => ({ ...file, maxBytes: 1024 * 1024 })) : []),
+        ...nativeReports.slice(0, 3).map(file => ({ ...file, maxBytes: 5 * 1024 * 1024 })),
+        ...nativeFiles.slice(0, 4).map(file => ({ ...file, maxBytes: 1024 * 1024 })),
         { label: 'startup-diagnostics.jsonl (previous sessions)', path: startupDiagnostics.filePath + '.1', maxBytes: 1024 * 1024 },
         { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, maxBytes: 1024 * 1024 },
         ...(cfg && paths ? [
@@ -3191,7 +3191,7 @@ async function createSupportBundle() {
         ] : [])
       ]
     });
-    fs.writeFileSync(res.filePath, text, 'utf-8');
+    await fs.promises.writeFile(res.filePath, text, 'utf-8');
     logMarker('SUPPORT BUNDLE', { path: res.filePath, bytes: text.length });
     return { ok: true, path: res.filePath, bytes: text.length };
   } catch (err) {
@@ -4079,11 +4079,11 @@ function _diagAppInfo() {
   };
 }
 
-function _diagSystemInfo() {
+async function _diagSystemInfo() {
   const os = require('os');
   let disk = null;
   try {
-    const sf = fs.statfsSync(app.getPath('userData'));
+    const sf = await fs.promises.statfs(app.getPath('userData'));
     disk = { freeBytes: sf.bavail * sf.bsize, totalBytes: sf.blocks * sf.bsize };
   } catch {}
   return {
@@ -4108,7 +4108,7 @@ function _diagAgentInfo() {
 function createAppCollectors() {
   return createCollectors({
     loadConfig: () => configStore.load(), loadHistory: () => configStore.loadHistory(), getAllLogPaths,
-    support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, REDACTED },
+    support: { sanitizeConfig, collectSecretValues, redactLogText, valueScrub, collectFile, collectFileSnapshot, REDACTED },
     stats, appInfo: _diagAppInfo, systemInfo: _diagSystemInfo, agentInfo: _diagAgentInfo
   });
 }
@@ -4164,10 +4164,10 @@ async function startMcpService() {
       renderer: { available: !!mainWindow && !mainWindow.isDestroyed(), initialized: closeHandshakeReady, generation: folderMonitorRendererGeneration },
       memory: process.memoryUsage()
     }),
-    getDiagnosticSources: () => [
+    getDiagnosticSources: async () => [
       { label: 'startup-diagnostics.jsonl', path: startupDiagnostics.filePath, directory: path.dirname(startupDiagnostics.filePath) },
       { label: 'startup-diagnostics.jsonl.1', path: startupDiagnostics.filePath + '.1', directory: path.dirname(startupDiagnostics.filePath) },
-      ...(nativeStartupLog ? [...nativeStartupLog.files(), ...nativeStartupLog.reports()].map(file => ({ ...file, directory: nativeStartupLog.logDirectory })) : [])
+      ...(nativeStartupLog ? [...await nativeStartupLog.filesAsync(), ...await nativeStartupLog.reportsAsync()].map(file => ({ ...file, directory: nativeStartupLog.logDirectory })) : [])
     ] });
   mcpService = new McpService({ directory: app.getPath('userData'), encrypt: secretStore.encryptField, decrypt: secretStore.decryptField,
     handlers, version: app.getVersion(), loadConfig: () => configStore.load(), dialog, getWindow: () => mainWindow,
