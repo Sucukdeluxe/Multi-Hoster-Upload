@@ -21,6 +21,7 @@
   const handlers = {
     state: async () => ({ source: 'live', stale: false, uploading, queueCount: queueJobs.length, selectedFileCount: selectedFiles.length, selectedHosters: getSelectedHosters(), counts: queueJobs.reduce((out, job) => { out[job.status] = (out[job.status] || 0) + 1; return out; }, {}) }),
     refresh,
+    'automation-resume': (_args, guard) => window.resumeAutomationPausedJobs(guard),
     'update-park': async () => {
       cancelStartupQueueAutoStart();
       _cancelAutoRetry(true);

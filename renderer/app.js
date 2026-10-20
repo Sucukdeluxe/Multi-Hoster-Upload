@@ -1166,7 +1166,7 @@ function renderAutomationStatusSnapshot(snapshot) {
   const pauseNotice = document.getElementById('automationPauseNotice');
   if (pauseNotice) {
     pauseNotice.hidden = !snapshot.paused;
-    pauseNotice.textContent = snapshot.paused ? `${localizeUiText('Automatik pausiert seit')} ${formatAutomationDateTime(snapshot.pausedAt)}. ${localizeUiText('Fortsetzen aktiviert die Ordnerüberwachung und die Warteschlange. Aktive Uploads werden beim Pausieren noch abgeschlossen.')}` : '';
+    pauseNotice.textContent = snapshot.paused ? `${localizeUiText('Automatik pausiert seit')} ${formatAutomationDateTime(snapshot.pausedAt)}. ${localizeUiText('Laufende Uploads werden sofort abgebrochen. Beim Fortsetzen starten diese Dateien von vorn; abgeschlossene Uploads bleiben erhalten.')}` : '';
   }
   return snapshot;
 }
@@ -1200,7 +1200,7 @@ function syncAutomationPauseResumeButton(snapshot) {
   if (settingsButton) {
     settingsButton.textContent = localized;
     settingsButton.disabled = automationPauseResumeBusy || snapshot.statusAvailable !== true;
-    settingsButton.title = localizeUiText('Fortsetzen aktiviert die Ordnerüberwachung und die Warteschlange. Aktive Uploads werden beim Pausieren noch abgeschlossen.');
+    settingsButton.title = localizeUiText('Laufende Uploads werden sofort abgebrochen. Beim Fortsetzen starten diese Dateien von vorn; abgeschlossene Uploads bleiben erhalten.');
   }
 }
 
@@ -1384,6 +1384,25 @@ async function runAutomationTestOverlay() {
   }
 }
 
+let automationJobResumePromise = null;
+
+async function resumeAutomationPausedJobs(guard) {
+  if (automationJobResumePromise) return automationJobResumePromise;
+  const operation = (async () => {
+    if (guard) await guard();
+    const jobs = queueJobs.filter(job => job.automationPaused === true && (
+      job.status === 'queued' || (job.status === 'aborted' && job.error === 'Warteschlange angehalten')
+    ));
+    if (!jobs.length) return { started: false };
+    return startSelectedUpload(jobs, guard ? { guard } : undefined);
+  })();
+  automationJobResumePromise = operation;
+  try { return await operation; }
+  finally { if (automationJobResumePromise === operation) automationJobResumePromise = null; }
+}
+
+window.resumeAutomationPausedJobs = resumeAutomationPausedJobs;
+
 async function toggleAutomationPauseResume() {
   if (automationPauseResumeBusy) return;
   const snapshot = createAutomationStatusSnapshot();
@@ -1402,14 +1421,7 @@ async function toggleAutomationPauseResume() {
     if (result?.error) throw new Error(result.error);
     applyAutomationRuntimeStatus({ ...result, paused: resume ? false : true });
     if (resume) {
-      const resumableJobs = queueJobs.filter(job => job.automationPaused === true && (
-        job.status === 'queued'
-        || (job.status === 'aborted' && job.error === 'Warteschlange angehalten')
-      ));
-      if (resumableJobs.length > 0) {
-        if (uploading) await startSelectedUpload(resumableJobs);
-        else await startSelectedUpload(resumableJobs);
-      }
+      await resumeAutomationPausedJobs();
     } else {
       for (const job of queueJobs) {
         if (pausingJobIds.has(job.id) && ['queued', 'getting-server', 'uploading', 'retrying'].includes(job.status)) {
@@ -2777,6 +2789,8 @@ function updateUploadView(options = {}) {
     queueActions.style.display = 'flex';
     if (options.rebuildPreview !== false && !uploading && selectedFiles.length > 0) {
       buildQueuePreview();
+    } else {
+      renderQueueTable();
     }
   }
   updateQueueActionButtons();
