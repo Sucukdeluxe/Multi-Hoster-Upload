@@ -1953,7 +1953,7 @@ function _syncMenuSettings() {
   const sInput = document.getElementById('menuSpeedInput');
   const sSpinner = document.getElementById('menuSpeedSpinner');
   if (sCheck) sCheck.checked = enabled;
-  if (sInput) sInput.value = enabled ? String(+(speedKbs / 1024).toFixed(2)) : '0';
+  if (sInput) sInput.value = enabled ? String(+(speedKbs / 1000).toFixed(2)) : '0';
   if (sSpinner) sSpinner.classList.toggle('disabled', !enabled);
 }
 
@@ -1968,12 +1968,12 @@ function _menuSaveParallel(v) {
 }
 
 function _menuSaveSpeedMbs(mbs, enabled) {
-  const kbs = enabled ? Math.max(0, Math.round((parseFloat(mbs) || 0) * 1024)) : 0;
+  const kbs = enabled ? Math.max(0, Math.round((parseFloat(mbs) || 0) * 1000)) : 0;
   const gs = { ...(config.globalSettings || {}), globalMaxSpeedKbs: kbs };
   config.globalSettings = gs;
   saveGlobalSettingsTracked(gs).catch(() => {});
   const mirror = document.getElementById('globalMaxSpeedMbsInput');
-  if (mirror) mirror.value = kbs > 0 ? String(+(kbs / 1024).toFixed(2)) : '0';
+  if (mirror) mirror.value = kbs > 0 ? String(+(kbs / 1000).toFixed(2)) : '0';
 }
 
 function _initMenuSettingsControls() {
@@ -6184,7 +6184,7 @@ function drawUploadSpeedSparkline() {
 
 function updateUploadSpeedSparkline() {
   const speedKbs = Math.max(0, Number(lastUploadStats.globalSpeedKbs) || 0);
-  window.SpeedHistory.updateSpeedHistory(uploadSpeedState, speedKbs * 1024);
+  window.SpeedHistory.updateSpeedHistory(uploadSpeedState, speedKbs * 1000);
   updateUploadSpeedDisplays();
   drawUploadSpeedSparkline();
 }
@@ -6215,7 +6215,7 @@ function updateStatusBar() {
   const stats = _computeQueueStats();
 
   const etaSeconds = lastUploadStats.globalSpeedKbs > 0
-    ? Math.round(stats.bytesRemaining / (lastUploadStats.globalSpeedKbs * 1024))
+    ? Math.round(stats.bytesRemaining / (lastUploadStats.globalSpeedKbs * 1000))
     : 0;
 
   _setRollingUploadMetric('uploadTelemetryTotal', stats.total);
@@ -6669,7 +6669,7 @@ function renderSettings() {
       </div>
       <div class="settings-row">
         <label for="globalMaxSpeedMbsInput">Globales Speed-Limit</label>
-        <input type="number" class="hs-input settings-autosave" id="globalMaxSpeedMbsInput" value="${globalSettings.globalMaxSpeedKbs > 0 ? (globalSettings.globalMaxSpeedKbs / 1024).toFixed(2).replace(/\\.00$/, '') : '0'}" min="0" step="0.1">
+        <input type="number" class="hs-input settings-autosave" id="globalMaxSpeedMbsInput" value="${globalSettings.globalMaxSpeedKbs > 0 ? (globalSettings.globalMaxSpeedKbs / 1000).toFixed(2).replace(/\\.00$/, '') : '0'}" min="0" step="0.1">
         <span class="hint">MB/s · 0 = unbegrenzt</span>
       </div>
       <div class="settings-option">
@@ -7501,7 +7501,7 @@ async function performSaveSettings(options = {}) {
     globalMaxSpeedKbs: (() => {
       const el = document.getElementById('globalMaxSpeedMbsInput');
       if (!el) return cur.globalMaxSpeedKbs ?? 0;
-      return Math.max(0, Math.round((parseFloat(el.value || '0') || 0) * 1024));
+      return Math.max(0, Math.round((parseFloat(el.value || '0') || 0) * 1000));
     })(),
     logVerbose: elChk('logVerboseInput', !!cur.logVerbose),
     webhookUrl: elTxt('webhookUrlInput', cur.webhookUrl || '').trim(),
@@ -7549,7 +7549,7 @@ async function performSaveSettings(options = {}) {
     document.querySelectorAll(`.hs-input[data-hoster="${name}"]`).forEach(input => {
       const field = input.dataset.hs;
       if (input.type === 'checkbox') hs[field] = input.checked;
-      else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1024));
+      else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1000));
       else if (field === 'maxSizeGb') hs.maxSizeMb = Math.max(0, (Number(input.value) || 0) * 1024);
       else hs[field] = parseInt(input.value, 10) || 0;
     });
@@ -7821,7 +7821,7 @@ async function performHosterSettingsSave() {
     inputs.forEach(input => {
       const field = input.dataset.hs;
       if (input.type === 'checkbox') hs[field] = input.checked;
-      else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1024));
+      else if (field === 'maxSpeedMbs') hs.maxSpeedKbs = Math.max(0, Math.round((parseFloat(input.value) || 0) * 1000));
       else if (field === 'maxSizeGb') hs.maxSizeMb = Math.max(0, (Number(input.value) || 0) * 1024);
       else hs[field] = parseInt(input.value, 10) || 0;
     });
@@ -7875,7 +7875,7 @@ function infoTipHtml(text) {
 
 function _buildHosterSettingsHtml(name) {
   const hs = (config.hosterSettings && config.hosterSettings[name]) || {};
-  const maxSpeedMbs = hs.maxSpeedKbs > 0 ? String(+(hs.maxSpeedKbs / 1024).toFixed(2)) : '0';
+  const maxSpeedMbs = hs.maxSpeedKbs > 0 ? String(+(hs.maxSpeedKbs / 1000).toFixed(2)) : '0';
   const fieldPrefix = `hoster-${name.replace(/[^a-z0-9]/gi, '-')}`;
   const row = (id, label, control, info = '') => `<div class="hoster-setting-row">
           <div class="hoster-setting-label"><label for="${fieldPrefix}-${id}">${label}</label>${info ? infoTipHtml(info) : ''}</div>
@@ -10015,7 +10015,7 @@ function _setUpdateProgressDetails(progress) {
   const bytesPerSecond = Math.max(0, Number(progress?.bytesPerSecond) || 0);
   const etaSeconds = Number.isFinite(Number(progress?.etaSeconds)) ? Math.max(0, Number(progress.etaSeconds)) : 0;
   if (size) size.textContent = `${formatSize(downloaded)} / ${formatSize(total)}`;
-  if (speed) speed.textContent = `${formatSize(bytesPerSecond)}/s`;
+  if (speed) speed.textContent = formatSpeed(bytesPerSecond / 1000);
   if (eta) eta.textContent = `ETA ${formatTime(etaSeconds)}`;
   details.hidden = false;
 }
@@ -10260,7 +10260,7 @@ function formatSize(bytes) {
 
 function formatSpeed(kbs) {
   if (!kbs || kbs <= 0) return '0 kB/s';
-  if (kbs >= 1024) return (kbs / 1024).toFixed(1) + ' MB/s';
+  if (kbs >= 1000) return (kbs / 1000).toFixed(1) + ' MB/s';
   return Math.round(kbs) + ' kB/s';
 }
 

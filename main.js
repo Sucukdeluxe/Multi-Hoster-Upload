@@ -2802,7 +2802,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       if (!data || typeof data !== 'object') return;
       safeSend('upload-stats', data);
       if (data.state === 'uploading' && data.activeJobs > 0) {
-        const speedMb = ((Number(data.globalSpeedKbs) || 0) / 1024).toFixed(1);
+        const speedMb = ((Number(data.globalSpeedKbs) || 0) / 1000).toFixed(1);
         updateTrayTooltip(`Upload: ${data.activeJobs} aktiv - ${speedMb} MB/s`);
         _maybeLogEventLoopDelay(data.activeJobs);
       } else {
