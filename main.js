@@ -1,6 +1,10 @@
-process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '8';
 const { monitorEventLoopDelay, PerformanceObserver } = require('perf_hooks');
 const { app, BrowserWindow, ipcMain, dialog, clipboard, nativeTheme, Tray, Menu, nativeImage } = require('electron');
+const { relaunchWithThreadpoolSize } = require('./lib/threadpool-relaunch');
+if (relaunchWithThreadpoolSize(app)) {
+  app.exit(0);
+  process.exit(0);
+}
 const { createStartupWindow, createStartupQuery, createStartupDiagnostics, summarizeStartupPixels, createNativeStartupLog } = require('./lib/startup-renderer');
 nativeTheme.themeSource = 'dark';
 const path = require('path');
@@ -691,7 +695,7 @@ function _maybeLogEventLoopDelay(activeJobs) {
         upStr = ` active-by-hoster={${byHoster}} transient-errs=${d.transientErrors || 0} pending=${d.pending || 0}`;
       }
     } catch {}
-    logInfo(`eventloop-delay active=${activeJobs} mean=${mean}ms p99=${p99}ms max=${max}ms stddev=${stddev}ms threadpool=${process.env.UV_THREADPOOL_SIZE}${cpuStr}${gcStr}${resStr}${upStr}`);
+    logInfo(`eventloop-delay active=${activeJobs} mean=${mean}ms p99=${p99}ms max=${max}ms stddev=${stddev}ms threadpool=${process.env.UV_THREADPOOL_SIZE || 4}${cpuStr}${gcStr}${resStr}${upStr}`);
     _eventLoopDelay.reset();
   } catch {}
 }
@@ -1979,6 +1983,7 @@ app.whenReady().then(async () => {
     platform: process.platform,
     arch: process.arch,
     verbose: _logVerbose,
+    threadpool: Number(process.env.UV_THREADPOOL_SIZE) || 4,
     pid: process.pid
   });
   _sweepOrphanConfigTmps();
@@ -3079,6 +3084,7 @@ ipcMain.handle('get-app-info', () => {
     osRelease: require('os').release(),
     pid: process.pid,
     isPackaged: app.isPackaged,
+    threadpoolSize: Number(process.env.UV_THREADPOOL_SIZE) || 4,
     logVerbose: _logVerbose
   };
 });

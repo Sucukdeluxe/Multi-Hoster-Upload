@@ -77,6 +77,7 @@ const sourceFiles = [
   'lib/session-report.js',
   'lib/throttle-timer.js',
   'lib/throttle.js',
+  'lib/threadpool-relaunch.js',
   'lib/throttled-cache.js',
   'lib/updater.js',
   'lib/upload-audit.js',
