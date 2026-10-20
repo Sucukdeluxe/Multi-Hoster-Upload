@@ -51,6 +51,7 @@ const sourceFiles = [
   'lib/mcp-transfers.js',
   'lib/mcp-update.js',
   'lib/performance-monitor.js',
+  'lib/system-metrics.js',
   'lib/upload-file-io.js',
   'lib/online-backup.js',
   'lib/online-backup-keyring.js',

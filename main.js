@@ -50,8 +50,11 @@ const { inspectImportEntries, inspectReadableImportPath } = require('./lib/impor
 const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion } = require('./lib/automation-control');
 const { McpService } = require('./lib/mcp-service');
 const { createMcpApp } = require('./lib/mcp-app');
+const { requiresMcpConfirmation } = require('./lib/mcp-tools');
 const { McpAccessError } = require('./lib/mcp-access');
 const { runtimePerformance } = require('./lib/performance-monitor');
+const { SystemMetrics } = require('./lib/system-metrics');
+const systemMetrics = new SystemMetrics({ shouldCollect: () => mcpService?.active === true });
 runtimePerformance.observeSyncFileOperations(fs);
 const { McpUpdate } = require('./lib/mcp-update');
 const mcpLocalHandlers = new Map();
@@ -2009,6 +2012,7 @@ app.whenReady().then(async () => {
   createTray();
   runtimePerformance.start({ version: app.getVersion(), getTransfers: () => uploadManager?.getDiagnostics() || null,
     pingRenderer: id => closeHandshakeReady && safeSend('performance:ping', id) });
+  systemMetrics.start();
   startupDiagnostics.write('window-load-dispatched');
   void cloudLogSync.start();
   void startMcpService();
@@ -2059,6 +2063,7 @@ app.on('before-quit', (event) => {
 app.on('will-quit', () => {
   if (quitTeardownStarted) return;
   quitTeardownStarted = true;
+  systemMetrics.stop();
   void mcpService?.stop();
   folderMonitorRendererReadyGeneration = null;
   if (updateCheckInterval) clearInterval(updateCheckInterval);
@@ -4147,7 +4152,7 @@ async function startMcpService() {
     'automation:pause-after-active', 'automation:resume', 'reset-session-failed-account', 'folder-monitor:stop', 'folder-monitor:start', 'folder-monitor:test-scan',
     'folder-monitor:reconcile', 'get-history', 'prune-history', 'clear-history', 'cloud-log:status', 'cloud-log:configure', 'cloud-log:backfill',
     'online-backup:list-managed', 'online-backup:create-managed', 'online-backup:delete-managed', 'online-backup:restore', 'app:check-updates', 'app:install-update', 'app:restart', 'app:quit',
-    'get-job-log', 'get-session-failed-account-states']);
+    'get-job-log', 'get-session-failed-account-states', 'set-shutdown-after-finish', 'cancel-shutdown']);
   const invoke = async (channel, ...args) => {
     if (!allowed.has(channel) || !mcpLocalHandlers.has(channel) || !mainWindow || mainWindow.isDestroyed()) throw new McpAccessError('ACTION_UNAVAILABLE');
     return mcpLocalHandlers.get(channel)({ sender: mainWindow.webContents, senderFrame: mainWindow.webContents.mainFrame }, ...args);
@@ -4161,6 +4166,7 @@ async function startMcpService() {
   const handlers = createMcpApp({ loadConfig: () => configStore.load(), invoke, invokeGuarded, renderer: mcpRendererAction, collectors: createAppCollectors(),
     updates: mcpUpdate,
     getPerformance: () => runtimePerformance.snapshot(),
+    getSystemMetrics: args => systemMetrics.snapshot(args),
     getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
     getCapabilities: () => mcpService?.capabilities() || [],
     getProtectedPaths: () => [app.getPath('userData'), configStore.filePath, configStore.historyPath, configStore.automationCompletionPath],
@@ -4181,11 +4187,7 @@ async function startMcpService() {
       safeSend('mcp:status', status);
       void mcpUpdate.recover({ rendererReady: closeHandshakeReady, connected: status.connection === 'online' });
     },
-    requiresConfirmation: name => {
-      if (!['mhu_queue_start', 'mhu_queue_retry', 'mhu_automation_start', 'mhu_automation_reconcile'].includes(name)) return false;
-      const settings = configStore.load().globalSettings;
-      return settings.deleteSourceAfterSuccessfulUpload === true || !['nothing', undefined, null].includes(settings.shutdownAfterFinish);
-    },
+    requiresConfirmation: (name, args) => requiresMcpConfirmation(name, args, configStore.load().globalSettings),
     audit: event => logInfo(`mcp ${JSON.stringify({ time: new Date().toISOString(), ...event })}`)
   });
   await mcpService.start();
