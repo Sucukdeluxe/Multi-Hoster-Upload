@@ -14,7 +14,7 @@ const startupDiagnostics = createStartupDiagnostics({
   fs, path, directory: app.getPath('userData'),
   metadata: { version: app.getVersion(), electron: process.versions.electron, platform: process.platform, osRelease: require('os').release(), remoteSession: /^RDP-/i.test(process.env.SESSIONNAME || ''), packaged: app.isPackaged }
 });
-process.once('exit', code => startupDiagnostics.write('process-exit', { code }));
+app.once('before-quit', () => startupDiagnostics.write('process-quit-requested'));
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
@@ -53,6 +53,8 @@ const { createMcpApp } = require('./lib/mcp-app');
 const { requiresMcpConfirmation } = require('./lib/mcp-tools');
 const { McpAccessError } = require('./lib/mcp-access');
 const { runtimePerformance } = require('./lib/performance-monitor');
+const { RuntimeProfile } = require('./lib/runtime-profile');
+const runtimeProfile = new RuntimeProfile();
 const { SystemMetrics } = require('./lib/system-metrics');
 const systemMetrics = new SystemMetrics({ shouldCollect: () => mcpService?.active === true });
 runtimePerformance.observeSyncFileOperations(fs);
@@ -1128,7 +1130,7 @@ function _flushUploadLog() {
 }
 
 async function drainRuntimeLogs() {
-  await Promise.all([_flushDebugLog(), _flushUploadLog(), _rotLogWriter.drain(), _uploadAuditWriter.drain()]);
+  await Promise.all([_flushDebugLog(), _flushUploadLog(), _rotLogWriter.drain(), _uploadAuditWriter.drain(), startupDiagnostics.drain()]);
   await _rotLogFlusher.flush('rot-log');
   await Promise.all([_flushDebugLog(), _flushUploadLog()]);
 }
@@ -2689,7 +2691,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     fs,
     path,
     platform: process.platform,
-    isEnabled: () => configStore.load().globalSettings?.deleteSourceAfterSuccessfulUpload === true,
+    isEnabled: () => configStore.getGlobalSetting('deleteSourceAfterSuccessfulUpload') === true,
     audit: appendSourceCleanupAudit,
     journal: sourceDeleteJournal
   });
@@ -4194,6 +4196,7 @@ async function startMcpService() {
   const handlers = createMcpApp({ loadConfig: () => configStore.load(), invoke, invokeGuarded, renderer: mcpRendererAction, collectors: createAppCollectors(),
     updates: mcpUpdate,
     getPerformance: () => runtimePerformance.snapshot(),
+    profile: runtimeProfile,
     getSystemMetrics: args => systemMetrics.snapshot(args),
     getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
     getCapabilities: () => mcpService?.capabilities() || [],
