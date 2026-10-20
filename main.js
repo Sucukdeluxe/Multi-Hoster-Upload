@@ -185,7 +185,11 @@ const mcpUpdate = new McpUpdate({
   handoff: async prepared => {
     if (!closeHandshakeReady || updatePreparationPromise || preparedUpdate) throw new McpAccessError('UPDATE_BUSY');
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { rejectPendingUpdate(new Error('Update close timeout')); }, 15000);
+      const timer = setTimeout(() => {
+        if (closeLaunchAttempt !== null) return;
+        restoreClosePreparation(closePreparationAttempt);
+        rejectPendingUpdate(new Error('Update close timeout'));
+      }, MCP_UPDATE_CLOSE_TIMEOUT_MS);
       mcpUpdateHandoff = { resolve: () => { clearTimeout(timer); resolve(); }, reject: error => { clearTimeout(timer); reject(error); } };
       preparedUpdate = prepared;
       updateQuitPending = true;
@@ -329,6 +333,12 @@ function clearCloseFlushTimer() {
   closeFlushTimer = null;
 }
 
+const CLOSE_STORAGE_TIMEOUT_MS = 120000;
+const CLOSE_RENDERER_ACK_TIMEOUT_MS = 5000;
+const CLOSE_RENDERER_FLUSH_TIMEOUT_MS = 245000;
+const MCP_UPDATE_CLOSE_TIMEOUT_MS = 900000;
+let closeLaunchAttempt = null;
+
 function waitForCloseOperation(promise, timeoutMs) {
   return Promise.race([
     Promise.resolve(promise),
@@ -387,6 +397,7 @@ function rejectPendingUpdate(error) {
 }
 
 function restoreClosePreparation(attempt, clearRestart = true) {
+  if (closeLaunchAttempt === attempt) return false;
   if (!isClosePreparationActive(attempt)) return lastRestoredCloseAttempt === attempt;
   closeFlushApproved = false;
   closeFlushRequested = false;
@@ -423,10 +434,10 @@ function requestClosePreparation() {
   try { if (uploadManager) uploadManager.cancel(); } catch {}
   (async () => {
     try {
-      await waitForCloseOperation(Promise.all(Array.from(activeUploadProducerTrackers, tracker => tracker.promise)), 2500);
+      await waitForCloseOperation(Promise.all(Array.from(activeUploadProducerTrackers, tracker => tracker.promise)), CLOSE_STORAGE_TIMEOUT_MS);
       if (attempt !== closePreparationAttempt || !closeFlushRequested) return;
       safeSend('app:prepare-close', attempt);
-      armCloseFlushTimer(attempt, 1500);
+      armCloseFlushTimer(attempt, CLOSE_RENDERER_ACK_TIMEOUT_MS);
     } catch {
       restoreClosePreparation(attempt);
     }
@@ -3653,7 +3664,7 @@ ipcMain.on('folder-monitor:renderer-ready', (event, generation) => {
 
 ipcMain.on('app:close-preparation-started', (event, attempt) => {
   if (mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && isClosePreparationActive(attempt)) {
-    armCloseFlushTimer(attempt, 3000);
+    armCloseFlushTimer(attempt, CLOSE_RENDERER_FLUSH_TIMEOUT_MS);
   }
 });
 
@@ -3674,19 +3685,21 @@ ipcMain.handle('app:finish-close', async (event, payload = true) => {
   let approved = false;
   try {
     if (!acquireCloseQuiesce(attempt)) return false;
-    await waitForCloseOperation(waitForConfigStoreWrites(), 1000);
-    await waitForCloseOperation(drainRuntimeLogs(), 5000);
+    await waitForCloseOperation(waitForConfigStoreWrites(), CLOSE_STORAGE_TIMEOUT_MS);
+    await waitForCloseOperation(drainRuntimeLogs(), CLOSE_STORAGE_TIMEOUT_MS);
     if (!isClosePreparationActive(attempt)) return false;
     if (payload && typeof payload === 'object' && Object.prototype.hasOwnProperty.call(payload, 'pendingQueue')) {
-      await waitForCloseOperation(configStore.savePendingQueue(payload.pendingQueue, { allowDuringQuiesce: true }), 1000);
+      await waitForCloseOperation(configStore.savePendingQueue(payload.pendingQueue, { allowDuringQuiesce: true }), CLOSE_STORAGE_TIMEOUT_MS);
     }
     if (!isClosePreparationActive(attempt)) return false;
     if (mcpUpdateHandoff) {
+      closeLaunchAttempt = attempt;
       await mcpUpdate.markLaunching();
       await launchVerifiedUpdate(preparedUpdate, path.dirname(process.execPath));
       preparedUpdateLaunchStarted = true;
-      mcpUpdateHandoff.resolve();
+      const handoff = mcpUpdateHandoff;
       mcpUpdateHandoff = null;
+      handoff?.resolve();
     }
     closeFlushApproved = true;
     approved = true;
@@ -3695,6 +3708,7 @@ ipcMain.handle('app:finish-close', async (event, payload = true) => {
     });
     return true;
   } catch {
+    if (closeLaunchAttempt === attempt) closeLaunchAttempt = null;
     if (mcpUpdateHandoff) await mcpUpdate.launchFailed().catch(() => {});
     restoreClosePreparation(attempt);
     return false;

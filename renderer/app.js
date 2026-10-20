@@ -9179,12 +9179,13 @@ let closePreparationInertState = [];
 let closePreparationOverlayState = null;
 let closePreparationGeneration = 0;
 let activeClosePreparationAttempt = null;
-const CLOSE_PREPARATION_TIMEOUT_MS = 1200;
+const CLOSE_PREPARATION_TIMEOUT_MS = 120000;
+const CLOSE_FINISH_TIMEOUT_MS = 420000;
 
-function waitForClosePreparationStep(promise) {
+function waitForClosePreparationStep(promise, timeoutMs = CLOSE_PREPARATION_TIMEOUT_MS) {
   return Promise.race([
     Promise.resolve(promise),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Speichern vor dem Beenden hat zu lange gedauert')), CLOSE_PREPARATION_TIMEOUT_MS))
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Speichern vor dem Beenden hat zu lange gedauert')), timeoutMs))
   ]);
 }
 
@@ -9238,6 +9239,7 @@ async function recoverWindowClose(generation, attempt, originalError) {
     showCopyToast('Die Anwendung konnte nach dem fehlgeschlagenen Speichern nicht entsperrt werden', 8000, 'error');
     return;
   }
+  let recoveryError = null;
   try {
     await waitForClosePreparationStep(withCloseWriteAccess(async () => {
       await flushConfigWrites();
@@ -9247,15 +9249,15 @@ async function recoverWindowClose(generation, attempt, originalError) {
       if (failedConfigWriteOperations.length !== 0) throw new Error('Nicht alle Einstellungen konnten gespeichert werden');
     }));
   } catch (error) {
-    if (isCurrentClosePreparation(generation, attempt)) showCopyToast(error.message || String(error), 8000, 'error');
-    return;
+    recoveryError = error;
   }
   if (!isCurrentClosePreparation(generation, attempt)) return;
   closePreparationPromise = null;
   activeClosePreparationAttempt = null;
   closePreparationState = 'open';
   setClosePreparationUi(false);
-  showCopyToast(originalError.message || String(originalError), 8000, 'error');
+  const shownError = recoveryError || originalError;
+  showCopyToast(shownError.message || String(shownError), 8000, 'error');
 }
 
 function prepareForWindowClose(attempt) {
@@ -9273,7 +9275,7 @@ function prepareForWindowClose(attempt) {
     closePreparationState = 'sealed';
     await waitForClosePreparationStep(flushConfigWrites());
     if (!isCurrentClosePreparation(generation, attempt)) return;
-    const accepted = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: true, attempt, pendingQueue }));
+    const accepted = await waitForClosePreparationStep(window.api.finishClosePreparation({ ready: true, attempt, pendingQueue }), CLOSE_FINISH_TIMEOUT_MS);
     if (!accepted) throw new Error('Einstellungen konnten vor dem Beenden nicht gespeichert werden');
   })();
   closePreparationPromise.catch(error => recoverWindowClose(generation, attempt, error));
