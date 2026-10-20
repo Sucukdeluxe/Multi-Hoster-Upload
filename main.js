@@ -4182,7 +4182,7 @@ async function startMcpService() {
       void mcpUpdate.recover({ rendererReady: closeHandshakeReady, connected: status.connection === 'online' });
     },
     requiresConfirmation: name => {
-      if (!['mhu_queue_start', 'mhu_queue_retry', 'mhu_queue_resume', 'mhu_automation_start', 'mhu_automation_reconcile'].includes(name)) return false;
+      if (!['mhu_queue_start', 'mhu_queue_retry', 'mhu_automation_start', 'mhu_automation_reconcile'].includes(name)) return false;
       const settings = configStore.load().globalSettings;
       return settings.deleteSourceAfterSuccessfulUpload === true || !['nothing', undefined, null].includes(settings.shutdownAfterFinish);
     },
