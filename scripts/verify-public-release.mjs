@@ -53,6 +53,8 @@ const sourceFiles = [
   'lib/performance-monitor.js',
   'lib/runtime-profile.js',
   'lib/system-metrics.js',
+  'lib/system-metrics-reader.js',
+  'lib/system-metrics-worker.js',
   'lib/upload-file-io.js',
   'lib/online-backup.js',
   'lib/online-backup-keyring.js',
