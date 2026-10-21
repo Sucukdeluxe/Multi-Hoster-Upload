@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('api', {
   cancelSelectedJobs: (jobIds) => ipcRenderer.invoke('cancel-selected-jobs', jobIds),
   addJobsToBatch: (payload) => ipcRenderer.invoke('add-jobs-to-batch', payload),
   completeUploadFinalization: (payload) => ipcRenderer.invoke('complete-upload-finalization', payload),
+  completeQueuePersist: (payload) => ipcRenderer.invoke('complete-queue-persist', payload),
   finishAfterActive: () => ipcRenderer.invoke('finish-after-active'),
   runHealthCheck: (payload) => ipcRenderer.invoke('run-health-check', payload),
   onHealthCheckResult: (callback) => {
@@ -184,6 +185,9 @@ contextBridge.exposeInMainWorld('api', {
   onUploadBatchDone: (callback) => {
     ipcRenderer.on('upload-batch-done', (_event, data) => callback(data));
   },
+  onPersistUploadQueue: (callback) => {
+    ipcRenderer.on('persist-upload-queue', (_event, data) => callback(data));
+  },
   onUploadStats: (callback) => {
     ipcRenderer.on('upload-stats', (_event, data) => callback(data));
   },
@@ -223,6 +227,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners('folder-monitor:renderer-generation');
     ipcRenderer.removeAllListeners('upload-progress');
     ipcRenderer.removeAllListeners('upload-batch-done');
+    ipcRenderer.removeAllListeners('persist-upload-queue');
     ipcRenderer.removeAllListeners('upload-stats');
     ipcRenderer.removeAllListeners('app:update-available');
     ipcRenderer.removeAllListeners('app:update-progress');

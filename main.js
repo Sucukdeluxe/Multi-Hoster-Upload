@@ -18,6 +18,7 @@ app.once('before-quit', () => startupDiagnostics.write('process-quit-requested')
 const ConfigStore = require('./lib/config-store');
 const UploadManager = require('./lib/upload-manager');
 const { createSourceFileCleanup } = require('./lib/source-file-cleanup');
+const { createEarlySourceCleanup } = require('./lib/early-source-cleanup');
 const SourceDeleteJournal = require('./lib/source-delete-journal');
 const { HOSTER_CONFIGS } = require('./lib/hosters');
 const VidmolyUploader = require('./lib/vidmoly-upload');
@@ -240,6 +241,7 @@ let uploadManager = null;
 let lastSessionSummary = null;
 let sourceDeleteJournal = null;
 const pendingUploadFinalizations = new Map();
+const pendingQueuePersists = new Map();
 
 async function waitForUploadManagerRelease(manager, timeoutMs = 300000) {
   const deadline = Date.now() + timeoutMs;
@@ -265,6 +267,21 @@ function requestUploadFinalization(summary, preserveQueue = false) {
       }
     });
     safeSend('upload-batch-done', { summary, finalizationId, preserveQueue });
+  });
+}
+function requestQueuePersist(timeoutMs = 15000) {
+  const requestId = `queue-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingQueuePersists.delete(requestId);
+      resolve(false);
+    }, timeoutMs);
+    pendingQueuePersists.set(requestId, (value) => {
+      clearTimeout(timer);
+      pendingQueuePersists.delete(requestId);
+      resolve(value === true);
+    });
+    if (!safeSend('persist-upload-queue', { requestId })) pendingQueuePersists.get(requestId)(false);
   });
 }
 const activeUploadProducerTrackers = new Set();
@@ -1127,6 +1144,21 @@ function _flushUploadLog() {
     if (_uploadLogBuffer.length && !_uploadLogFlushTimer) setImmediate(_flushUploadLog);
   });
   return _uploadLogWrite;
+}
+
+async function flushUploadLogDurably() {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (_uploadLogFlushTimer) {
+      clearTimeout(_uploadLogFlushTimer);
+      _uploadLogFlushTimer = null;
+    }
+    await _flushUploadLog();
+    if (!_uploadLogWriting && _uploadLogBuffer.length === 0) return true;
+  }
+  if (_uploadLogBuffer.length && !_uploadLogFlushTimer) {
+    _uploadLogFlushTimer = setTimeout(() => { _uploadLogFlushTimer = null; _flushUploadLog(); }, 1000);
+  }
+  return false;
 }
 
 async function drainRuntimeLogs() {
@@ -2687,13 +2719,29 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // new upload; addJobs during a running batch keeps them).
   _jobLogCollector.clear();
 
+  const _loggedLinkJobIds = new Set();
+  let earlySourceCleanup = null;
   const sourceCleanup = createSourceFileCleanup({
     fs,
     path,
     platform: process.platform,
     isEnabled: () => configStore.getGlobalSetting('deleteSourceAfterSuccessfulUpload') === true,
     audit: appendSourceCleanupAudit,
-    journal: sourceDeleteJournal
+    journal: sourceDeleteJournal,
+    onReady: (token) => { if (earlySourceCleanup) earlySourceCleanup.request(token); }
+  });
+  earlySourceCleanup = createEarlySourceCleanup({
+    cleanup: sourceCleanup,
+    prepare: async () => {
+      if (configStore.getGlobalSetting('deleteSourceAfterSuccessfulUpload') !== true) return null;
+      const durableJobIds = new Set(_loggedLinkJobIds);
+      await _thisManager._automationCompletionWriter?.flush();
+      if (!(await flushUploadLogDurably())) return null;
+      if (!_flushProgressToRendererNow()) return null;
+      const queuePersisted = await requestQueuePersist();
+      return { queuePersisted, isDurable: (job) => durableJobIds.has(job.jobId) };
+    },
+    onError: (error) => debugLog(`source-cleanup per file skipped: ${error && error.message ? error.message : error}`)
   });
   let sourceCleanupFingerprints;
   try {
@@ -2732,6 +2780,19 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       _progressByJob.clear();
       if (batch.length) safeSend('upload-progress-batch', batch);
     }, PROGRESS_BATCH_INTERVAL_MS);
+  }
+
+  function _flushProgressToRendererNow() {
+    if (_progressFlushTimer) {
+      clearTimeout(_progressFlushTimer);
+      _progressFlushTimer = null;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const batch = _progressTerminalQueue.splice(0);
+    for (const value of _progressByJob.values()) batch.push(value);
+    _progressByJob.clear();
+    if (batch.length) safeSend('upload-progress-batch', batch);
+    return true;
   }
 
   function _queueProgressForRenderer(data) {
@@ -2778,6 +2839,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       if (link) {
         if (shouldLogHosterToFile(data.hoster)) {
           appendUploadLog(data.hoster || '', link, data.fileName || '');
+          if (data.jobId) _loggedLinkJobIds.add(data.jobId);
         } else {
           debugLog(`upload-log: skip ${data.fileName} @ ${data.hoster} (logToFile disabled for hoster)`);
         }
@@ -2932,6 +2994,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
       try { await configStore.saveUploadRecovery(null); } catch (error) { debugLog(`upload recovery state could not be cleared: ${error.message}`); }
     }
     if (!finalizationPersisted) debugLog('upload finalization blocked: queue or automation completion evidence was not persisted');
+    await earlySourceCleanup.close();
     await sourceCleanup.finishBatch({ historyPersisted, queuePersisted: finalizationPersisted });
     _producerTracker.finish();
 
@@ -3742,6 +3805,13 @@ ipcMain.handle('get-global-settings', () => {
 
 ipcMain.handle('save-pending-queue', async (_event, pendingQueue) => {
   await configStore.savePendingQueue(pendingQueue);
+  return true;
+});
+
+ipcMain.handle('complete-queue-persist', async (_event, payload) => {
+  const complete = payload && pendingQueuePersists.get(payload.requestId);
+  if (!complete) return false;
+  complete(payload.ok === true);
   return true;
 });
 

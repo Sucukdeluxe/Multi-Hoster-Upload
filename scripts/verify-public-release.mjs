@@ -29,6 +29,7 @@ const sourceFiles = [
   'lib/diagnostics-agent.js',
   'lib/diagnostics-collectors.js',
   'lib/doodstream-upload.js',
+  'lib/early-source-cleanup.js',
   'lib/file-probe.js',
   'lib/file-discovery.js',
   'lib/folder-monitor.js',

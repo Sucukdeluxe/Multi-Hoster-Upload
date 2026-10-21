@@ -1573,6 +1573,21 @@ async function init() {
       });
     }
   });
+  if (window.api.onPersistUploadQueue) {
+    window.api.onPersistUploadQueue(async (data) => {
+      const requestId = data && data.requestId;
+      if (!requestId) return;
+      let ok = false;
+      if (closePreparationState === 'open') {
+        try {
+          queuePersistThrottle.cancel();
+          await persistQueueStateNow();
+          ok = true;
+        } catch {}
+      }
+      try { await window.api.completeQueuePersist({ requestId, ok }); } catch {}
+    });
+  }
   window.api.onUploadStats((data) => {
     handleStats(data);
   });
