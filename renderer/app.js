@@ -444,6 +444,12 @@ function isStartableQueueJob(job) {
   return !!job && isStartableQueueStatus(job.status);
 }
 
+function isAutomaticallyStartableQueueJob(job) {
+  if (!isStartableQueueJob(job)) return false;
+  if (job.status !== 'error' || !window.Stats) return true;
+  return window.Stats.classifyErrorCategory(job.error) !== 'file-rejected';
+}
+
 // Queue state
 let queueJobs = []; // { id, file, fileName, hoster, status, bytesUploaded, bytesTotal, speedKbs, elapsed, remaining, error, result, attempt, maxAttempts, link }
 const _jobIndexById = new Map(); // id -> job (O(1) lookup)
@@ -1039,7 +1045,7 @@ async function applyAutomationEvaluation(evaluation) {
     renderQueueTable();
     persistQueueStateSoon(true);
   } else if (action === 'start') {
-    const result = await startUpload();
+    const result = await startUpload({ _automationStart: true });
     if (result?.ok === false) {
       return freezeAutomationValue({ ok: false, error: result.error, warning: null, admittedFiles: [], deferredFiles, paused: /pausiert/i.test(result.error), dryRun: false });
     }
@@ -4808,7 +4814,8 @@ async function startUpload(opts) {
     buildQueuePreview();
   }
 
-  const jobsToStart = queueJobs.filter((job) => isStartableQueueStatus(job.status));
+  const automaticStart = !!(opts && (opts._autoRetry || opts._automationStart));
+  const jobsToStart = queueJobs.filter(automaticStart ? isAutomaticallyStartableQueueJob : isStartableQueueJob);
   if (jobsToStart.length === 0) {
     uploading = false;
     updateQueueActionButtons();
