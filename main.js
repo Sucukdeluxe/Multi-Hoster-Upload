@@ -3631,8 +3631,8 @@ ipcMain.handle('import-upload-log', async () => {
   return { entries, path: filePaths[0] };
 });
 
-ipcMain.handle('copy-to-clipboard', (_event, text) => {
-  clipboard.writeText(text);
+ipcMain.handle('copy-to-clipboard', async (_event, text) => {
+  await clipboard.writeText(text);
   return true;
 });
 
@@ -4320,9 +4320,9 @@ ipcMain.handle('mcp:rotate', async event => {
   const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('MCP-Zugang erneuern? Der bisherige Code wird ungültig.', 'Rotate MCP access? The previous code becomes invalid.'), buttons: ['Abbrechen / Cancel', 'Erneuern / Rotate'], defaultId: 0, cancelId: 0, noLink: true });
   return result.response === 1 ? mcpService.rotate() : mcpService.state();
 });
-ipcMain.handle('mcp:copy-code', event => {
+ipcMain.handle('mcp:copy-code', async event => {
   if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService?.active) throw new Error('MCP_ACCESS_DENIED');
-  clipboard.writeText(mcpService.store.code());
+  await clipboard.writeText(mcpService.store.code());
   return true;
 });
 ipcMain.handle('mcp:add-grant', async event => {
