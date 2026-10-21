@@ -4270,6 +4270,7 @@ async function startMcpService() {
     getSystemMetrics: args => systemMetrics.snapshot(args),
     getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
     getCapabilities: () => mcpService?.capabilities() || [],
+    grantDirectory: (directory, options) => mcpService.grantDirectory(directory, options),
     getProtectedPaths: () => [app.getPath('userData'), configStore.filePath, configStore.historyPath, configStore.automationCompletionPath],
     getInstallationId: () => mcpService?.store.value.identity?.installationId,
     getRuntimeDiagnostics: () => ({
@@ -4307,7 +4308,7 @@ ipcMain.on('mcp:reply', (event, payload) => {
 });
 ipcMain.handle('mcp:configure', async (event, args) => {
   if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
-  if (args?.enabled && (args.capabilities?.includes('secrets') || (args.capabilities?.includes('updates') && !mcpService.capabilities().includes('updates')) || !mcpService.active)) {
+  if (args?.enabled && (args.capabilities?.includes('secrets') || (args.capabilities?.includes('full_access') && !mcpService.capabilities().includes('full_access')) || (args.capabilities?.includes('updates') && !mcpService.capabilities().includes('updates')) || !mcpService.active)) {
     const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'MCP-Zugriff / MCP access', message: 'MCP-Zugriff mit diesen Berechtigungen aktivieren? / Enable MCP with these capabilities?',
       detail: String(args.capabilities?.join(', ') || '').slice(0, 100), buttons: ['Abbrechen / Cancel', 'Aktivieren / Enable'], defaultId: 0, cancelId: 0, noLink: true });
     if (result.response !== 1) return mcpService.state();
