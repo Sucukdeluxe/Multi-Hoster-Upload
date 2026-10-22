@@ -2010,6 +2010,7 @@ async function runAutomaticUpdateCheck(forceRefresh) {
 app.whenReady().then(async () => {
   await mcpUpdate.load().catch(() => logError('MCP update state unavailable'));
   if (!_hasSingleInstanceLock) return;
+  await configStore.init().catch(error => logError(`config load failed: ${error?.code || error?.message || error}`));
   startupDiagnostics.write('application-ready', { hardwareAcceleration: app.isHardwareAccelerationEnabled(), gpuFeatures: app.getGPUFeatureStatus() });
   void app.getGPUInfo('basic').then(info => {
     const devices = Array.isArray(info.gpuDevice) ? info.gpuDevice.map(device => ({

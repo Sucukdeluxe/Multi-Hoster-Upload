@@ -178,7 +178,7 @@ English is the default language for new profiles. Open **Settings > General** to
 
 ### Local data and credentials
 
-Settings, pending queue state, and upload history are stored in Electron's user-data directory. Passwords and API keys must be encrypted with Electron `safeStorage` before they are written. On Windows, `safeStorage` uses DPAPI and ties encrypted values to the current Windows user profile. If operating-system encryption is unavailable or encryption fails, the write is rejected and credentials are never written as plaintext. Legacy plaintext credentials remain readable for migration and are encrypted during the next successful save.
+Settings, pending queue state, and upload history are stored in Electron's user-data directory. Passwords and API keys must be encrypted with Electron `safeStorage` before they are written. On Windows, `safeStorage` uses DPAPI and ties encrypted values to the current Windows user profile. If operating-system encryption is unavailable or encryption fails, the write is rejected and credentials are never written as plaintext. Legacy plaintext credentials remain readable for migration and are encrypted during the next successful save. The app uses the asynchronous `safeStorage` API (`encryptStringAsync`, `decryptStringAsync`, `isAsyncEncryptionAvailable`). Values encrypted by earlier versions with the synchronous API keep the same `enc:v1:` format and remain readable; when `decryptStringAsync` reports `shouldReEncrypt`, the settings file is re-encrypted once after loading.
 
 Credentials are decrypted when required for account validation or upload to the selected host. Do not share application data files, backup files, screenshots containing credentials, or generated backup keys.
 
