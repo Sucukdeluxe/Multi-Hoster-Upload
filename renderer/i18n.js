@@ -988,6 +988,7 @@
           [/^Clouddrop: Datei nicht lesbar: (.+)$/, 'Clouddrop: File cannot be read: $1'],
           [/^Doodstream: konnte Upload-Server nicht ermitteln \(Endpoint geändert\?\)\. (.+)$/, 'Doodstream: Could not determine the upload server (endpoint changed?). $1'],
           [/^Doodstream Upload fehlgeschlagen: (.+)$/, 'Doodstream upload failed: $1'],
+          [/^DoodStream: Upload-Seite antwortete mit HTTP (\d{3})$/, 'DoodStream: The upload page responded with HTTP $1'],
           [/^Doodstream Upload: kein Filecode — Server gab leeren Link zurück (.+)$/, 'Doodstream upload: No file code — the server returned an empty link $1'],
           [/^Doodstream lehnt Datei ab \(Server-Status: (.+)\)\. CDN=(.+)$/, 'Doodstream rejected the file (server status: $1). CDN=$2'],
           [/^Doodstream Upload: Redirect-Antwort ungültig \((.+)\)$/, 'Doodstream upload: Invalid redirect response ($1)'],
