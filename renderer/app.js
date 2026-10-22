@@ -446,6 +446,7 @@ function isStartableQueueJob(job) {
 
 function isAutomaticallyStartableQueueJob(job) {
   if (!isStartableQueueJob(job)) return false;
+  if (window.SourceCleanupPolicy?.isStagedSourceFile(job.file || job.fileName)) return false;
   if (job.status !== 'error' || !window.Stats) return true;
   return window.Stats.classifyErrorCategory(job.error) !== 'file-rejected';
 }
