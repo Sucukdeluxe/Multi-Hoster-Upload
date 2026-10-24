@@ -117,6 +117,8 @@ const sourceFiles = [
   'scripts/afterPack.cjs',
   'scripts/backup-recovery.cjs',
   'scripts/dev-runner.cjs',
+  'scripts/development-bootstrap.cjs',
+  'scripts/development-refresh.cjs',
   'scripts/mcp-connection.mjs',
   'scripts/pull-mcp-file.mjs',
   'scripts/release-plan.mjs',
