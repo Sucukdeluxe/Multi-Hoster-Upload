@@ -3528,7 +3528,7 @@ function getStatusText(job) {
     case 'preview': text = job.interrupted ? 'Unterbrochen · bereit zum Fortsetzen' : 'Bereit'; break;
     case 'queued': text = 'Wartet'; break;
     case 'getting-server': text = `Server…${accSuffix}`; break;
-    case 'uploading': text = `Upload${accSuffix}`; break;
+    case 'uploading': text = job.statusDetail ? `${localizeUiText(job.statusDetail)}${accSuffix}` : `Upload${accSuffix}`; break;
     case 'retrying': {
       const base = `Retry ${job.attempt}/${job.maxAttempts}${accSuffix}`;
       text = shortErr ? `${base}: ${shortErr}` : base;
@@ -3536,7 +3536,7 @@ function getStatusText(job) {
     }
     case 'done': text = 'Fertig'; break;
     case 'aborted': text = shortErr || 'Abgebrochen'; break;
-    case 'error': text = shortErr ? (/^Fehlgeschlagen(?::|$)/.test(shortErr) ? shortErr : `Fehlgeschlagen: ${shortErr}`) : 'Fehlgeschlagen'; break;
+    case 'error': text = shortErr ? (/^(?:Fehlgeschlagen|Status unklar)(?::|$)/.test(shortErr) ? shortErr : `Fehlgeschlagen: ${shortErr}`) : 'Fehlgeschlagen'; break;
     case 'skipped': text = shortErr ? `Übersprungen: ${shortErr}` : 'Übersprungen'; break;
     default: text = job.status;
   }
@@ -5148,6 +5148,7 @@ function _handleProgressImpl(data) {
   job.attempt = data.attempt || 0;
   job.maxAttempts = data.maxAttempts || 0;
   job.progress = data.progress || 0;
+  job.statusDetail = data.statusDetail || null;
   // Track which account the backend is currently using so the status cell
   // can display "Primär" vs "Fallback #N" during rotation.
   if (data.accountId) job.accountId = data.accountId;
