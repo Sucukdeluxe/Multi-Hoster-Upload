@@ -42,6 +42,7 @@ function refreshLocalizedRuntimeUi() {
   if (hint && activeRecentTab) hint.textContent = localizeUiText(activeRecentTab.dataset.panel === 'statsTab' ? 'Upload-Statistiken' : 'Zuletzt erzeugte Upload-Links');
   renderManagedOnlineBackups();
   renderManagedOnlineBackupRefreshIssue();
+  window.UploadStatisticsView?.localize();
 }
 
 // Dropdown options for "Add Account" modal: value -> label
@@ -1698,6 +1699,7 @@ function _isHistoryTabActive() {
     syncTabIndicator(tab);
     const activeSidebarButton = nextView?.querySelector('.view-sidebar-navigation > .view-sidebar-item.active, .settings-navigation .settings-nav-button.active');
     _syncSidebarIndicator(activeSidebarButton, true);
+    if (tab.dataset.view === 'history') window.UploadStatisticsView?.refresh(true);
     if (tab.dataset.view === 'history' && (_historyDirty || !_historyEverLoaded)) {
       loadHistory();
     }
@@ -6048,6 +6050,7 @@ function setAccountSidebarFilter(value) {
 
 function setHistorySidebarFilter(value) {
   if (!['all', 'success', 'error', 'skipped'].includes(value)) return;
+  window.UploadStatisticsView?.showHistory();
   historySidebarFilter = value;
   _syncSidebarFilterButtons('[data-history-filter]', 'historyFilter', value);
   const container = document.getElementById('historyContainer');

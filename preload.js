@@ -28,6 +28,8 @@ ipcRenderer.on('folder-monitor:renderer-generation', (_event, generation) => {
 });
 
 contextBridge.exposeInMainWorld('api', {
+  getStatistics: range => ipcRenderer.invoke('get-statistics', range),
+  resetStatistics: scope => ipcRenderer.invoke('reset-statistics', scope),
   mcpStatus: () => ipcRenderer.invoke('mcp:status'),
   mcpConfigure: args => ipcRenderer.invoke('mcp:configure', args),
   mcpRotate: () => ipcRenderer.invoke('mcp:rotate'),

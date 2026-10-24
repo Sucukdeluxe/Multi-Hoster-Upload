@@ -45,6 +45,7 @@ const { selectOrphanTmps } = require('./lib/orphan-tmp');
 const { sanitizeConfig, buildSupportBundleText, collectSecretValues, redactLogText, valueScrub, collectFile, collectFileSnapshot, REDACTED } = require('./lib/support-bundle');
 const { buildWebhookRequest, isAllAborted } = require('./lib/webhook-notify');
 const stats = require('./lib/stats');
+const { UploadStatistics } = require('./lib/upload-statistics');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
@@ -160,6 +161,9 @@ let dropTargetWindow = null;
 let tray = null;
 let _cachedLogSettings = null;
 const configStore = new ConfigStore(app);
+const uploadStatistics = new UploadStatistics(path.join(app.getPath('userData'), 'upload-statistics.json'));
+let statisticsReady;
+let statisticsTimer;
 const mcpUpdate = new McpUpdate({
   directory: app.getPath('userData'), version: () => app.getVersion(),
   canUpdate: () => mcpService?.capabilities().includes('updates') === true,
@@ -296,6 +300,7 @@ async function waitForConfigStoreWrites() {
   await Promise.all([...cloudLogWrites]);
   await cloudLogSync.flushLocal();
   await configStore.drainWrites();
+  await uploadStatistics.flush();
   await configStore.drainAutomationCompletionWrites();
 }
 
@@ -2010,6 +2015,10 @@ async function runAutomaticUpdateCheck(forceRefresh) {
 app.whenReady().then(async () => {
   await mcpUpdate.load().catch(() => logError('MCP update state unavailable'));
   if (!_hasSingleInstanceLock) return;
+  statisticsReady = configStore.loadHistory().then(history => uploadStatistics.init(history));
+  await statisticsReady.catch(error => debugLog(`statistics init failed: ${error.message}`));
+  statisticsTimer = setInterval(() => { void uploadStatistics.flush().catch(error => debugLog(`statistics save failed: ${error.message}`)); }, 5000);
+  statisticsTimer.unref();
   startupDiagnostics.write('application-ready', { hardwareAcceleration: app.isHardwareAccelerationEnabled(), gpuFeatures: app.getGPUFeatureStatus() });
   void app.getGPUInfo('basic').then(info => {
     const devices = Array.isArray(info.gpuDevice) ? info.gpuDevice.map(device => ({
@@ -2109,6 +2118,7 @@ app.on('will-quit', () => {
   if (quitTeardownStarted) return;
   quitTeardownStarted = true;
   systemMetrics.stop();
+  clearInterval(statisticsTimer);
   void mcpService?.stop();
   folderMonitorRendererReadyGeneration = null;
   if (updateCheckInterval) clearInterval(updateCheckInterval);
@@ -2238,6 +2248,18 @@ ipcMain.handle('save-config', async (_event, config) => {
       debugLog(`save-config pool refresh failed: ${err && err.message ? err.message : err}`);
     }
   }
+  return true;
+});
+
+ipcMain.handle('get-statistics', async (_event, range) => {
+  await statisticsReady;
+  return uploadStatistics.snapshot(range);
+});
+
+ipcMain.handle('reset-statistics', async (_event, scope) => {
+  assertConfigWriteAllowed();
+  await statisticsReady;
+  await uploadStatistics.reset(scope);
   return true;
 });
 
@@ -2824,6 +2846,12 @@ ipcMain.handle('start-upload', async (_event, payload) => {
     onError: error => debugLog(`automation completion ledger failed: ${error.message}`)
   });
 
+  uploadManager.on('statistics-transfer', ({ hoster, bytes }) => {
+    uploadStatistics.activity(true);
+    uploadStatistics.transfer(hoster, bytes);
+  });
+  uploadManager.on('statistics-outcome', data => uploadStatistics.outcome(data));
+
   uploadManager.on('progress', (data) => {
     if (data.status !== 'uploading') {
       debugLog(`progress: ${data.fileName} ${data.hoster} ${data.status} ${data.error || ''}`);
@@ -2862,6 +2890,7 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   uploadManager.on('stats', (data) => {
     try {
       if (!data || typeof data !== 'object') return;
+      uploadStatistics.activity(data.activeJobs > 0 && data.state !== 'idle');
       safeSend('upload-stats', data);
       if (data.state === 'uploading' && data.activeJobs > 0) {
         const speedMb = ((Number(data.globalSpeedKbs) || 0) / 1000).toFixed(1);
@@ -2939,6 +2968,8 @@ ipcMain.handle('start-upload', async (_event, payload) => {
   // create a fresh manager which the trailing `uploadManager = null` then
   // orphans (cancel/addJobs see null, the new batch keeps running invisibly).
   uploadManager.on('batch-done', async (summary) => {
+    uploadStatistics.finishBatch();
+    void uploadStatistics.flush().catch(error => debugLog(`statistics save failed: ${error.message}`));
     summary = stats.mergeSkippedIntoSummary(summary, skippedJobs);
     let automationCompletionsPersisted = true;
     try { await _thisManager._automationCompletionWriter?.flush(); } catch (error) {

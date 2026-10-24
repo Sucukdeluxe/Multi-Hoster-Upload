@@ -7,6 +7,7 @@
   <title>Multi-Hoster-Uploader</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="mcp.css">
+  <link rel="stylesheet" href="statistics.css">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -51,9 +52,9 @@
           <svg class="top-nav-icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
           <span class="top-nav-label">Einstellungen</span>
         </button>
-        <button class="tab" id="history-tab" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1" data-view="history" title="Verlauf">
+        <button class="tab" id="history-tab" role="tab" aria-selected="false" aria-controls="history-view" tabindex="-1" data-view="history" title="Statistiken">
           <svg class="top-nav-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
-          <span class="top-nav-label">Verlauf</span>
+          <span class="top-nav-label">Statistiken</span>
         </button>
         <span class="tab-indicator" aria-hidden="true"></span>
       </nav>
@@ -575,14 +576,15 @@
     </div>
   </div>
 
-  <div id="history-view" class="view" role="tabpanel" aria-labelledby="history-tab">
+  <div id="history-view" class="view statistics-mode" role="tabpanel" aria-labelledby="history-tab">
     <aside class="view-sidebar" aria-label="Verlaufsübersicht">
       <div class="view-navigation-card">
       <div class="view-sidebar-header">
-        <span class="view-sidebar-kicker">Archiv</span>
-        <h1 class="view-sidebar-title"><svg aria-hidden="true"><use href="#icon-history"></use></svg><span>Verlauf</span></h1>
+        <span class="view-sidebar-kicker">Auswertung</span>
+        <h1 class="view-sidebar-title"><svg aria-hidden="true"><use href="#icon-history"></use></svg><span>Statistiken</span></h1>
       </div>
-      <nav class="view-sidebar-navigation" aria-label="Verlaufsstatus">
+      <nav class="view-sidebar-navigation statistics-ranges" aria-label="Statistik-Zeitraum"><span class="view-sidebar-indicator" aria-hidden="true"></span><button class="view-sidebar-item active" data-statistics-range="session" aria-label="Sitzung" aria-pressed="true"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">Sitzung</span></button><button class="view-sidebar-item" data-statistics-range="today" aria-label="Heute" aria-pressed="false"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">Heute</span></button><button class="view-sidebar-item" data-statistics-range="last24" aria-label="Letzte 24 Stunden" aria-pressed="false"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">Letzte 24 Stunden</span></button><button class="view-sidebar-item" data-statistics-range="week" aria-label="Sieben Tage" aria-pressed="false"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">Sieben Tage</span></button><button class="view-sidebar-item" data-statistics-range="month" aria-label="30 Tage" aria-pressed="false"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">30 Tage</span></button><button class="view-sidebar-item" data-statistics-range="all" aria-label="Gesamt" aria-pressed="false"><svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-clock"></use></svg><span class="view-sidebar-copy">Gesamt</span></button></nav><div class="statistics-nav-divider"><span>Upload-Verlauf</span></div>
+      <nav class="view-sidebar-navigation" id="statisticsHistoryNavigation" aria-label="Verlaufsstatus">
         <span class="view-sidebar-indicator" aria-hidden="true"></span>
         <button class="view-sidebar-item active" data-history-filter="all" aria-label="Gesamten Verlauf anzeigen">
           <svg class="view-sidebar-icon" aria-hidden="true"><use href="#icon-history"></use></svg>
@@ -615,6 +617,7 @@
       </div>
       <div class="view-sidebar-footnote">Links wiederfinden, kopieren oder als Datei exportieren.</div>
     </aside>
+    <section id="statisticsContent" class="statistics-content" aria-label="Statistik-Dashboard"><header class="statistics-heading"><div><h2>Statistiken</h2><p id="statisticsMessage">Statistiken werden geladen…</p></div><div class="statistics-reset-actions" aria-label="Statistiken zurücksetzen"><button class="statistics-reset" data-statistics-reset="session">Sitzung zurücksetzen</button><button class="statistics-reset" data-statistics-reset="all">Gesamt zurücksetzen</button><button class="statistics-reset statistics-reset-danger" data-statistics-reset="errors">Fehler zurücksetzen</button></div></header><div id="statisticsNotice" class="statistics-notice" role="status" hidden><span id="statisticsNoticeText"></span><button class="statistics-reset" id="statisticsRetry">Erneut versuchen</button></div><div class="statistics-kpis"><article class="statistics-kpi" data-statistics-card="bytes"><span class="statistics-kpi-label">Datenmenge</span><strong class="statistics-kpi-value" data-statistics-value="bytes">–</strong><span class="statistics-kpi-source" data-statistics-source="bytes"></span></article><article class="statistics-kpi" data-statistics-card="completed"><span class="statistics-kpi-label">Uploads</span><strong class="statistics-kpi-value" data-statistics-value="completed">–</strong><span class="statistics-kpi-source" data-statistics-source="completed"></span></article><article class="statistics-kpi" data-statistics-card="successRate"><span class="statistics-kpi-label">Erfolgsquote</span><strong class="statistics-kpi-value" data-statistics-value="successRate">–</strong><span class="statistics-kpi-source" data-statistics-source="successRate"></span></article><article class="statistics-kpi" data-statistics-card="averageSpeedBps"><span class="statistics-kpi-label">Durchschnitt</span><strong class="statistics-kpi-value" data-statistics-value="averageSpeedBps">–</strong><span class="statistics-kpi-source" data-statistics-source="averageSpeedBps"></span></article><article class="statistics-kpi" data-statistics-card="failed"><span class="statistics-kpi-label">Fehler</span><strong class="statistics-kpi-value" data-statistics-value="failed">–</strong><span class="statistics-kpi-source" data-statistics-source="failed"></span></article></div><div class="statistics-detail-grid"><section class="statistics-chart"><div class="statistics-section-heading"><h3>Bandbreitenverlauf</h3><span>Live · letzte 60 Sekunden</span></div><div class="statistics-chart-canvas"><canvas id="statisticsCanvas" role="img" aria-label="Upload-Bandbreitenverlauf der letzten 60 Sekunden"></canvas></div></section><section class="statistics-providers"><div class="statistics-section-heading"><h3>Hoster</h3><span id="statisticsProviderScope">Sitzung</span></div><div class="statistics-provider-table" role="table" aria-label="Upload-Nutzung je Hoster"><div class="statistics-provider-header" role="row"><span role="columnheader">Hoster</span><span role="columnheader">Daten</span><span role="columnheader">Ergebnisse</span></div><div class="statistics-provider-body" id="statisticsProviders" role="rowgroup"></div></div><p class="statistics-provider-hint">Erfolgreiche Uploads werden je Hoster gezählt. Die Datenmenge enthält Wiederholungen.</p></section></div></section>
     <main class="history-container view-main history-main">
       <div class="history-header">
         <h2>Upload-Verlauf</h2>
@@ -743,5 +746,6 @@
   <script src="i18n.js"></script>
   <script src="mcp.js"></script>
   <script src="app.js"></script>
+  <script src="statistics.js"></script>
 </body>
 </html>
