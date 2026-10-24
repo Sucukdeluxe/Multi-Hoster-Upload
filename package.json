@@ -1,6 +1,6 @@
 {
   "name": "multi-hoster-uploader",
-  "version": "2.1.79",
+  "version": "2.1.87",
   "description": "Upload files to doodstream, voe, vidmoly, byse simultaneously",
   "main": "main.js",
   "scripts": {
@@ -18,7 +18,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
-    "electron": "^41.10.6",
+    "electron": "^45.0.0",
     "electron-builder": "^26.15.3",
     "eslint": "^10.8.1",
     "eslint-plugin-security": "^4.0.1",

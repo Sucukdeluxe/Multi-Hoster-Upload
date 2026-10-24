@@ -2015,6 +2015,7 @@ async function runAutomaticUpdateCheck(forceRefresh) {
 app.whenReady().then(async () => {
   await mcpUpdate.load().catch(() => logError('MCP update state unavailable'));
   if (!_hasSingleInstanceLock) return;
+  await configStore.init().catch(error => logError(`config load failed: ${error?.code || error?.message || error}`));
   statisticsReady = configStore.loadHistory().then(history => uploadStatistics.init(history));
   await statisticsReady.catch(error => debugLog(`statistics init failed: ${error.message}`));
   statisticsTimer = setInterval(() => { void uploadStatistics.flush().catch(error => debugLog(`statistics save failed: ${error.message}`)); }, 5000);
@@ -3662,8 +3663,8 @@ ipcMain.handle('import-upload-log', async () => {
   return { entries, path: filePaths[0] };
 });
 
-ipcMain.handle('copy-to-clipboard', (_event, text) => {
-  clipboard.writeText(text);
+ipcMain.handle('copy-to-clipboard', async (_event, text) => {
+  await clipboard.writeText(text);
   return true;
 });
 
@@ -4301,6 +4302,7 @@ async function startMcpService() {
     getSystemMetrics: args => systemMetrics.snapshot(args),
     getGrants: () => mcpService?.store.value.grants || [], trashFile: file => require('electron').shell.trashItem(file), canWrite: assertConfigWriteAllowed,
     getCapabilities: () => mcpService?.capabilities() || [],
+    grantDirectory: (directory, options) => mcpService.grantDirectory(directory, options),
     getProtectedPaths: () => [app.getPath('userData'), configStore.filePath, configStore.historyPath, configStore.automationCompletionPath],
     getInstallationId: () => mcpService?.store.value.identity?.installationId,
     getRuntimeDiagnostics: () => ({
@@ -4338,7 +4340,7 @@ ipcMain.on('mcp:reply', (event, payload) => {
 });
 ipcMain.handle('mcp:configure', async (event, args) => {
   if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService) throw new Error('MCP_ACCESS_DENIED');
-  if (args?.enabled && (args.capabilities?.includes('secrets') || (args.capabilities?.includes('updates') && !mcpService.capabilities().includes('updates')) || !mcpService.active)) {
+  if (args?.enabled && (args.capabilities?.includes('secrets') || (args.capabilities?.includes('full_access') && !mcpService.capabilities().includes('full_access')) || (args.capabilities?.includes('updates') && !mcpService.capabilities().includes('updates')) || !mcpService.active)) {
     const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'MCP-Zugriff / MCP access', message: 'MCP-Zugriff mit diesen Berechtigungen aktivieren? / Enable MCP with these capabilities?',
       detail: String(args.capabilities?.join(', ') || '').slice(0, 100), buttons: ['Abbrechen / Cancel', 'Aktivieren / Enable'], defaultId: 0, cancelId: 0, noLink: true });
     if (result.response !== 1) return mcpService.state();
@@ -4350,9 +4352,9 @@ ipcMain.handle('mcp:rotate', async event => {
   const result = await dialog.showMessageBox(mainWindow, { type: 'warning', message: shellText('MCP-Zugang erneuern? Der bisherige Code wird ungültig.', 'Rotate MCP access? The previous code becomes invalid.'), buttons: ['Abbrechen / Cancel', 'Erneuern / Rotate'], defaultId: 0, cancelId: 0, noLink: true });
   return result.response === 1 ? mcpService.rotate() : mcpService.state();
 });
-ipcMain.handle('mcp:copy-code', event => {
+ipcMain.handle('mcp:copy-code', async event => {
   if (!isTrustedOnlineBackupIpcEvent(event) || !mcpService?.active) throw new Error('MCP_ACCESS_DENIED');
-  clipboard.writeText(mcpService.store.code());
+  await clipboard.writeText(mcpService.store.code());
   return true;
 });
 ipcMain.handle('mcp:add-grant', async event => {

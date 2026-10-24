@@ -39,6 +39,7 @@ const sourceFiles = [
   'lib/log-mode.js',
   'lib/log-policy.js',
   'lib/log-rotation.js',
+  'lib/matroska-attachments.js',
   'lib/mcp-access.js',
   'lib/mcp-app.js',
   'lib/mcp-diagnostics.js',
