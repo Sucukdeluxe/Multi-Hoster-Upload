@@ -672,17 +672,38 @@ async function loadAutomationEvidenceSnapshot() {
       throw new Error(`${localizeUiText(label)}: ${automationErrorDetail(error)}`);
     }
   };
-  const [history, uploadLog, automationCompletions] = await Promise.all([
+  const [history, uploadLog, automationCompletions, automationDismissals] = await Promise.all([
     readEvidence('Verlauf konnte nicht gelesen werden', () => window.api.getHistory()),
     readEvidence('Upload-Log konnte nicht gelesen werden', () => window.api.readOwnUploadLog()),
-    readEvidence('Abschlussnachweis konnte nicht gelesen werden', () => typeof window.api.getAutomationCompletions === 'function' ? window.api.getAutomationCompletions() : Promise.resolve([]))
+    readEvidence('Abschlussnachweis konnte nicht gelesen werden', () => typeof window.api.getAutomationCompletions === 'function' ? window.api.getAutomationCompletions() : Promise.resolve([])),
+    readEvidence('Entfernte Automatik-Dateien konnten nicht gelesen werden', () => typeof window.api.getAutomationDismissals === 'function' ? window.api.getAutomationDismissals() : Promise.resolve([]))
   ]);
-  return { history, uploadLog, automationCompletions };
+  return { history, uploadLog, automationCompletions, automationDismissals };
 }
 
 function invalidateAutomationEvidenceSnapshot() {
   automationEvidenceSnapshotGeneration++;
   automationEvidenceSnapshotCache = null;
+}
+
+async function dismissRemovedAutomationJobs(jobs) {
+  const entries = window.AutomationControl.automationDismissalsForRemovedJobs(jobs);
+  if (entries.length === 0 || typeof window.api.dismissAutomationFiles !== 'function') return;
+  try {
+    await window.api.dismissAutomationFiles(entries);
+  } catch {
+    showCopyToast('Entfernte Automatik-Dateien konnten nicht gespeichert werden.', 7000, 'warning');
+  } finally {
+    invalidateAutomationEvidenceSnapshot();
+  }
+}
+
+function undismissAutomationFiles(paths) {
+  const list = (Array.isArray(paths) ? paths : []).filter(Boolean);
+  if (list.length === 0 || typeof window.api.undismissAutomationFiles !== 'function') return Promise.resolve();
+  return window.api.undismissAutomationFiles(list)
+    .catch(() => {})
+    .finally(() => invalidateAutomationEvidenceSnapshot());
 }
 
 async function loadReusableAutomationEvidenceSnapshot() {
@@ -722,7 +743,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
   const selectedHosters = Array.from(new Set((Array.isArray(options.selectedHosters) ? options.selectedHosters : folderSettings.hosters || [])
     .map(value => String(value || '').trim())
     .filter(Boolean)));
-  const { history, uploadLog, automationCompletions } = options.evidenceSnapshot || await loadAutomationEvidenceSnapshot();
+  const { history, uploadLog, automationCompletions, automationDismissals } = options.evidenceSnapshot || await loadAutomationEvidenceSnapshot();
   const inspection = await window.api.inspectImportFiles(
     matched,
     _pendingFiles.filter(file => !ownedPendingPaths.has(normalizeAutomationPath(file.path))).map(file => file.path)
@@ -743,6 +764,15 @@ async function evaluateAutomationCandidates(files, options = {}) {
   });
   const processedPaths = new Set(processed.processedPaths.map(normalizeAutomationPath));
   for (const path of processedPaths) reasons.set(path, processed.reasons[path] || 'processed');
+  const dismissalState = window.AutomationControl.classifyAutomationDismissals({
+    candidates: inspectedCandidates.filter(candidate => !currentPaths.has(normalizeAutomationPath(candidate.path))),
+    dismissals: automationDismissals
+  });
+  for (const path of dismissalState.dismissedPaths.map(normalizeAutomationPath)) {
+    processedPaths.add(path);
+    reasons.set(path, 'dismissed');
+  }
+  if (dismissalState.stalePaths.length > 0 && options.dryRun !== true) undismissAutomationFiles(dismissalState.stalePaths);
   const metadata = new Map(matched.map(candidate => [normalizeAutomationPath(candidate.path), candidate]));
   const inspectionDuplicatePaths = new Set((Array.isArray(inspection?.duplicates) ? inspection.duplicates : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
   const unavailablePaths = new Set((Array.isArray(inspection?.unavailable) ? inspection.unavailable : []).map(file => normalizeAutomationPath(file?.path)).filter(Boolean));
@@ -813,7 +843,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     name: candidate.name,
     reason: reasons.get(normalizeAutomationPath(candidate.path)) || 'unavailable'
   }));
-  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited']);
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited', 'dismissed']);
   const summary = {
     found: candidates.length,
     filterMatched: matched.length,
@@ -821,6 +851,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     processedByCompletion: ledgerProcessedPaths.size,
     processedByHistory: classifications.filter(entry => entry.reason === 'history').length,
     processedByUploadLog: classifications.filter(entry => entry.reason === 'upload-log').length,
+    dismissedByUser: dismissalState.dismissedPaths.length,
     inQueue: classifications.filter(entry => entry.reason === 'in-queue' || entry.reason === 'inspection-duplicate').length,
     filterRejected: classifications.filter(entry => entry.reason === 'filter-rejected').length,
     unavailable: unavailablePaths.size,
@@ -831,7 +862,7 @@ async function evaluateAutomationCandidates(files, options = {}) {
     availableSlots,
     deferredFiles: deferredFiles.length
   };
-  if (options.dryRun !== true) window.api.debugLog(`automation-eval trigger=${String(options.trigger || 'watcher')} found=${summary.found} admitted=${admittedFiles.length} completion=${summary.processedByCompletion} history=${summary.processedByHistory} log=${summary.processedByUploadLog} queue=${summary.inQueue} filter=${summary.filterRejected} unavailable=${summary.unavailable} sizeLimitedJobs=${summary.sizeLimitedJobs} deferred=${summary.deferredFiles}`);
+  if (options.dryRun !== true) window.api.debugLog(`automation-eval trigger=${String(options.trigger || 'watcher')} found=${summary.found} admitted=${admittedFiles.length} completion=${summary.processedByCompletion} history=${summary.processedByHistory} log=${summary.processedByUploadLog} dismissed=${summary.dismissedByUser} queue=${summary.inQueue} filter=${summary.filterRejected} unavailable=${summary.unavailable} sizeLimitedJobs=${summary.sizeLimitedJobs} deferred=${summary.deferredFiles}`);
   return freezeAutomationValue({
     dryRun: options.dryRun === true,
     trigger: String(options.trigger || 'watcher'),
@@ -970,7 +1001,7 @@ async function applyAutomationEvaluation(evaluation) {
   const classifications = (evaluation.classifications || []).map(entry => dynamicPaths.has(normalizeAutomationPath(entry.path))
     ? { ...entry, reason: dynamicReasons.get(normalizeAutomationPath(entry.path)) }
     : entry);
-  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited']);
+  const skippedReasons = new Set(['filter-rejected', 'processed', 'completion', 'history', 'upload-log', 'in-queue', 'inspection-duplicate', 'unavailable', 'size-limited', 'dismissed']);
   const telemetryDelta = {
     detected: classifications.length,
     queued: admittedFiles.length,
@@ -2739,6 +2770,7 @@ function coordinateImportEntries(entries, options = {}) {
       }
       const acceptedPaths = new Set(inspection.accepted.map(file => file.path));
       clearDedupKeysForPaths(acceptedPaths);
+      if (typeof options.folderMonitorAutoStart !== 'boolean') undismissAutomationFiles([...acceptedPaths]);
       _pendingFiles.push(...inspection.accepted);
       if (document.getElementById('hosterModal')?.style.display === 'flex') renderHosterModal();
       else openHosterModal();
@@ -4516,6 +4548,7 @@ async function handleContextAction(action, targetJobId = null) {
       return j && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server');
     });
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
+    await dismissRemovedAutomationJobs(queueJobs.filter(j => selectedJobIds.has(j.id)));
     const _deletedKeys = [];
     queueJobs = queueJobs.filter(j => {
       if (selectedJobIds.has(j.id)) {
@@ -4543,6 +4576,7 @@ async function handleContextAction(action, targetJobId = null) {
       await window.api.cancelUpload();
       uploading = false;
     }
+    await dismissRemovedAutomationJobs(queueJobs);
     queueJobs.forEach(j => removeJobFromIndex(j));
     queueJobs = [];
     selectedJobIds.clear();
@@ -4565,6 +4599,7 @@ async function handleContextAction(action, targetJobId = null) {
       .filter(j => j.hoster === hoster && (j.status === 'uploading' || j.status === 'queued' || j.status === 'retrying' || j.status === 'getting-server' || j.status === 'preview'))
       .map(j => j.id);
     if (activeIds.length > 0) await window.api.cancelSelectedJobs(activeIds);
+    await dismissRemovedAutomationJobs(queueJobs.filter(j => j.hoster === hoster));
     // Remove ALL jobs for this hoster
     queueJobs = queueJobs.filter(j => {
       if (j.hoster === hoster) { removeJobFromIndex(j); return false; }

@@ -150,6 +150,9 @@ contextBridge.exposeInMainWorld('api', {
   automationGetStatus: () => ipcRenderer.invoke('automation:get-status'),
   getAutomationCompletions: () => ipcRenderer.invoke('automation:get-completions'),
   recordAutomationCompletions: (entries) => ipcRenderer.invoke('automation:record-completions', entries),
+  getAutomationDismissals: () => ipcRenderer.invoke('automation:get-dismissals'),
+  dismissAutomationFiles: (entries) => ipcRenderer.invoke('automation:dismiss-files', entries),
+  undismissAutomationFiles: (paths) => ipcRenderer.invoke('automation:undismiss-files', paths),
   automationPauseAfterActive: () => ipcRenderer.invoke('automation:pause-after-active'),
   automationResume: () => ipcRenderer.invoke('automation:resume'),
   onFolderMonitorNewFiles: (callback) => {

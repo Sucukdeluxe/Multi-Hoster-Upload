@@ -49,7 +49,7 @@ const { UploadStatistics } = require('./lib/upload-statistics');
 const { createCollectors } = require('./lib/diagnostics-collectors');
 const { buildSessionReport, buildSessionReportCsv } = require('./lib/session-report');
 const { inspectImportEntries, inspectReadableImportPath } = require('./lib/import-preflight');
-const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion } = require('./lib/automation-control');
+const { normalizeAutomationSettings, automationCompletionKey, createAutomationCompletionWriter, isPathWithinAutomationFolder, normalizeAutomationCompletion, normalizeAutomationDismissal } = require('./lib/automation-control');
 const { McpService } = require('./lib/mcp-service');
 const { createMcpApp } = require('./lib/mcp-app');
 const { requiresMcpConfirmation } = require('./lib/mcp-tools');
@@ -4121,6 +4121,25 @@ ipcMain.handle('automation:record-completions', async (_event, entries) => {
   const normalized = source.map(normalizeAutomationCompletion);
   if (source.length === 0 || normalized.some(entry => !entry)) throw new Error('Automatik-Abschlussnachweise sind ungültig');
   await configStore.saveAutomationCompletions(normalized);
+  return true;
+});
+
+ipcMain.handle('automation:get-dismissals', () => {
+  return configStore.loadAutomationDismissals();
+});
+
+ipcMain.handle('automation:dismiss-files', async (_event, entries) => {
+  const source = Array.isArray(entries) ? entries.slice(0, 5000) : [];
+  const normalized = source.map(normalizeAutomationDismissal);
+  if (source.length === 0 || normalized.some(entry => !entry)) throw new Error('Entfernte Automatik-Dateien sind ungültig');
+  await configStore.addAutomationDismissals(normalized);
+  return true;
+});
+
+ipcMain.handle('automation:undismiss-files', async (_event, paths) => {
+  const source = Array.isArray(paths) ? paths.slice(0, 5000).filter(value => typeof value === 'string' && value.trim()) : [];
+  if (source.length === 0) return true;
+  await configStore.removeAutomationDismissals(source);
   return true;
 });
 

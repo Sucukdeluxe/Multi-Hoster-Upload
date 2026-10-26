@@ -79,6 +79,7 @@
       const jobs = select(args);
       if (jobs.some(job => !['preview', 'done', 'error', 'skipped', 'aborted'].includes(job.status))) throw new Error('CANCEL_ACTIVE_JOBS_FIRST');
       await guard();
+      await dismissRemovedAutomationJobs(jobs);
       const ids = new Set(jobs.map(job => job.id));
       jobs.forEach(job => removeJobFromIndex(job)); queueJobs = queueJobs.filter(job => !ids.has(job.id));
       redraw(); await persistQueueStateNow(); return { removed: jobs.length };
