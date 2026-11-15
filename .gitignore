@@ -31,3 +31,7 @@ recovered-online-key*.txt
 mcp-access.json
 mcp-access.json.*.tmp
 mcp-disabled.marker
+
+!/tests/
+/tests/*
+!/tests/build-dependency-compatibility.test.js
