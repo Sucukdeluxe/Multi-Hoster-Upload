@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
       - name: Lint application sources
         run: npm run lint
+      - name: Verify builder file matching
+        run: node --test tests/build-dependency-compatibility.test.js
       - name: Audit all dependencies
         run: npm audit
       - run: npm run dist
