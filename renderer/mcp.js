@@ -18,6 +18,7 @@
     if (jobs.length !== ids.size) throw new Error('JOB_NOT_FOUND');
     return jobs;
   };
+  const removable = job => ['preview', 'done', 'error', 'skipped', 'aborted'].includes(job.status) || (job.status === 'queued' && !uploading);
   const handlers = {
     state: async () => ({ source: 'live', stale: false, uploading, queueCount: queueJobs.length, selectedFileCount: selectedFiles.length, selectedHosters: getSelectedHosters(), counts: queueJobs.reduce((out, job) => { out[job.status] = (out[job.status] || 0) + 1; return out; }, {}) }),
     refresh,
@@ -77,14 +78,14 @@
     },
     'queue-remove': async (args, guard) => {
       const jobs = select(args);
-      if (jobs.some(job => !['preview', 'done', 'error', 'skipped', 'aborted'].includes(job.status))) throw new Error('CANCEL_ACTIVE_JOBS_FIRST');
+      if (jobs.some(job => !removable(job))) throw new Error('CANCEL_ACTIVE_JOBS_FIRST');
       await guard();
       await dismissRemovedAutomationJobs(jobs);
       const ids = new Set(jobs.map(job => job.id));
       jobs.forEach(job => removeJobFromIndex(job)); queueJobs = queueJobs.filter(job => !ids.has(job.id));
       redraw(); await persistQueueStateNow(); return { removed: jobs.length };
     },
-    'queue-clear': async (args, guard) => handlers['queue-remove']({ jobIds: queueJobs.filter(job => ['preview', 'done', 'error', 'skipped', 'aborted'].includes(job.status)).map(job => job.id) }, guard)
+    'queue-clear': async (args, guard) => handlers['queue-remove']({ jobIds: queueJobs.filter(removable).map(job => job.id) }, guard)
   };
   window.api.onMcpCancel(id => { cancelled.add(id); if (cancelled.size > 128) cancelled.delete(cancelled.values().next().value); });
   window.api.onMcpAction(async request => {
