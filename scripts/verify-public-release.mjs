@@ -131,6 +131,7 @@ const sourceFiles = [
   'services/backup-api/package.json',
   'services/backup-api/src/cli.mjs',
   'services/backup-api/src/server.mjs',
+  'tests/build-dependency-compatibility.test.js',
 ];
 const screenshotFiles = [
   'assets/product-overview.png',
