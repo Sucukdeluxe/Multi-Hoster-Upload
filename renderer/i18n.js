@@ -829,6 +829,8 @@
     ['Kein Ordnerpfad angegeben', 'No folder path was provided'],
     ['Clouddrop: Datei ist leer', 'Clouddrop: The file is empty'],
     ['Clouddrop: MEGA hat keine Abschluss-Kennung geliefert', 'Clouddrop: MEGA did not return a completion handle'],
+    ['Clouddrop: Upload wurde vom Administrator abgebrochen', 'Clouddrop: The upload was cancelled by the administrator'],
+    ['Clouddrop: Upload wurde auf dem Server beendet', 'Clouddrop: The upload was ended on the server'],
     ['Clouddrop: Keine fileId in Upload-Antwort', 'Clouddrop: No fileId in the upload response'],
     ['Clouddrop: Keine sessionId von /upload/init', 'Clouddrop: No sessionId from /upload/init'],
     ['Clouddrop: Keine fileId im Job-Ergebnis', 'Clouddrop: No fileId in the job result'],
