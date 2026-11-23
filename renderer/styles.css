@@ -5353,6 +5353,14 @@ input[type="checkbox"] {
   margin-bottom: 0;
 }
 
+.settings-grid-mini.automation-main-switch {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-grid-mini.automation-main-switch .checkbox-row label {
+  font-weight: 700;
+}
+
 .settings-subpage .settings-row.automation-field-row {
   display: grid;
   grid-template-columns: 210px minmax(0, 1fr);

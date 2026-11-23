@@ -6620,7 +6620,7 @@ function renderSettings() {
   const pageDefinitions = [
     { id: 'allgemein', label: 'Allgemein', group: 'base', icon: 'sliders', description: 'Fenster, Sprache und Updates', search: 'fenster window vordergrund foreground always on top drop target oberfläche interface updates update aktualisierung version language sprache' },
     { id: 'uploads', label: 'Uploads', group: 'base', icon: 'upload', description: 'Leistung und Warteschlange', search: 'upload queue warteschlange waiting fertig completed completion abschluss entfernen remove parallel geschwindigkeit speed limit fortsetzen resume wiederherstellen restore hoster' },
-    { id: 'automatik', label: 'Automatik', group: 'base', icon: 'clock', description: 'Wiederholungen und Ordner', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
+    { id: 'automatik', label: 'Automatik', group: 'base', icon: 'clock', description: 'Ordner und Wiederholungen', search: 'automatisch automation automatic retry wiederholen ordner folder monitor überwachen watch dateierweiterungen extensions unterordner subfolders duplikate duplicates' },
     { id: 'benachrichtigungen', label: 'Benachrichtigungen', group: 'connections', icon: 'bell', description: 'Meldungen und Webhooks', search: 'benachrichtigungen notifications webhook discord meldung message ping erwähnung mention batch fertig completed' },
     { id: 'logs', label: 'Logs & Support', group: 'management', icon: 'files', description: 'Protokolle und Supportpakete', search: 'log logs protokoll logging debug verbose diagnose diagnostics support paket package datei file ordner folder' },
     { id: 'remote', label: 'MCP-Fernzugriff', group: 'connections', icon: 'monitor', description: 'Zugriff und Freigaben', search: 'remote control fernsteuerung mcp diagnose diagnostics access zugriff lesen read berechtigungen permissions verbindung connection client' },
@@ -6775,7 +6775,7 @@ function renderSettings() {
   `;
 
   pages.automatik.innerHTML = `
-      ${pageHeader('Automatik', 'Wiederholungen und überwachte Ordner für unbeaufsichtigte Uploads.')}
+      ${pageHeader('Automatik', 'Überwachte Ordner und Wiederholungen für unbeaufsichtigte Uploads.')}
       <section class="automation-status-card" id="automationStatusCard" aria-live="polite">
         <div class="automation-status-header">
           <div class="automation-status-controls">
@@ -6809,22 +6809,14 @@ function renderSettings() {
         </div>
       </section>
       <div class="automation-form-fields">
-      <div class="settings-section-label">Unbeaufsichtigter Betrieb</div>
-      <div class="settings-row automation-retry-row automation-field-row">
-        <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
-        <div class="automation-retry-control automation-field-control">
-          <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
-          <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
-        </div>
-      </div>
-      <div class="settings-row automation-retry-row automation-field-row">
-        <label for="autoRetryDelayMinInput">Wartezeit zwischen Runden</label>
-        <div class="automation-retry-control automation-field-control">
-          <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
-          <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
-        </div>
-      </div>
       <div class="settings-section-label">Ordnerüberwachung</div>
+      <div class="settings-grid-mini automation-main-switch">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
+          <label for="fmEnabledInput">Ordnerüberwachung aktivieren</label>
+          <input type="checkbox" class="settings-autosave" id="fmEnabledInput" ${fm.enabled ? 'checked' : ''}>
+          ${folderMonitorHelp('enabled', 'Startet die Überwachung nach dem Speichern, wenn ein Ordner ausgewählt ist.')}
+        </div>
+      </div>
       <div class="settings-row automation-field-row">
         <label for="fmFolderPathInput">Ordnerpfad</label>
         <div class="automation-inline-controls automation-folder-controls">
@@ -6832,20 +6824,39 @@ function renderSettings() {
         <button class="btn btn-xs btn-secondary" id="fmChooseFolderBtn">Wählen</button>
         </div>
       </div>
-      <div class="settings-row automation-capacity-row automation-field-row">
-        <label for="fmQueueLimitInput">Maximale automatische Queue-Größe</label>
-        <div class="automation-field-control">
-        <input type="number" class="hs-input settings-autosave" id="fmQueueLimitInput" value="${normalizedFm.queueLimitJobs}" min="0" step="1">
-        <span class="hint">0 = unbegrenzt</span>
+      <div class="settings-grid-mini">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
+          <label for="fmRecursiveInput">Unterordner einbeziehen</label>
+          <input type="checkbox" class="settings-autosave" id="fmRecursiveInput" ${fm.recursive ? 'checked' : ''}>
+          ${folderMonitorHelp('recursive', 'Überwacht zusätzlich alle Unterordner des ausgewählten Ordners.')}
+        </div>
+        <div class="settings-row checkbox-row folder-monitor-help-row">
+          <label for="fmIncludeExistingInput">Vorhandene Dateien einmalig einlesen</label>
+          <input type="checkbox" class="settings-autosave" id="fmIncludeExistingInput" ${fm.includeExisting ? 'checked' : ''}>
+          ${folderMonitorHelp('existing', 'Bezieht beim Start bereits vorhandene Dateien ein. Bereits hochgeladene Dateien werden weiterhin übersprungen. Regelmäßige Abgleiche prüfen den gesamten Ordner erneut.')}
         </div>
       </div>
-      <div class="settings-row automation-interval-row automation-field-row">
-        <label for="fmReconcileIntervalInput">Abgleichintervall</label>
-        <span class="automation-select-control">
-        <select class="hs-input settings-autosave" id="fmReconcileIntervalInput">
-          ${[1, 5, 15, 30, 60].map(value => `<option value="${value}" ${normalizedFm.reconcileIntervalMinutes === value ? 'selected' : ''}>${value === 1 ? '1 Minute' : `${value} Minuten`}</option>`).join('')}
-        </select>
-        </span>
+      <div class="settings-section-label">Hoster-Vorauswahl ${folderMonitorHelp('hosters', 'Legt die Upload-Ziele für Dateien aus der Ordnerüberwachung fest. Ohne Auswahl ist eine manuelle Bestätigung erforderlich.')}</div>
+      <div class="settings-grid-mini">
+        ${configuredAccounts.map(({ name }) => `
+        <div class="settings-row checkbox-row">
+          <label>${escapeHtml(name)}</label>
+          <input type="checkbox" class="settings-autosave fm-hoster-checkbox" data-fm-hoster="${name}" ${(fm.hosters || []).includes(name) ? 'checked' : ''}>
+        </div>`).join('')}
+      </div>
+      ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Vorauswahl = manuelle Hoster-Auswahl für neu erkannte Dateien.</p>'}
+      <div class="settings-section-label">Verhalten</div>
+      <div class="settings-grid-mini">
+        <div class="settings-row checkbox-row folder-monitor-help-row">
+          <label for="fmAutoStartInput">Auto-Upload starten</label>
+          <input type="checkbox" class="settings-autosave" id="fmAutoStartInput" ${fm.autoStart !== false ? 'checked' : ''}>
+          ${folderMonitorHelp('auto-start', 'Startet neu erkannte Dateien automatisch. Ohne diese Option werden sie nur zur Warteschlange hinzugefügt.')}
+        </div>
+        <div class="settings-row checkbox-row folder-monitor-help-row">
+          <label for="fmSkipDuplicatesInput">Duplikate überspringen</label>
+          <input type="checkbox" class="settings-autosave" id="fmSkipDuplicatesInput" ${fm.skipDuplicates !== false ? 'checked' : ''}>
+          ${folderMonitorHelp('duplicates', 'Ignoriert wiederholte Erkennungen desselben Dateipfads während der aktuellen Überwachung.')}
+        </div>
       </div>
       <div class="settings-row automation-field-row">
         <label for="fmFilterModeInput">Dateierweiterungen</label>
@@ -6866,50 +6877,44 @@ function renderSettings() {
         <span class="hint">Warten bis Datei fertig geschrieben</span>
         </div>
       </div>
+      <div class="settings-section-label">Abgleich und Warteschlange</div>
+      <div class="settings-row automation-interval-row automation-field-row">
+        <label for="fmReconcileIntervalInput">Abgleichintervall</label>
+        <span class="automation-select-control">
+        <select class="hs-input settings-autosave" id="fmReconcileIntervalInput">
+          ${[1, 5, 15, 30, 60].map(value => `<option value="${value}" ${normalizedFm.reconcileIntervalMinutes === value ? 'selected' : ''}>${value === 1 ? '1 Minute' : `${value} Minuten`}</option>`).join('')}
+        </select>
+        </span>
       </div>
-      <div class="settings-section-label">Verhalten</div>
-      <div class="settings-grid-mini">
-        <div class="settings-row checkbox-row folder-monitor-help-row">
-          <label>Aktiviert</label>
-          <input type="checkbox" class="settings-autosave" id="fmEnabledInput" ${fm.enabled ? 'checked' : ''}>
-          ${folderMonitorHelp('enabled', 'Startet die Überwachung nach dem Speichern, wenn ein Ordner ausgewählt ist.')}
-        </div>
-        <div class="settings-row checkbox-row folder-monitor-help-row">
-          <label>Unterordner einbeziehen</label>
-          <input type="checkbox" class="settings-autosave" id="fmRecursiveInput" ${fm.recursive ? 'checked' : ''}>
-          ${folderMonitorHelp('recursive', 'Überwacht zusätzlich alle Unterordner des ausgewählten Ordners.')}
-        </div>
-        <div class="settings-row checkbox-row folder-monitor-help-row">
-          <label>Vorhandene Dateien einmalig einlesen</label>
-          <input type="checkbox" class="settings-autosave" id="fmIncludeExistingInput" ${fm.includeExisting ? 'checked' : ''}>
-          ${folderMonitorHelp('existing', 'Bezieht beim Start bereits vorhandene Dateien ein. Bereits hochgeladene Dateien werden weiterhin übersprungen. Regelmäßige Abgleiche prüfen den gesamten Ordner erneut.')}
-        </div>
-        <div class="settings-row checkbox-row folder-monitor-help-row">
-          <label>Duplikate überspringen</label>
-          <input type="checkbox" class="settings-autosave" id="fmSkipDuplicatesInput" ${fm.skipDuplicates !== false ? 'checked' : ''}>
-          ${folderMonitorHelp('duplicates', 'Ignoriert wiederholte Erkennungen desselben Dateipfads während der aktuellen Überwachung.')}
-        </div>
-        <div class="settings-row checkbox-row folder-monitor-help-row">
-          <label>Auto-Upload starten</label>
-          <input type="checkbox" class="settings-autosave" id="fmAutoStartInput" ${fm.autoStart !== false ? 'checked' : ''}>
-          ${folderMonitorHelp('auto-start', 'Startet neu erkannte Dateien automatisch. Ohne diese Option werden sie nur zur Warteschlange hinzugefügt.')}
+      <div class="settings-row automation-capacity-row automation-field-row">
+        <label for="fmQueueLimitInput">Maximale automatische Queue-Größe</label>
+        <div class="automation-field-control">
+        <input type="number" class="hs-input settings-autosave" id="fmQueueLimitInput" value="${normalizedFm.queueLimitJobs}" min="0" step="1">
+        <span class="hint">0 = unbegrenzt</span>
         </div>
       </div>
-      <div class="settings-section-label">Hoster-Vorauswahl ${folderMonitorHelp('hosters', 'Legt die Upload-Ziele für Dateien aus der Ordnerüberwachung fest. Ohne Auswahl ist eine manuelle Bestätigung erforderlich.')}</div>
-      <div class="settings-grid-mini">
-        ${configuredAccounts.map(({ name }) => `
-        <div class="settings-row checkbox-row">
-          <label>${escapeHtml(name)}</label>
-          <input type="checkbox" class="settings-autosave fm-hoster-checkbox" data-fm-hoster="${name}" ${(fm.hosters || []).includes(name) ? 'checked' : ''}>
-        </div>`).join('')}
-      </div>
-      ${configuredAccounts.length === 0 ? '<p class="hint" style="margin:0">Erst Accounts anlegen, dann hier auswählen.</p>' : '<p class="hint" style="margin:2px 0 0">Keine Vorauswahl = manuelle Hoster-Auswahl für neu erkannte Dateien.</p>'}
       <div class="settings-row automation-test-action-row">
         <div class="automation-test-action-copy">
           <strong>Ordnerüberwachung testen</strong>
           <span class="hint">Prüft den aktuellen Ordner schreibgeschützt mit denselben Regeln.</span>
         </div>
         <button class="btn btn-secondary" id="automationTestBtn" type="button">Ordnerüberwachung testen</button>
+      </div>
+      <div class="settings-section-label">Wiederholungen nach Fehlern</div>
+      <div class="settings-row automation-retry-row automation-field-row">
+        <label for="autoRetryRoundsInput">Automatische Wiederholungsrunden</label>
+        <div class="automation-retry-control automation-field-control">
+          <input type="number" class="hs-input settings-autosave" id="autoRetryRoundsInput" min="0" max="5" value="${Number(globalSettings.autoRetryRounds) || 0}">
+          <span class="hint">0 = aus. Nach Batch-Ende werden transiente Fehler (Netzwerk, Hoster-Flake) automatisch bis zu N Runden neu versucht.</span>
+        </div>
+      </div>
+      <div class="settings-row automation-retry-row automation-field-row">
+        <label for="autoRetryDelayMinInput">Wartezeit zwischen Runden</label>
+        <div class="automation-retry-control automation-field-control">
+          <input type="number" class="hs-input settings-autosave" id="autoRetryDelayMinInput" min="1" max="120" value="${Number(globalSettings.autoRetryDelayMin) || 5}">
+          <span class="hint">Minuten · jede weitere Runde wartet entsprechend länger</span>
+        </div>
+      </div>
       </div>
   `;
 
