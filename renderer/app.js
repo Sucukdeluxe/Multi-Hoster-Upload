@@ -445,8 +445,13 @@ function isStartableQueueJob(job) {
   return !!job && isStartableQueueStatus(job.status);
 }
 
+function isMissingSourceError(error) {
+  return /Datei nicht gefunden|ENOENT|no such file or directory/i.test(String(error || ''));
+}
+
 function isAutomaticallyStartableQueueJob(job) {
   if (!isStartableQueueJob(job)) return false;
+  if (isMissingSourceError(job.error)) return false;
   if (window.SourceCleanupPolicy?.isStagedSourceFile(job.file || job.fileName)) return false;
   if (job.status !== 'error' || !window.Stats) return true;
   return window.Stats.classifyErrorCategory(job.error) !== 'file-rejected';
